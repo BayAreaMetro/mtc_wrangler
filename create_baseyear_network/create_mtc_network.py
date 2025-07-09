@@ -376,7 +376,8 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
             nodes_gdf[col] = nodes_gdf[col].astype(str)
 
     WranglerLogger.info(f"1 nodes_gdf:\n{nodes_gdf}")
-    WranglerLogger.info(f"1 nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
+    WranglerLogger.info(f"1 {len(nodes_gdf)=:,} nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
+    WranglerLogger.info(f"1 nodes_gdf.index:\n{nodes_gdf.index}")
     write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
         OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_nodes{suffix}.hyper", 
@@ -421,27 +422,38 @@ if __name__ == "__main__":
         g = osmnx.graph_from_place(f'{county}, California, USA', network_type='all')
         WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
-        standardize_and_write(g, "_unsimplified")
+        (links_gdf, nodes_gdf) = standardize_and_write(g, "_unsimplified")
+        nodes_gdf.reset_index(names='osmid', inplace=True)
 
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs="EPSG:2227")
 
-        # TODO: Simplification should be access-based. Drive links shouldn't be simplified to pedestrian links and vice versa
+        # TODO: If we do simplification, it should be access-based. Drive links shouldn't be simplified to pedestrian links and vice versa
         # consolidate intersections
         # https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.simplification.consolidate_intersections
-        g = osmnx.simplification.consolidate_intersections(
-            g, 
-            tolerance=30, # feet
-            rebuild_graph=True,
-            dead_ends=True, # keep dead-ends
-            reconnect_edges=True,
-        )
-        WranglerLogger.info(f"After consolidating, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
+        # g = osmnx.simplification.consolidate_intersections(
+        #     g, 
+        #     tolerance=30, # feet
+        #     rebuild_graph=True,
+        #     dead_ends=True, # keep dead-ends
+        #     reconnect_edges=True,
+        # )
+        # WranglerLogger.info(f"After consolidating, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
-        (links_gdf, nodes_gdf) = standardize_and_write(g, "_simplified30ft")
+        # TODO: For now, we're retaining the result from the unsimplified for creating networks, but we could revisit
+        # standardize_and_write(g, "_simplified30ft")
 
+    # rename osmid to model_node_id; osmid is an int
+    nodes_gdf.rename(columns={'osmid':'model_node_id', 'x':'X', 'y':'Y'}, inplace=True)
+    WranglerLogger.debug(f"{len(nodes_gdf)=:,} nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
 
-    roadway_network = network_wrangler.roadway.network.RoadwayNetwork(nodes_df = nodes_gdf, links_df = links_gdf)
+    # create roadway network
+    roadway_network =  network_wrangler.load_roadway_from_dataframes(
+        links_df=links_gdf,
+        nodes_df=nodes_gdf,
+        shapes_df=links_gdf
+    )
+    WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
 
     # Read a GTFS network (not wrangler_flavored)
     gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False)
