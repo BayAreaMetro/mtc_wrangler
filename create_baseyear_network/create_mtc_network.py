@@ -85,13 +85,60 @@ OSM_WAY_TAGS = {
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
 }
 
-def get_min_lane_value(lane):
+def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
+    """Standardize the lanes value in the links GeoFataFrame.
     """
-    When multiple values are present, return the minimum value.
-    """
-    if isinstance(lane, list):
-        return min(lane)
-    return lane
+    WranglerLogger.debug(f"standardize_lanes_value()")
+    # oneway is always a bool
+    # reversed is a bool or a list
+    links_gdf['oneway_type']   = links_gdf['oneway'].apply(type).astype(str)
+    links_gdf['reversed_type'] = links_gdf['reversed'].apply(type).astype(str)
+    WranglerLogger.debug(f"links_gdf[['oneway_type','reversed_type']].value_counts():\n{links_gdf[['oneway_type','reversed_type']].value_counts()}")
+
+    WranglerLogger.debug(f"reversed_type is list:\n{links_gdf.loc[ links_gdf.reversed.apply(type) == list]}")
+    # it looks like reversed is sometimes [False, True] but these are typically in pairs where one of them is the reverse of the other
+    # For links with reverse=[False, True]: these come in pairs, with reversed A and B values for each pair
+    # pair them up and then set reverse=True for one and reverse=False for the other
+    
+    # Find links where reversed is a list
+    list_reversed_mask = links_gdf['reversed'].apply(lambda x: isinstance(x, list))
+    if list_reversed_mask.any():
+        WranglerLogger.debug(f"Found {list_reversed_mask.sum()} links with reversed as list")
+        
+        # Process these links
+        list_reversed_links = links_gdf[list_reversed_mask].copy()
+        
+        # Create a set to track processed indices
+        processed_indices = set()
+        
+        for idx, row in list_reversed_links.iterrows():
+            if idx in processed_indices:
+                continue
+                
+            # Look for the paired link (with swapped A and B)
+            pair_mask = (links_gdf['A'] == row['B']) & (links_gdf['B'] == row['A']) & list_reversed_mask
+            
+            if pair_mask.any():
+                # Get the index of the paired link
+                pair_idx = links_gdf[pair_mask].index[0]
+                
+                # Set reversed=False for the first link and reversed=True for the paired link
+                links_gdf.at[idx, 'reversed'] = False
+                links_gdf.at[pair_idx, 'reversed'] = True
+                
+                # Mark both as processed
+                processed_indices.add(idx)
+                processed_indices.add(pair_idx)
+                
+                WranglerLogger.debug(f"Paired link {idx} (A={row['A']}, B={row['B']}) with {pair_idx}")
+            else:
+                # If no pair found, default to False
+                links_gdf.at[idx, 'reversed'] = False
+                WranglerLogger.debug(f"No pair found for link {idx} (A={row['A']}, B={row['B']}), setting reversed=False")
+
+        # after looping to fix
+        links_gdf['reversed_type'] = links_gdf['reversed'].apply(type).astype(str)
+        WranglerLogger.debug(f"links_gdf[['oneway_type','reversed_type']].value_counts():\n{links_gdf[['oneway_type','reversed_type']].value_counts()}")
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the highway value in the links GeoDataFrame.
@@ -331,6 +378,7 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     links_gdf.rename(columns={'u': 'A', 'v': 'B'}, inplace=True)
 
     standardize_highway_value(links_gdf)
+    standardize_lanes_value(links_gdf)
 
     WranglerLogger.debug(f"2 links_gdf:\n{links_gdf}")
     WranglerLogger.debug(f"2 links_gdf.dtypes:\n{links_gdf.dtypes}")
@@ -338,28 +386,17 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     for col in links_gdf.columns:
         # report on value counts for non-unique columns
         if col not in ['geometry', 'A', 'B', 'name', 'width','osm_link_id', 'length']:
-            WranglerLogger.info(f"column {col} has value_counts:\n{links_gdf[col].value_counts(dropna=False)}")
+            WranglerLogger.debug(f"column {col} has value_counts:\n{links_gdf[col].value_counts(dropna=False)}")
 
-        # convert types
-        if col in ['reversed', 'oneway']:
-            # replace NaN with -1
-            if len(links_gdf.loc[ pd.isnull(links_gdf[col])]) > 0:
-                links_gdf.loc[ pd.isnull(links_gdf[col]), col] = -1
-
-            # for list, choose first value
-            links_gdf[col] = links_gdf[col].apply(lambda x: x[0] if isinstance(x, list) and len(x) > 0 else x)
-
-            # convert to int
-            links_gdf[col] = links_gdf[col].astype(int)
         elif col in ['length']:
             # leave as float
             pass
         # A, B are too big for int64, so convert to str
-        # leave lanes to look at them
-        # leave geometry as is
-        elif col in ['A', 'B', 'name', 'width', 'osm_link_id', 'lanes']:
+        elif col in ['A', 'B']:
+            WranglerLogger.debug(f"column {col} has min={links_gdf[col].min():,} and max={links_gdf[col].max():,}")
             links_gdf[col] = links_gdf[col].astype(str)
-        elif col not in ['geometry']: 
+        # convert objects to strings but leave others as is
+        elif links_gdf[col].dtype == object:
             links_gdf[col] = links_gdf[col].astype(str)
 
     WranglerLogger.info(f"3 links_gdf:\n{links_gdf}")
@@ -400,13 +437,16 @@ if __name__ == "__main__":
     parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
     args = parser.parse_args()
 
-    INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.info.log"
-    DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.debug.log"
+    # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.info.log"
+    # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.debug.log"
+    INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_{args.county}.info.log"
+    DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_{args.county}.debug.log"
 
     network_wrangler.setup_logging(
         info_log_filename=INFO_LOG,
         debug_log_filename=DEBUG_LOG,
         std_out_level="info",
+        file_mode='w'
     )
     WranglerLogger.info(f"Created by {__file__}")
 
