@@ -35,6 +35,68 @@ def create_line(row):
   end_point = shapely.geometry.Point(row['X_B'], row['Y_B'])
   return shapely.geometry.LineString([start_point, end_point])
 
+def fix_link_lanes(links_gdf: pd.DataFrame, lanes_col: str):
+  """Makes lanes columns network_wrangler 1.0 compliant.
+
+  Updates the given column so that it only contains integers, and scoped values are set into sc_[lanes_col]
+  Args:
+      links_df (pd.DataFrame): the RoadLinks DataFrame
+      lanes_col (str): 'lanes' or 'ML_lanes'
+  """
+  lanes_dict_list = links_gdf.loc[links_gdf[lanes_col].apply(lambda x: isinstance(x, dict)), lanes_col].to_list()
+  # Make the dictionaries unique by converting to string representations, getting unique ones, then converting back
+  unique_lanes_dict_list = []
+  seen_dicts = set()
+  for lanes_dict in lanes_dict_list:
+    dict_str = str(sorted(lanes_dict.items()))
+    if dict_str not in seen_dicts:
+      seen_dicts.add(dict_str)
+      unique_lanes_dict_list.append(lanes_dict)
+  lanes_dict_list = unique_lanes_dict_list
+
+  WranglerLogger.debug(f"fix_link_lanes(lanes_col={lanes_col})")
+  WranglerLogger.debug(f"{len(lanes_dict_list)=}  lanes_dict_list:{lanes_dict_list}")
+  # lanes_dict_list: [
+  # {'default': 3, 'timeofday': [{'time': [21600, 36000], 'value': 2}, {'time': [54000, 68400], 'value': 2}]}, 
+  # {'default': 3, 'timeofday': [{'time': [54000, 68400], 'value': 2}]}, 
+  # {'default': 3, 'timeofday': [{'time': [21600, 36000], 'value': 2}]}, 
+  # etc
+  for lanes_dict in lanes_dict_list:
+    WranglerLogger.debug(f"  lanes_dict: {lanes_dict}")
+    # create sc_lanes from this dictionary
+    # network_wrangler/api_roadway/#network_wrangler.models.roadway.tables.RoadLinksTable
+    sc_lanes = None
+    if ('timeofday' in lanes_dict) and (len(lanes_dict['timeofday'])>0):
+      sc_lanes = []
+      for my_dict in lanes_dict['timeofday']:
+        sc_dict = {}
+        sc_dict['timespan'] = [
+          time.strftime("%H:%M", time.gmtime(my_dict['time'][0])),
+          time.strftime("%H:%M", time.gmtime(my_dict['time'][1]))
+        ]
+        sc_dict['value'] = my_dict['value']
+        sc_lanes.append(sc_dict)
+        # e.g. [{'timespan':['12:00':'15:00'], 'value': 3},{'timespan':['15:00':'19:00'], 'value': 2}]
+    # set them
+    links_gdf.loc[ links_gdf[lanes_col]==lanes_dict, lanes_col] = lanes_dict['default']
+    # since sc_lanes may be a dictionary, make copies of it for each row to set or
+    # pandas will error that the length doesn't match the rows
+    links_gdf.loc[ links_gdf[lanes_col]==lanes_dict, f'sc_{lanes_col}'] = [sc_lanes] * len(links_gdf[links_gdf[lanes_col] == lanes_dict])
+
+  # Set null, blank, '0' or 'NaN' to 0
+  links_gdf.loc[ links_gdf[lanes_col].isnull(), lanes_col ] = 0
+  links_gdf.loc[ links_gdf[lanes_col] == '',    lanes_col ] = 0
+  links_gdf.loc[ links_gdf[lanes_col] == '0',   lanes_col ] = 0
+  links_gdf.loc[ links_gdf[lanes_col] == 'NaN', lanes_col ] = 0
+
+  # reset and check
+  links_gdf[f'{lanes_col}_type'] = links_gdf[lanes_col].apply(type).astype(str)
+  WranglerLogger.debug(f"links_gdf[['{lanes_col}_type]']].value_counts():")
+  WranglerLogger.debug(links_gdf[[f'{lanes_col}_type']].value_counts())
+
+  WranglerLogger.debug(f"strings value_counts():")
+  WranglerLogger.debug(links_gdf.loc[ links_gdf[lanes_col].apply(lambda x: isinstance(x, str)), lanes_col])
+
 if __name__ == "__main__":
   pd.options.display.max_columns = None
   pd.options.display.width = None
@@ -131,46 +193,23 @@ if __name__ == "__main__":
   links_gdf['managed'] = links_gdf['managed'].astype(int)
   WranglerLogger.debug(f"links_gdf['managed'].value_counts():\n{links_gdf['managed'].value_counts()}")
 
-  # convert lanes, ML_lanes to integers; scoped versions will be in sc_lanes, sc_ML_lanes
-  links_gdf['lanes_type']       = links_gdf['lanes'].apply(type).astype(str)
-  links_gdf['ML_lanes_type']    = links_gdf['ML_lanes'].apply(type).astype(str)
-  links_gdf['ML_useclass_type'] = links_gdf['ML_useclass'].apply(type).astype(str)
-  WranglerLogger.debug(f"links_gdf[['lanes_type','ML_lanes_type','ML_useclass_type']].value_counts():\n{links_gdf[['lanes_type','ML_lanes_type','ML_useclass_type']].value_counts()}")
+  # The columns lanes and ML_lanes are a combination of types, including dictionaries representing time-scoped versions
+  # Fix this according to network_wrangler standard
+  fix_link_lanes(links_gdf, lanes_col='lanes')
+  fix_link_lanes(links_gdf, lanes_col='ML_lanes')
 
-  WranglerLogger.debug(f"links_gdf[links_gdf['ML_lanes'].apply(lambda x: isinstance(x, dict))]:\n{links_gdf.loc[links_gdf['ML_lanes'].apply(lambda x: isinstance(x, dict))]}")
-  WranglerLogger.debug(f"links_gdf[links_gdf['lanes'].apply(lambda x: isinstance(x, dict))]:\n{links_gdf.loc[links_gdf['lanes'].apply(lambda x: isinstance(x, dict))]}")
-
-  lanes_dict_list = links_gdf.loc[links_gdf['lanes'].apply(lambda x: isinstance(x, dict)), 'lanes'].to_list()
-  WranglerLogger.debug(f"lanes_dict_list: {lanes_dict_list}")
-  # lanes_dict_list: [
-  # {'default': 3, 'timeofday': [{'time': [21600, 36000], 'value': 2}, {'time': [54000, 68400], 'value': 2}]}, 
-  # {'default': 3, 'timeofday': [{'time': [54000, 68400], 'value': 2}]}, 
-  # {'default': 3, 'timeofday': [{'time': [21600, 36000], 'value': 2}]}, 
-  # etc
-  for lanes_dict in lanes_dict_list:
-    WranglerLogger.debug(f"lanes_dict: {lanes_dict}")
-    # create sc_lanes from this dictionary
-    # network_wrangler/api_roadway/#network_wrangler.models.roadway.tables.RoadLinksTable
-    sc_lanes = None
-    if ('timeofday' in lanes_dict) and (len(lanes_dict['timeofday'])>0):
-      sc_lanes = []
-      for my_dict in lanes_dict['timeofday']:
-        sc_dict = {}
-        sc_dict['timespan'] = [
-          time.strftime("%H:%M", time.gmtime(my_dict['time'][0])),
-          time.strftime("%H:%M", time.gmtime(my_dict['time'][1]))
-        ]
-        sc_dict['value'] = my_dict['value']
-        sc_lanes.append(sc_dict)
-        # e.g. [{'timespan':['12:00':'15:00'], 'value': 3},{'timespan':['15:00':'19:00'], 'value': 2}]
-    # set them
-    links_gdf.loc[ links_gdf['lanes']==lanes_dict, 'lanes'   ] = lanes_dict['default']
-    links_gdf.loc[ links_gdf['lanes']==lanes_dict, 'sc_lanes'] = sc_lanes
-  # reset and check
-  links_gdf['lanes_type'] = links_gdf['lanes'].apply(type).astype(str)
-  WranglerLogger.debug(f"links_gdf[['lanes_type']].value_counts():\n{links_gdf[['lanes_type']].value_counts()}")
-  
-  WranglerLogger.debug(f"links_gdf.loc[links_gdf.lanes==lanes_dict, ['lanes','ML_lanes','ML_useclass']]:\n{links_gdf.loc[links_gdf.lanes==lanes_dict, ['lanes','ML_lanes','ML_useclass']]}")
+  # network_wrangler requires distance field
+  links_gdf_feet = links_gdf.to_crs(epsg=2227)
+  links_gdf_feet['distance'] = links_gdf_feet.length / 5280 # distance is in miles
+  # join back to links_gdf
+  links_gdf = links_gdf.merge(
+    right=links_gdf_feet[['A','B','distance']],
+    how='left',
+    on=['A','B'],
+    validate='one_to_one'
+  )
+  # shape_id is a string
+  links_gdf['shape_id'] = links_gdf.model_link_id.astype(str)
 
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
@@ -179,6 +218,7 @@ if __name__ == "__main__":
     shapes_df=links_gdf
   )
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
+  WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
   # Read a GTFS network (not wrangler_flavored)
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False)
