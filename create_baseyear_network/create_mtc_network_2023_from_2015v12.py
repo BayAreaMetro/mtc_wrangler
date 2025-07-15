@@ -16,6 +16,7 @@ import pandas as pd
 import geopandas as gpd
 import shapely.geometry
 
+import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 
@@ -220,6 +221,16 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
+  tableau_utils.write_geodataframe_as_tableau_hyper(
+    links_gdf,
+    OUTPUT_DIR / "mtc_links.hyper",
+    "mtc_links"
+  )
+  tableau_utils.write_geodataframe_as_tableau_hyper(
+    nodes_gdf,
+    OUTPUT_DIR / "mtc_nodes.hyper",
+    "mtc_nodes"
+  )
   # Read a GTFS network (not wrangler_flavored)
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")

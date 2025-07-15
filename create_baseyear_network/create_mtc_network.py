@@ -18,8 +18,8 @@ import networkx
 import osmnx
 import pandas as pd
 import geopandas as gpd
-import shapely
 
+import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 
@@ -130,7 +130,7 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
                 processed_indices.add(idx)
                 processed_indices.add(pair_idx)
                 
-                WranglerLogger.debug(f"Paired link {idx} (A={row['A']}, B={row['B']}) with {pair_idx}")
+                # WranglerLogger.debug(f"Paired link {idx} (A={row['A']}, B={row['B']}) with {pair_idx}")
             else:
                 # If no pair found, default to False
                 links_gdf.at[idx, 'reversed'] = False
@@ -139,6 +139,42 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
         # after looping to fix
         links_gdf['reversed_type'] = links_gdf['reversed'].apply(type).astype(str)
         WranglerLogger.debug(f"links_gdf[['oneway_type','reversed_type']].value_counts():\n{links_gdf[['oneway_type','reversed_type']].value_counts()}")
+        WranglerLogger.debug(f"links_gdf[['oneway','reversed']].value_counts():\n{links_gdf[['oneway','reversed']].value_counts()}")
+
+    # rename lanes to lanes_orig since it may not be what we want for two-way links
+    links_gdf.rename(columns={'lanes': 'lanes_orig'}, inplace=True)
+
+    # split links_gdf into reversed and not reversed and make a wide dataframe with both
+    links_gdf_notreversed = links_gdf[links_gdf['reversed'] == False].copy()  # this should be longer
+    links_gdf_reversed    = links_gdf[links_gdf['reversed'] == True].copy()
+
+    # for the links in links_gdf_reversed, make all columns have suffix '_rev'
+    rev_col_rename = {}
+    for col in links_gdf_reversed.columns.to_list():
+        rev_col_rename[col] = f"{col}_rev"
+    links_gdf_reversed.rename(columns=rev_col_rename, inplace=True)
+
+    links_gdf_wide = pd.merge(
+        left=links_gdf_notreversed,
+        right=links_gdf_reversed,
+        how='outer',
+        left_on=['A','B'],
+        right_on=['B_rev','A_rev'],
+        indicator=True,
+        validate='one_to_one'
+    )
+    WranglerLogger.debug(f"links_gdf_wide['_merge'].value_counts():\n{links_gdf_wide['_merge'].value_counts()}")
+    LANES_COLS = ['A','B','drive_access','oneway','reversed','name','lanes','lanes_orig','lanes:backward','lanes:forward','lanes:both_ways','lanes:bus','lanes:bus:forward','lanes:bus:backward']
+    LANES_COLS += [f"{col}_rev" for col in LANES_COLS if col not in ['A','B']]
+
+    # set the lanes from lanes:forward or lanes:backward
+    links_gdf['lanes'    ] = -1 # initialize to -1
+    links_gdf['lanes_rev'] = -1
+    links_gdf_wide.loc[ links_gdf_wide['lanes:forward' ].notna() and links_gdf_wide.reversed == False, 'lanes'    ] = links_gdf_wide['lanes:forward']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() and links_gdf_wide.reversed == False, 'lanes_rev'] = links_gdf_wide['lanes:backward']
+
+    WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS]}")
+    WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts()}")
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the highway value in the links GeoDataFrame.
@@ -269,89 +305,7 @@ def get_roadway_value(highway):
         return highway[0]
     return highway
 
-def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
-    """
-    Write a GeoDataFrame to a Tableau Hyper file.
-    See https://tableau.github.io/hyper-db/docs/guides/hyper_file/geodata
 
-    This is kind of a bummer because it would be preferrable to write to something more standard, like
-    geofeather or geoparquet, but Tableau doesn't support those formats yet.
-    """
-    WranglerLogger.info(f"write_geodataframe_as_tableau_hyper: {filename=}, {tablename=}")
-    # make a copy since we'll be messing with the columns
-    gdf = in_gdf.copy()
-
-    import tableauhyperapi
-
-    # Check if all entries in the geometry column are valid Shapely geometries
-    is_valid_geometry = gdf['geometry'].apply(lambda x: isinstance(x, shapely.geometry.base.BaseGeometry))
-    WranglerLogger.info(f"is_valid_geometry: \n{is_valid_geometry.value_counts()}")
-
-    # Convert geometry to WKT format
-    gdf['geometry_wkt'] = gdf['geometry'].apply(lambda geom: geom.wkt)
-    # drop this column, we don't need it any longer
-    gdf.drop(columns='geometry', inplace=True)
-
-    table_def = tableauhyperapi.TableDefinition(tablename)
-    # Inserter definition contains the column definition for the values that are inserted
-    # The data input has two text values Name and Location_as_text
-    inserter_definition = []
-
-    # Specify the conversion of SqlType.text() to SqlType.tabgeography() using CAST expression in Inserter.ColumnMapping.
-    # Specify all columns into which data is inserter in Inserter.ColumnMapping list. For columns that do not require any
-    # transformations provide only the names
-    column_mappings = []
-  
-
-    for col in gdf.columns:
-        # geometry_wkt to be converted from WKT to geometry via column_mapping
-        if col == 'geometry_wkt':
-            table_def.add_column('geometry', tableauhyperapi.SqlType.tabgeography())
-            # insert as geometry_wkt
-            inserter_definition.append(tableauhyperapi.TableDefinition.Column(
-                name='geometry_wkt', type=tableauhyperapi.SqlType.text(), nullability=tableauhyperapi.NOT_NULLABLE))
-            # convert to geometry
-            column_mappings.append(tableauhyperapi.Inserter.ColumnMapping(
-                'geometry', f'CAST({tableauhyperapi.escape_name("geometry_wkt")} AS TABLEAU.TABGEOGRAPHY)'))
-            continue
-
-        if gdf[col].dtype == bool:
-            table_def.add_column(col, tableauhyperapi.SqlType.bool())
-            inserter_definition.append(tableauhyperapi.TableDefinition.Column(
-                name=col, type=tableauhyperapi.SqlType.bool()))  
-        elif gdf[col].dtype == int:
-            table_def.add_column(col, tableauhyperapi.SqlType.int())
-            inserter_definition.append(tableauhyperapi.TableDefinition.Column(
-                name=col, type=tableauhyperapi.SqlType.int()))
-        elif gdf[col].dtype == float:
-            table_def.add_column(col, tableauhyperapi.SqlType.double())
-            inserter_definition.append(tableauhyperapi.TableDefinition.Column(
-                name=col, type=tableauhyperapi.SqlType.double()))
-        else:
-            table_def.add_column(col, tableauhyperapi.SqlType.text())
-            inserter_definition.append(tableauhyperapi.TableDefinition.Column(
-                name=col, type=tableauhyperapi.SqlType.text()))
-            # convert others to text
-            gdf[col] = gdf[col].astype(str)
-        column_mappings.append(col)
-
-    WranglerLogger.info(f"table_def={table_def}")
-    WranglerLogger.info(f"column_mappings={column_mappings}")
-
-    table_name = tableauhyperapi.TableName("Extract", tablename)
-    with tableauhyperapi.HyperProcess(telemetry=tableauhyperapi.Telemetry.SEND_USAGE_DATA_TO_TABLEAU) as hyper:
-        with tableauhyperapi.Connection(endpoint=hyper.endpoint, database=filename, 
-                                        create_mode=tableauhyperapi.CreateMode.CREATE_AND_REPLACE) as connection:
-            connection.catalog.create_schema("Extract")
-            connection.catalog.create_table(table_def)
-
-            with tableauhyperapi.Inserter(connection, table_def, columns=column_mappings, inserter_definition=inserter_definition) as inserter:
-
-                inserter.add_rows(rows=gdf.itertuples(index=False, name=None))
-                inserter.execute()
-
-
-    WranglerLogger.info(f"GeoDataFrame written to {filename} as Tableau Hyper file.")
 
 def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Standardizes fields and writes the given graph's links and nodes to Tableau.
@@ -402,7 +356,7 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     WranglerLogger.info(f"3 links_gdf:\n{links_gdf}")
     WranglerLogger.info(f"3 links_gdf.dtypes:\n{links_gdf.dtypes}")
 
-    write_geodataframe_as_tableau_hyper(
+    tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
         OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_links{suffix}.hyper", 
         f"{args.county.replace(' ','_').lower()}_links{suffix}"
@@ -415,7 +369,7 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     WranglerLogger.info(f"1 nodes_gdf:\n{nodes_gdf}")
     WranglerLogger.info(f"1 {len(nodes_gdf)=:,} nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
     WranglerLogger.info(f"1 nodes_gdf.index:\n{nodes_gdf.index}")
-    write_geodataframe_as_tableau_hyper(
+    tableau_utils.write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
         OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_nodes{suffix}.hyper", 
         f"{args.county}_nodes{suffix}"
