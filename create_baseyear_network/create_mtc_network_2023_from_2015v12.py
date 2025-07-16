@@ -212,6 +212,9 @@ if __name__ == "__main__":
   # shape_id is a string
   links_gdf['shape_id'] = links_gdf.model_link_id.astype(str)
 
+  # are there links with distance==0?
+  WranglerLogger.debug(f"links_gdf.loc[ links_gdf['distance'] == 0 ]:\n{links_gdf.loc[ links_gdf['distance'] == 0 ]}")
+
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=links_gdf,
@@ -222,7 +225,7 @@ if __name__ == "__main__":
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
-    links_gdf,
+    links_gdf.loc[ links_gdf['distance'] > 0],  # drop distance==0 links because otherwise this will error
     OUTPUT_DIR / "mtc_links.hyper",
     "mtc_links"
   )

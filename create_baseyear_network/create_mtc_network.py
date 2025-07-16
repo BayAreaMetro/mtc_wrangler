@@ -13,6 +13,7 @@ References:
 import argparse
 import datetime
 import pathlib
+import statistics
 
 import networkx
 import osmnx
@@ -85,6 +86,20 @@ OSM_WAY_TAGS = {
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
 }
 
+def get_min_or_median_value(lane):
+    """
+    For lists with two items, use min. For lists with more, use median.
+    """
+    if isinstance(lane, list):
+        lane = [int(s) for s in lane]
+        if len(lane) == 2:
+            return int(min(lane))
+        else:
+            return int(statistics.median(lane))
+    elif isinstance(lane, str):
+        return int(lane)
+    return lane
+
 def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the lanes value in the links GeoFataFrame.
     """
@@ -143,6 +158,19 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
 
     # rename lanes to lanes_orig since it may not be what we want for two-way links
     links_gdf.rename(columns={'lanes': 'lanes_orig'}, inplace=True)
+    # lanes columns are sometimes a list of lanes, e.g. [2,3,4]. For lists with two items, use min. For lists with more, use median.
+    LANES_COLS = [
+        'lanes_orig',
+        'lanes:backward',
+        'lanes:forward',
+        'lanes:both_ways',
+        'lanes:bus',
+        'lanes:bus:forward','lanes:bus:backward'
+    ]
+    for lane_col in LANES_COLS:
+        WranglerLogger.debug(f"Before get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
+        links_gdf[lane_col] = links_gdf[lane_col].apply(get_min_or_median_value)
+        WranglerLogger.debug(f"After get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
 
     # split links_gdf into reversed and not reversed and make a wide dataframe with both
     links_gdf_notreversed = links_gdf[links_gdf['reversed'] == False].copy()  # this should be longer
@@ -170,11 +198,12 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
     # set the lanes from lanes:forward or lanes:backward
     links_gdf['lanes'    ] = -1 # initialize to -1
     links_gdf['lanes_rev'] = -1
-    links_gdf_wide.loc[ links_gdf_wide['lanes:forward' ].notna() and links_gdf_wide.reversed == False, 'lanes'    ] = links_gdf_wide['lanes:forward']
-    links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() and links_gdf_wide.reversed == False, 'lanes_rev'] = links_gdf_wide['lanes:backward']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:forward' ].notna() & (links_gdf_wide.reversed == False), 'lanes'    ] = links_gdf_wide['lanes:forward']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() & (links_gdf_wide.reversed == False), 'lanes_rev'] = links_gdf_wide['lanes:backward']
 
     WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS]}")
-    WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts()}")
+    WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts(dropna=False)}")
+    raise
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the highway value in the links GeoDataFrame.
