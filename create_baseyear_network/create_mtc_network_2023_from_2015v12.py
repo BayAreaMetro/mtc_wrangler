@@ -237,4 +237,5 @@ if __name__ == "__main__":
   # Read a GTFS network (not wrangler_flavored)
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
-    
+  feed = network_wrangler.utils.transit.create_feed_from_gtfs_model(gtfs_model, roadway_network)
+
