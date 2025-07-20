@@ -22,12 +22,12 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
 
     # Check if all entries in the geometry column are valid Shapely geometries
     is_valid_geometry = gdf['geometry'].apply(lambda x: isinstance(x, shapely.geometry.base.BaseGeometry))
-    WranglerLogger.info(f"is_valid_geometry: \n{is_valid_geometry.value_counts()}")
+    WranglerLogger.debug(f"is_valid_geometry: \n{is_valid_geometry.value_counts()}")
 
     # count coordinates per geometry
     gdf['coord_count'] = gdf.geometry.count_coordinates()
-    WranglerLogger.info(f"gdf.coord_count.value_counts(): \n{gdf.coord_count.value_counts()}")
-    WranglerLogger.info(f"gdf.coord_count==1: \n{gdf.loc[gdf.coord_count == 1]}")
+    WranglerLogger.debug(f"gdf.coord_count.value_counts(): \n{gdf.coord_count.value_counts()}")
+    WranglerLogger.debug(f"gdf.coord_count==1: \n{gdf.loc[gdf.coord_count == 1]}")
 
     # Convert geometry to WKT format
     gdf['geometry_wkt'] = gdf['geometry'].apply(lambda geom: geom.wkt)
@@ -77,8 +77,8 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
             gdf[col] = gdf[col].astype(str)
         column_mappings.append(col)
 
-    WranglerLogger.info(f"table_def={table_def}")
-    WranglerLogger.info(f"column_mappings={column_mappings}")
+    WranglerLogger.debug(f"table_def={table_def}")
+    WranglerLogger.debug(f"column_mappings={column_mappings}")
 
     table_name = tableauhyperapi.TableName("Extract", tablename)
     with tableauhyperapi.HyperProcess(telemetry=tableauhyperapi.Telemetry.SEND_USAGE_DATA_TO_TABLEAU) as hyper:
