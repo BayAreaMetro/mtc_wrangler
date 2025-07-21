@@ -249,6 +249,9 @@ if __name__ == "__main__":
   calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
   WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
   calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
+  WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+  # make service_id a string
+  calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
   service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
   WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
 
