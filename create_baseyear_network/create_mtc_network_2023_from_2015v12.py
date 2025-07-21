@@ -11,6 +11,7 @@ References:
   * https://github.com/Metropolitan-Council/met_council_wrangler/blob/main/notebooks
 """
 import datetime, time
+import getpass
 import pathlib
 import pandas as pd
 import geopandas as gpd
@@ -22,11 +23,18 @@ from network_wrangler import WranglerLogger
 
 INPUT_2015v12 = pathlib.Path("E:\\Box\\Modeling and Surveys\\Development\\Travel Model Two Conversion\\Model Inputs\\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
+OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_2015v12")
+USERNAME = getpass.getuser()
+if USERNAME=="lmz":
+  INPUT_2015v12 = pathlib.Path("../../standard_network_after_project_cards")
+  INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-10")
+  OUTPUT_DIR = pathlib.Path("../../output_from_2015v12")
+
+
 NODES_FILE = INPUT_2015v12 / "v12_node.geojson"
 LINKS_FILE = INPUT_2015v12 / "v12_link.json"
 SHAPES_FILE = INPUT_2015v12 / "v12_shape.geojson"
 
-OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_2015v12")
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 def create_line(row):
@@ -215,6 +223,8 @@ if __name__ == "__main__":
   # are there links with distance==0?
   WranglerLogger.debug(f"links_gdf.loc[ links_gdf['distance'] == 0 ]:\n{links_gdf.loc[ links_gdf['distance'] == 0 ]}")
 
+  #TODO: This includes connectors so it's technically a model roadway network rather than a roadway network...
+  
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=links_gdf,
@@ -226,16 +236,125 @@ if __name__ == "__main__":
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
     links_gdf.loc[ links_gdf['distance'] > 0],  # drop distance==0 links because otherwise this will error
-    OUTPUT_DIR / "mtc_links.hyper",
+    (OUTPUT_DIR / "mtc_links.hyper").resolve(),
     "mtc_links"
   )
   tableau_utils.write_geodataframe_as_tableau_hyper(
     nodes_gdf,
-    OUTPUT_DIR / "mtc_nodes.hyper",
+    (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
     "mtc_nodes"
   )
+  # the gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
+  # gtfs_model doesn't include calendar_dates so read this ourselves
+  calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
+  WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+  calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
+  service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+  WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
+
   # Read a GTFS network (not wrangler_flavored)
-  gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False)
+  gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
-  feed = network_wrangler.utils.transit.create_feed_from_gtfs_model(gtfs_model, roadway_network)
+
+
+  from network_wrangler.utils.transit import create_feed_from_gtfs_model
+  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network)
+  
+  # Create TransitNetwork from the Feed and validate it
+  WranglerLogger.info("Creating TransitNetwork from Feed")
+  from network_wrangler.transit.network import TransitNetwork
+  
+  transit_network = TransitNetwork(feed=feed)
+  WranglerLogger.info(f"TransitNetwork created with {len(transit_network.feed.stops)} stops and {len(transit_network.feed.routes)} routes")
+  
+  # Set the roadway network - wrap in try/catch since this can fail
+  try:
+    transit_network.road_net = roadway_network
+    WranglerLogger.info("Successfully associated roadway network with transit network")
+  except Exception as e:
+    WranglerLogger.warning(f"Could not associate roadway network: {e}")
+    WranglerLogger.warning("Continuing without roadway network association")
+  
+  # Run validation
+  WranglerLogger.info("Running TransitNetwork validation")
+  validation_issues = []
+  
+  try:
+    # Run feed validation first
+    WranglerLogger.info("Validating Feed structure...")
+    feed_valid = transit_network.feed.validate()
+    if feed_valid:
+      WranglerLogger.info("Feed validation passed")
+    else:
+      WranglerLogger.warning("Feed validation found issues")
+      validation_issues.append("Feed validation issues")
+    
+    # Check feed-roadway consistency
+    WranglerLogger.info("Checking feed-roadway consistency...")
+    try:
+      consistency_result = transit_network.validate_feed_road_consistency()
+      if consistency_result:
+        WranglerLogger.info("Feed-roadway consistency check passed")
+      else:
+        WranglerLogger.warning("Feed-roadway consistency check found issues")
+        validation_issues.append("Feed-roadway consistency issues")
+    except Exception as e:
+      WranglerLogger.warning(f"Feed-roadway consistency check error: {e}")
+      validation_issues.append(f"Feed-roadway consistency error: {e}")
+    
+    # Run full validation
+    try:
+      validation_result = transit_network.validate()
+      if validation_result is True or validation_result is None:
+        WranglerLogger.info("Full TransitNetwork validation completed")
+      else:
+        WranglerLogger.warning(f"Full validation returned: {validation_result}")
+        validation_issues.append(f"Full validation: {validation_result}")
+    except Exception as e:
+      WranglerLogger.warning(f"Full validation error: {e}")
+      validation_issues.append(f"Full validation error: {e}")
+      
+  except Exception as e:
+    WranglerLogger.error(f"TransitNetwork validation failed: {e}")
+    validation_issues.append(f"Validation failed: {e}")
+    # Log more details about the validation failure
+    import traceback
+    WranglerLogger.debug(traceback.format_exc())
+  
+  # Summary
+  if validation_issues:
+    WranglerLogger.warning(f"TransitNetwork validation completed with {len(validation_issues)} issues:")
+    for issue in validation_issues:
+      WranglerLogger.warning(f"  - {issue}")
+  else:
+    WranglerLogger.info("TransitNetwork validation completed successfully with no issues")
+  
+  # Save the transit network regardless of validation issues
+  WranglerLogger.info("Saving TransitNetwork to files")
+  transit_output_dir = OUTPUT_DIR / "transit_network"
+  transit_output_dir.mkdir(exist_ok=True)
+  
+  try:
+    # Write transit network tables
+    transit_network.write(transit_output_dir, file_format="csv")
+    WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
+  except Exception as e:
+    WranglerLogger.error(f"Failed to save transit network: {e}")
+    # Try to save the feed directly
+    WranglerLogger.info("Attempting to save Feed tables directly...")
+    try:
+      feed.write(transit_output_dir, file_format="csv")
+      WranglerLogger.info(f"Feed tables saved to {transit_output_dir}")
+    except Exception as e2:
+      WranglerLogger.error(f"Failed to save feed tables: {e2}")
+  
+  # Log summary statistics
+  WranglerLogger.info("=== Transit Network Summary ===")
+  WranglerLogger.info(f"Routes: {len(transit_network.feed.routes)}")
+  WranglerLogger.info(f"Stops: {len(transit_network.feed.stops)}")
+  WranglerLogger.info(f"Trips: {len(transit_network.feed.trips)}")
+  WranglerLogger.info(f"Stop Times: {len(transit_network.feed.stop_times)}")
+  WranglerLogger.info(f"Shapes: {len(transit_network.feed.shapes)}")
+  WranglerLogger.info(f"Frequencies: {len(transit_network.feed.frequencies)}")
+  WranglerLogger.info("===============================")
 
