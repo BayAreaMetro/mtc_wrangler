@@ -261,7 +261,17 @@ if __name__ == "__main__":
 
 
   from network_wrangler.utils.transit import create_feed_from_gtfs_model
-  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network)
+  
+  # Define time periods for frequency calculation: 3a-6a, 6a-10a, 10a-3p, 3p-7p, 7p-3a
+  time_periods = [
+    {'start_time': '03:00:00', 'end_time': '06:00:00'},  # 3a-6a
+    {'start_time': '06:00:00', 'end_time': '10:00:00'},  # 6a-10a
+    {'start_time': '10:00:00', 'end_time': '15:00:00'},  # 10a-3p
+    {'start_time': '15:00:00', 'end_time': '19:00:00'},  # 3p-7p
+    {'start_time': '19:00:00', 'end_time': '03:00:00'},  # 7p-3a (crosses midnight)
+  ]
+  
+  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network, time_periods)
   
   # Create TransitNetwork from the Feed and validate it
   WranglerLogger.info("Creating TransitNetwork from Feed")
