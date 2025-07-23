@@ -271,7 +271,8 @@ if __name__ == "__main__":
     {'start_time': '19:00:00', 'end_time': '03:00:00'},  # 7p-3a (crosses midnight)
   ]
   
-  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network, time_periods)
+  # Create feed with default 3-hour headway for routes with only one trip in a period
+  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network, time_periods, default_frequency_for_onetime_route=10800)
   
   # Create TransitNetwork from the Feed and validate it
   WranglerLogger.info("Creating TransitNetwork from Feed")
