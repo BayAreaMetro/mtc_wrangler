@@ -281,6 +281,54 @@ if __name__ == "__main__":
   transit_network = TransitNetwork(feed=feed)
   WranglerLogger.info(f"TransitNetwork created with {len(transit_network.feed.stops)} stops and {len(transit_network.feed.routes)} routes")
   
+  # debugging: check if any stops.stop_id or shapes.shape_mode_node_ids are not in the roadway network
+  stops_roadway_gdf = pd.merge(
+    left=feed.stops,
+    right=roadway_network.nodes_df,
+    how='outer',
+    left_on='stop_id',
+    right_on='model_node_id',
+    indicator=True,
+  )
+  stops_roadway_gdf = gpd.GeoDataFrame(stops_roadway_gdf)
+  WranglerLogger.debug(f"type(stops_roadway_gdf):\n{type(stops_roadway_gdf)}")
+  WranglerLogger.debug(f"stops_roadway_gdf._merge.value_counts():\n{stops_roadway_gdf._merge.value_counts()}")
+  WranglerLogger.debug(f"stops_roadway_gdf.loc[ stops_roadway_gdf._merge == 'left_only']:\n{stops_roadway_gdf.loc[ stops_roadway_gdf._merge == 'left_only']}")
+  WranglerLogger.debug(f"stops_roadway_gdf.loc[ stops_roadway_gdf._merge == 'both']:\n{stops_roadway_gdf.loc[ stops_roadway_gdf._merge == 'both']}")
+  # write this as a hyper
+  tableau_utils.write_geodataframe_as_tableau_hyper(
+    stops_roadway_gdf.loc[ stops_roadway_gdf._merge == 'both'],
+    (OUTPUT_DIR / "stops_roadway.hyper").resolve(),
+    "stops_roadway"
+  )
+
+  shapes_roadway_gdf = pd.merge(
+    left=feed.shapes,
+    right=roadway_network.nodes_df,
+    how='outer',
+    left_on='shape_model_node_id',
+    right_on='model_node_id',
+    indicator=True
+  )
+  shapes_roadway_gdf = gpd.GeoDataFrame(shapes_roadway_gdf)
+  WranglerLogger.debug(f"shapes_roadway_gdf._merge.value_counts():\n{shapes_roadway_gdf._merge.value_counts()}")
+  WranglerLogger.debug(f"shapes_roadway_gdf.loc[ stops_roadway_gdf._merge == 'left_only']:\n{shapes_roadway_gdf.loc[ shapes_roadway_gdf._merge == 'left_only']}")
+  WranglerLogger.debug(f"shapes_roadway_gdf.loc[ stops_roadway_gdf._merge == 'both']:\n{shapes_roadway_gdf.loc[ shapes_roadway_gdf._merge == 'both']}")
+  # write this as a hyper
+  tableau_utils.write_geodataframe_as_tableau_hyper(
+    shapes_roadway_gdf.loc[ shapes_roadway_gdf._merge == 'both'],
+    (OUTPUT_DIR / "shapes_roadway.hyper").resolve(),
+    "shapes_roadway"
+  )
+
+  # This is dont by setting the road_net to roadway_network but we'll call this explicitly so
+  # we can write out more useful debug data
+  missing_shape_links = network_wrangler.transit.validate.shape_links_without_road_links(feed.shapes, roadway_network.links_df)
+  WranglerLogger.debug(f"missing_shape_links:\n{missing_shape_links}")
+
+  missing_nodes = network_wrangler.transit.validate.transit_nodes_without_road_nodes(feed, roadway_network.nodes_df)
+  WranglerLogger.debug(f"missing_nodes:\n{missing_nodes}")
+
   # Set the roadway network - wrap in try/catch since this can fail
   try:
     transit_network.road_net = roadway_network
@@ -288,60 +336,6 @@ if __name__ == "__main__":
   except Exception as e:
     WranglerLogger.warning(f"Could not associate roadway network: {e}")
     WranglerLogger.warning("Continuing without roadway network association")
-  
-  # Run validation
-  WranglerLogger.info("Running TransitNetwork validation")
-  validation_issues = []
-  
-  try:
-    # Run feed validation first
-    WranglerLogger.info("Validating Feed structure...")
-    feed_valid = transit_network.feed.validate()
-    if feed_valid:
-      WranglerLogger.info("Feed validation passed")
-    else:
-      WranglerLogger.warning("Feed validation found issues")
-      validation_issues.append("Feed validation issues")
-    
-    # Check feed-roadway consistency
-    WranglerLogger.info("Checking feed-roadway consistency...")
-    try:
-      consistency_result = transit_network.validate_feed_road_consistency()
-      if consistency_result:
-        WranglerLogger.info("Feed-roadway consistency check passed")
-      else:
-        WranglerLogger.warning("Feed-roadway consistency check found issues")
-        validation_issues.append("Feed-roadway consistency issues")
-    except Exception as e:
-      WranglerLogger.warning(f"Feed-roadway consistency check error: {e}")
-      validation_issues.append(f"Feed-roadway consistency error: {e}")
-    
-    # Run full validation
-    try:
-      validation_result = transit_network.validate()
-      if validation_result is True or validation_result is None:
-        WranglerLogger.info("Full TransitNetwork validation completed")
-      else:
-        WranglerLogger.warning(f"Full validation returned: {validation_result}")
-        validation_issues.append(f"Full validation: {validation_result}")
-    except Exception as e:
-      WranglerLogger.warning(f"Full validation error: {e}")
-      validation_issues.append(f"Full validation error: {e}")
-      
-  except Exception as e:
-    WranglerLogger.error(f"TransitNetwork validation failed: {e}")
-    validation_issues.append(f"Validation failed: {e}")
-    # Log more details about the validation failure
-    import traceback
-    WranglerLogger.debug(traceback.format_exc())
-  
-  # Summary
-  if validation_issues:
-    WranglerLogger.warning(f"TransitNetwork validation completed with {len(validation_issues)} issues:")
-    for issue in validation_issues:
-      WranglerLogger.warning(f"  - {issue}")
-  else:
-    WranglerLogger.info("TransitNetwork validation completed successfully with no issues")
   
   # Save the transit network regardless of validation issues
   WranglerLogger.info("Saving TransitNetwork to files")
