@@ -138,10 +138,16 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"type(shapes_gdf)={type(shapes_gdf)} crs={shapes_gdf.crs}")
   WranglerLogger.debug(f"shapes_df.dtypes:\n{shapes_gdf.dtypes:}")
 
+  # make transit into an int instead of an object, default to 0
+  WranglerLogger.debug(f"Initial links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
+  links_df.transit = links_df.transit.fillna(0)
+  links_df.transit = links_df.transit.astype(bool)
+  WranglerLogger.debug(f"Updated links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
+
   # This is a model network and we'll come back to that later, but we're starting with roadway.
-  # So drop the TAZ and MAZ nodes, and the centroid connectors (FT=99)
-  WranglerLogger.debug(f"links_df.ft.value_counts(dropna=False)=\n{links_df.ft.value_counts(dropna=False)}")
-  road_links_df = links_df.loc[ links_df.ft != 99 ]
+  # So drop the TAZ and MAZ nodes, and the centroid connectors (FT=99, transit==False)
+  WranglerLogger.debug(f"links_df[['ft','transit']].value_counts(dropna=False)=\n{links_df[['ft','transit']].value_counts(dropna=False)}")
+  road_links_df = links_df.loc[ (links_df.ft != 99) | (links_df.transit == True) ]
   WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links from {len(links_df):,} model links")
 
   # filter out tap, taz, maz links
