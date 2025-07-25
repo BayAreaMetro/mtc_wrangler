@@ -44,7 +44,7 @@ def create_line(row):
   end_point = shapely.geometry.Point(row['X_B'], row['Y_B'])
   return shapely.geometry.LineString([start_point, end_point])
 
-def fix_link_lanes(links_gdf: pd.DataFrame, lanes_col: str):
+def fix_link_lanes(road_links_gdf: pd.DataFrame, lanes_col: str):
   """Makes lanes columns network_wrangler 1.0 compliant.
 
   Updates the given column so that it only contains integers, and scoped values are set into sc_[lanes_col]
@@ -52,7 +52,7 @@ def fix_link_lanes(links_gdf: pd.DataFrame, lanes_col: str):
       links_df (pd.DataFrame): the RoadLinks DataFrame
       lanes_col (str): 'lanes' or 'ML_lanes'
   """
-  lanes_dict_list = links_gdf.loc[links_gdf[lanes_col].apply(lambda x: isinstance(x, dict)), lanes_col].to_list()
+  lanes_dict_list = road_links_gdf.loc[road_links_gdf[lanes_col].apply(lambda x: isinstance(x, dict)), lanes_col].to_list()
   # Make the dictionaries unique by converting to string representations, getting unique ones, then converting back
   unique_lanes_dict_list = []
   seen_dicts = set()
@@ -87,24 +87,24 @@ def fix_link_lanes(links_gdf: pd.DataFrame, lanes_col: str):
         sc_lanes.append(sc_dict)
         # e.g. [{'timespan':['12:00':'15:00'], 'value': 3},{'timespan':['15:00':'19:00'], 'value': 2}]
     # set them
-    links_gdf.loc[ links_gdf[lanes_col]==lanes_dict, lanes_col] = lanes_dict['default']
+    road_links_gdf.loc[ road_links_gdf[lanes_col]==lanes_dict, lanes_col] = lanes_dict['default']
     # since sc_lanes may be a dictionary, make copies of it for each row to set or
     # pandas will error that the length doesn't match the rows
-    links_gdf.loc[ links_gdf[lanes_col]==lanes_dict, f'sc_{lanes_col}'] = [sc_lanes] * len(links_gdf[links_gdf[lanes_col] == lanes_dict])
+    road_links_gdf.loc[ road_links_gdf[lanes_col]==lanes_dict, f'sc_{lanes_col}'] = [sc_lanes] * len(road_links_gdf[road_links_gdf[lanes_col] == lanes_dict])
 
   # Set null, blank, '0' or 'NaN' to 0
-  links_gdf.loc[ links_gdf[lanes_col].isnull(), lanes_col ] = 0
-  links_gdf.loc[ links_gdf[lanes_col] == '',    lanes_col ] = 0
-  links_gdf.loc[ links_gdf[lanes_col] == '0',   lanes_col ] = 0
-  links_gdf.loc[ links_gdf[lanes_col] == 'NaN', lanes_col ] = 0
+  road_links_gdf.loc[ road_links_gdf[lanes_col].isnull(), lanes_col ] = 0
+  road_links_gdf.loc[ road_links_gdf[lanes_col] == '',    lanes_col ] = 0
+  road_links_gdf.loc[ road_links_gdf[lanes_col] == '0',   lanes_col ] = 0
+  road_links_gdf.loc[ road_links_gdf[lanes_col] == 'NaN', lanes_col ] = 0
 
   # reset and check
-  links_gdf[f'{lanes_col}_type'] = links_gdf[lanes_col].apply(type).astype(str)
-  WranglerLogger.debug(f"links_gdf[['{lanes_col}_type]']].value_counts():")
-  WranglerLogger.debug(links_gdf[[f'{lanes_col}_type']].value_counts())
+  road_links_gdf[f'{lanes_col}_type'] = road_links_gdf[lanes_col].apply(type).astype(str)
+  WranglerLogger.debug(f"road_links_gdf[['{lanes_col}_type]']].value_counts():")
+  WranglerLogger.debug(road_links_gdf[[f'{lanes_col}_type']].value_counts())
 
   WranglerLogger.debug(f"strings value_counts():")
-  WranglerLogger.debug(links_gdf.loc[ links_gdf[lanes_col].apply(lambda x: isinstance(x, str)), lanes_col])
+  WranglerLogger.debug(road_links_gdf.loc[ road_links_gdf[lanes_col].apply(lambda x: isinstance(x, str)), lanes_col])
 
 if __name__ == "__main__":
   pd.options.display.max_columns = None
@@ -138,23 +138,42 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"type(shapes_gdf)={type(shapes_gdf)} crs={shapes_gdf.crs}")
   WranglerLogger.debug(f"shapes_df.dtypes:\n{shapes_gdf.dtypes:}")
 
+  # This is a model network and we'll come back to that later, but we're starting with roadway.
+  # So drop the TAZ and MAZ nodes, and the centroid connectors (FT=99)
+  WranglerLogger.debug(f"links_df.ft.value_counts(dropna=False)=\n{links_df.ft.value_counts(dropna=False)}")
+  road_links_df = links_df.loc[ links_df.ft != 99 ]
+  WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links from {len(links_df):,} model links")
+
+  # filter out tap, taz, maz links
+  WranglerLogger.debug(f"road_links_df.roadway.value_counts(dropna=False)=\n{road_links_df.roadway.value_counts(dropna=False)}")
+  road_links_df = road_links_df.loc[road_links_df.roadway != 'tap']
+  road_links_df = road_links_df.loc[road_links_df.roadway != 'taz']
+  road_links_df = road_links_df.loc[road_links_df.roadway != 'maz']
+  WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links after dropping roadway=tap,taz,maz")
+
+  # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+  # MAZs and TAZs have node numbers < 1M
+  road_nodes_gdf = nodes_gdf.loc[ nodes_gdf.model_node_id > 999999 ]
+  WranglerLogger.info(f"Filtering to {len(road_nodes_gdf):,} road nodes from {len(nodes_gdf):,} model nodes")
+
   # Noting that 'id','fromIntersectionId','toIntersectionId' is not unicque
   # because there are a bunch with id='walktorailN' or 'tap_N', and fromIntersectionId/toIntersectionId=None
-  duplicates = links_df.loc[links_df.duplicated(subset=['id','fromIntersectionId','toIntersectionId'], keep=False)]
+  duplicates = road_links_df.loc[road_links_df.duplicated(subset=['id','fromIntersectionId','toIntersectionId'], keep=False)]
   WranglerLogger.debug(f"duplicated: len={len(duplicates):,}:\n{duplicates}")
 
-  links_df = pd.merge(
-    left=links_df,
+  road_links_df = pd.merge(
+    left=road_links_df,
     right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
     on=['id','fromIntersectionId','toIntersectionId'],
     how='left',
     indicator=True,
   )
   # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
-  WranglerLogger.debug(f"After merging with shapes_gdf, links_df[['_merge']].value_counts():\n{links_df[['_merge']].value_counts()}")
-  links_df.drop(columns=['_merge'], inplace=True)
+  # Use all nodes, not just road nodes
+  WranglerLogger.debug(f"After merging with shapes_gdf, road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
+  road_links_df.drop(columns=['_merge'], inplace=True)
 
-  no_geometry_links = links_df.loc[ pd.isnull(links_df.geometry) ]
+  no_geometry_links = road_links_df.loc[ pd.isnull(road_links_df.geometry) ]
   no_geometry_links = pd.merge(
     left=no_geometry_links,
     right=nodes_gdf[['model_node_id','X','Y']],
@@ -187,65 +206,66 @@ if __name__ == "__main__":
     'model_node_id_B','X_B','Y_B','_merge_B'], 
     inplace=True)
   
-  # create links_gdf now that we have geometry for everything
-  links_gdf = gpd.GeoDataFrame(pd.concat([
-    links_df.loc[ pd.notnull(links_df.geometry) ],
+  # create road_links_gdf now that we have geometry for everything
+  road_links_gdf = gpd.GeoDataFrame(pd.concat([
+    road_links_df.loc[ pd.notnull(road_links_df.geometry) ],
     no_geometry_links]),
     crs=shapes_gdf.crs)
-  WranglerLogger.debug(f"Created links_gdf with dtypes:\n{links_gdf.dtypes}")
-  WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
+  WranglerLogger.debug(f"Created road_links_gdf with dtypes:\n{road_links_gdf.dtypes}")
+  WranglerLogger.debug(f"road_links_gdf:\n{road_links_gdf}")
 
   # fill in missing managed values with 0
-  WranglerLogger.debug(f"links_gdf['managed'].value_counts():\n{links_gdf['managed'].value_counts()}")
-  WranglerLogger.debug(f"links_gdf['managed'].apply(type).value_counts():\n{links_gdf['managed'].apply(type).value_counts()}")
-  links_gdf.loc[links_gdf.managed == '', 'managed'] = 0 # blank -> 0
-  links_gdf['managed'] = links_gdf['managed'].astype(int)
-  WranglerLogger.debug(f"links_gdf['managed'].value_counts():\n{links_gdf['managed'].value_counts()}")
+  WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
+  WranglerLogger.debug(f"road_links_gdf['managed'].apply(type).value_counts():\n{road_links_gdf['managed'].apply(type).value_counts()}")
+  road_links_gdf.loc[road_links_gdf.managed == '', 'managed'] = 0 # blank -> 0
+  road_links_gdf['managed'] = road_links_gdf['managed'].astype(int)
+  WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
 
   # The columns lanes and ML_lanes are a combination of types, including dictionaries representing time-scoped versions
   # Fix this according to network_wrangler standard
-  fix_link_lanes(links_gdf, lanes_col='lanes')
-  fix_link_lanes(links_gdf, lanes_col='ML_lanes')
+  fix_link_lanes(road_links_gdf, lanes_col='lanes')
+  fix_link_lanes(road_links_gdf, lanes_col='ML_lanes')
 
   # network_wrangler requires distance field
-  links_gdf_feet = links_gdf.to_crs(epsg=2227)
-  links_gdf_feet['distance'] = links_gdf_feet.length / 5280 # distance is in miles
-  # join back to links_gdf
-  links_gdf = links_gdf.merge(
-    right=links_gdf_feet[['A','B','distance']],
+  road_links_gdf_feet = road_links_gdf.to_crs(epsg=2227)
+  road_links_gdf_feet['distance'] = road_links_gdf_feet.length / 5280 # distance is in miles
+  # join back to road_links_gdf
+  road_links_gdf = road_links_gdf.merge(
+    right=road_links_gdf_feet[['A','B','distance']],
     how='left',
     on=['A','B'],
     validate='one_to_one'
   )
   # shape_id is a string
-  links_gdf['shape_id'] = links_gdf.model_link_id.astype(str)
+  road_links_gdf['shape_id'] = road_links_gdf.model_link_id.astype(str)
 
   # are there links with distance==0?
-  WranglerLogger.debug(f"links_gdf.loc[ links_gdf['distance'] == 0 ]:\n{links_gdf.loc[ links_gdf['distance'] == 0 ]}")
+  WranglerLogger.debug(f"road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]:\n{road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]}")
 
   #TODO: This includes connectors so it's technically a model roadway network rather than a roadway network...
   
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
-    links_df=links_gdf,
-    nodes_df=nodes_gdf,
-    shapes_df=links_gdf
+    links_df=road_links_gdf,
+    nodes_df=road_nodes_gdf,
+    shapes_df=road_links_gdf
   )
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
-    links_gdf.loc[ links_gdf['distance'] > 0],  # drop distance==0 links because otherwise this will error
+    road_links_gdf.loc[ road_links_gdf['distance'] > 0],  # drop distance==0 links because otherwise this will error
     (OUTPUT_DIR / "mtc_links.hyper").resolve(),
     "mtc_links"
   )
   tableau_utils.write_geodataframe_as_tableau_hyper(
-    nodes_gdf,
+    road_nodes_gdf,
     (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
     "mtc_nodes"
   )
   # the gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
   # gtfs_model doesn't include calendar_dates so read this ourselves
+  # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
   calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
   WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
   calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
