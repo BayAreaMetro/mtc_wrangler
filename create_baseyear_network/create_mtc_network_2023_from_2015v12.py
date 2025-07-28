@@ -250,7 +250,32 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]:\n{road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]}")
 
   #TODO: This includes connectors so it's technically a model roadway network rather than a roadway network...
-  
+
+  # Before creating the RoadwayNetwork object, there are a few transit stops and links that are missing because they didn't
+  # exist in 2015.  Add these to the roadway network because we'll need them to be compatible.
+
+  # The gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
+  # gtfs_model doesn't include calendar_dates so read this ourselves
+  # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
+  calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
+  WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+  calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
+  WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+  # make service_id a string
+  calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
+  service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+  WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
+
+  # Read a GTFS network (not wrangler_flavored)
+  gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
+  WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
+
+  # routes (and their stops) to add to roadway nodes and links
+  ADD_ROUTES = {
+    'TF:TISF' # Treasure Island ferry stop
+  }
+  #TODO: gtfs_stop_id and stop_id_GTFS appears to be attributes but only the first is filled in; where does this get populated?
+
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=road_links_gdf,
@@ -270,21 +295,7 @@ if __name__ == "__main__":
     (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
     "mtc_nodes"
   )
-  # the gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
-  # gtfs_model doesn't include calendar_dates so read this ourselves
-  # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
-  calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
-  WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-  calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
-  WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-  # make service_id a string
-  calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-  service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-  WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
 
-  # Read a GTFS network (not wrangler_flavored)
-  gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
-  WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
 
   from network_wrangler.utils.transit import create_feed_from_gtfs_model
