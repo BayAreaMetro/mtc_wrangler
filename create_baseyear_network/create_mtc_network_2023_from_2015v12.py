@@ -20,6 +20,7 @@ import shapely.geometry
 import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
+from network_wrangler import write_transit
 
 INPUT_2015v12 = pathlib.Path("E:\\Box\\Modeling and Surveys\\Development\\Travel Model Two Conversion\\Model Inputs\\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
@@ -369,18 +370,11 @@ if __name__ == "__main__":
   transit_output_dir.mkdir(exist_ok=True)
   
   try:
-    # Write transit network tables
-    transit_network.write(transit_output_dir, file_format="csv")
+    # Write transit network tables using the correct function
+    write_transit(transit_network, out_dir=transit_output_dir, file_format="csv")
     WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
   except Exception as e:
     WranglerLogger.error(f"Failed to save transit network: {e}")
-    # Try to save the feed directly
-    WranglerLogger.info("Attempting to save Feed tables directly...")
-    try:
-      feed.write(transit_output_dir, file_format="csv")
-      WranglerLogger.info(f"Feed tables saved to {transit_output_dir}")
-    except Exception as e2:
-      WranglerLogger.error(f"Failed to save feed tables: {e2}")
   
   # Log summary statistics
   WranglerLogger.info("=== Transit Network Summary ===")
