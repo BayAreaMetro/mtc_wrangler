@@ -13,6 +13,7 @@ References:
 import datetime, time
 import getpass
 import pathlib
+import typing
 import pandas as pd
 import geopandas as gpd
 import shapely.geometry
@@ -24,11 +25,14 @@ from network_wrangler import write_transit
 
 INPUT_2015v12 = pathlib.Path("E:\\Box\\Modeling and Surveys\\Development\\Travel Model Two Conversion\\Model Inputs\\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
+COUNTY_SHAPEFILE = pathlib.Path("M:\\Data\\Census\\Geography\\tl_2010_06_county10\\tl_2010_06_county10_9CountyBayArea.shp")
 OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_2015v12")
+
 USERNAME = getpass.getuser()
 if USERNAME=="lmz":
   INPUT_2015v12 = pathlib.Path("../../standard_network_after_project_cards")
   INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-10")
+  COUNTY_SHAPEFILE = pathlib.Path("../../tl_2010_06_county10/tl_2010_06_county10_9CountyBayArea.shp")
   OUTPUT_DIR = pathlib.Path("../../output_from_2015v12")
 
 
@@ -106,6 +110,120 @@ def fix_link_lanes(road_links_gdf: pd.DataFrame, lanes_col: str):
 
   WranglerLogger.debug(f"strings value_counts():")
   WranglerLogger.debug(road_links_gdf.loc[ road_links_gdf[lanes_col].apply(lambda x: isinstance(x, str)), lanes_col])
+
+def create_nodes_for_new_stations(
+    new_stop_ids: typing.List[str],
+    gtfs_model: network_wrangler.models.gtfs.gtfs.GtfsModel,
+    nodes_gdf: gpd.GeoDataFrame
+  ) -> gpd.GeoDataFrame:
+  """Creates nodes table for a list of stop_ids in a gtfs feed.
+    
+    Finds unused node numbers given MTC node numbering convention (by county) and creates
+    node table for the given stations.
+
+    Args:
+        new_stop_ids (List[str]): list of stop_ids
+        gtfs_model (network_wrangler.models.gtfs.gtfs.GtfsModelGtfsModel): GTFS feed with stop_ids
+        nodes_gdf (gpd.GeoDataFrame): Nodes table
+        
+    Returns:
+        Node table with the given stop ids in the same crs as nodes_gdf. Columns:
+          * model_node_id (int): Unique identifier for the node
+          * X, Y (float): Longitude and Latitude
+          * geometry (GeoSeries)
+        MTC-node attributes:
+          * county (str)
+          * drive_access, walk_access, bike_access, rail_only (TODO: rename to transit_only?)
+  """
+  WranglerLogger.debug("=== create_nodes_for_new_stations() ====")
+
+  # Read county shapefile for spatial join
+  counties_gdf = gpd.read_file(COUNTY_SHAPEFILE)
+  
+  # Map county names to county codes based on https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+  COUNTY_NAME_TO_CODE = {
+    'San Francisco': 1,
+    'San Mateo': 2,
+    'Santa Clara': 3,
+    'Alameda': 4,
+    'Contra Costa': 5,
+    'Solano': 6,
+    'Napa': 7,
+    'Sonoma': 8,
+    'Marin': 9
+  }
+
+  # Get stop coordinates from GTFS for the new stations
+  new_stops_df = gtfs_model.stops[gtfs_model.stops['stop_id'].isin(new_stop_ids)].copy()
+  
+  # Create GeoDataFrame from stops
+  new_stops_geometry = [shapely.geometry.Point(lon, lat) for lon, lat in 
+                        zip(new_stops_df['stop_lon'], new_stops_df['stop_lat'])]
+  new_stops_gdf = gpd.GeoDataFrame(new_stops_df, geometry=new_stops_geometry, crs='EPSG:4326')
+  
+  # Reproject to match county shapefile CRS if needed
+  if counties_gdf.crs != new_stops_gdf.crs:
+    new_stops_gdf = new_stops_gdf.to_crs(counties_gdf.crs)
+  
+  # Perform spatial join to determine county for each stop
+  new_stops_gdf = gpd.sjoin(new_stops_gdf, counties_gdf[['NAME10', 'geometry']], 
+                                 how='left', predicate='within')
+
+  # Map county names to codes
+  new_stops_gdf['county_code'] = new_stops_gdf['NAME10'].map(COUNTY_NAME_TO_CODE)
+  WranglerLogger.debug(f"new_stops_gdf:\n{new_stops_gdf}")
+
+  # Log any stops that couldn't be matched to a county and drop them
+  unmatched_stops = new_stops_gdf[new_stops_gdf['county_code'].isna()]
+  if len(unmatched_stops) > 0:
+    WranglerLogger.warning(f"Could not determine county for stops: {unmatched_stops['stop_id'].tolist()}; dropping")
+    new_stops_gdf = new_stops_gdf.loc[ new_stops_gdf.county_code.notna() ]
+  
+  # rename columns for returning
+  new_stops_gdf.rename(columns={
+    'stop_lon':'X', 'stop_lat':'Y',
+    'NAME10':'county'
+  }, inplace=True)
+  # drop the other columns
+  new_stops_gdf = new_stops_gdf[['stop_id','stop_name','X','Y','county_code','county','geometry']]
+  new_stops_gdf['model_node_id'] = -1
+
+  # Get existing node numbers to find unused ones
+  existing_node_ids = set(nodes_gdf['model_node_id'].values)
+  
+  # Assign unused node numbers between COUNTY_NUM*1,000,000 and COUNTY_NUM*1,000,000 + 500,000
+  for _, stop_row in new_stops_gdf.iterrows():
+    stop_id = stop_row['stop_id']
+    county_code = stop_row['county_code']
+    
+    if pd.isna(county_code):
+      WranglerLogger.warning(f"Skipping node assignment for stop {stop_id} - no county found")
+      continue
+      
+    county_num = int(county_code)
+    start_range = county_num * 1_000_000
+    end_range = start_range + 500_000
+    
+    # Find first unused node number in the range
+    for node_id in range(start_range + 1, end_range):
+      if node_id not in existing_node_ids:
+        new_stops_gdf.loc[ new_stops_gdf.stop_id == stop_id, 'model_node_id'] = node_id
+        existing_node_ids.add(node_id)  # Mark as used
+        break
+    else:
+      WranglerLogger.warning(f"Could not find unused node ID for stop {stop_id} in county {county_num} range {start_range}-{end_range}")
+  
+  new_stops_gdf['drive_access'] = 0
+  new_stops_gdf['walk_access']  = 1
+  new_stops_gdf['bike_access']  = 1
+  new_stops_gdf['rail_only']    = 1
+  # drop county_code as it's no longer needed; stop_id will get picked up later
+  new_stops_gdf.drop(columns=['county_code','stop_id','stop_name'], inplace=True)
+  # convert to the same crs as nodes_gdf
+  new_stops_gdf.to_crs(nodes_gdf.crs, inplace=True)
+
+  WranglerLogger.debug(f"returning {type(new_stops_gdf)} new_stops_gdf:\n{new_stops_gdf}")
+  return new_stops_gdf
 
 if __name__ == "__main__":
   pd.options.display.max_columns = None
@@ -270,11 +388,25 @@ if __name__ == "__main__":
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
-  # routes (and their stops) to add to roadway nodes and links
-  ADD_ROUTES = {
-    'TF:TISF' # Treasure Island ferry stop
+  # New stations which opened between 2015 and 2023
+  ADD_STOP_IDS = {
+    'WARM',  # BART Warm Springs / South Fremont (opened 2017)
+    'MLPT',  # BART Milpitas (opened 2020)
+    'BERY',  # BART Berryessa (opened 2020)
+    'PCTR',  # BART Pittsburg Center
+    'TF:1',  # Treasure Island Ferry Terminal
+    'TF:2',  # San Francisco Ferry Terminal for Treasure Island route
+    '7211',  # Richmond Ferry Terminal
+    '17878', # Muni Yerba Buena/Moscone Station Northbound
+    '17873', # Muni Yerba Buena/Moscone Station Southbound
+    'FFV',   # Fairfield-Vacaville Station
+    'VAS',   # Vasco Rt Amtrak Station
+    '7101',  # Larkspur SMART
   }
-  #TODO: gtfs_stop_id and stop_id_GTFS appears to be attributes but only the first is filled in; where does this get populated?
+  # create nodes for these stations
+  new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
+  # add them to road_nodes_gdf
+  road_nodes_gdf = gpd.GeoDataFrame(pd.concat([road_nodes_gdf, new_station_nodes_gdf], ignore_index=True))
 
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
@@ -295,8 +427,6 @@ if __name__ == "__main__":
     (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
     "mtc_nodes"
   )
-
-
 
   from network_wrangler.utils.transit import create_feed_from_gtfs_model
   

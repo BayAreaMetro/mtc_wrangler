@@ -3,3 +3,5 @@
 
 # log files
 *.log
+
+create_baseyear_network/validation_failure_cases.csv
