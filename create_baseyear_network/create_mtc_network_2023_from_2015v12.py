@@ -23,7 +23,7 @@ import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
 
-INPUT_2015v12 = pathlib.Path("E:\\Box\\Modeling and Surveys\\Development\\Travel Model Two Conversion\\Model Inputs\\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
+INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
 COUNTY_SHAPEFILE = pathlib.Path("M:\\Data\\Census\\Geography\\tl_2010_06_county10\\tl_2010_06_county10_9CountyBayArea.shp")
 OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_2015v12")
@@ -134,6 +134,9 @@ def create_nodes_for_new_stations(
         MTC-node attributes:
           * county (str)
           * drive_access, walk_access, bike_access, rail_only (TODO: rename to transit_only?)
+          * name (str): will be set to stop_name
+        Other: (drop before adding to nodes)
+          * stop_id
   """
   WranglerLogger.debug("=== create_nodes_for_new_stations() ====")
 
@@ -217,13 +220,124 @@ def create_nodes_for_new_stations(
   new_stops_gdf['walk_access']  = 1
   new_stops_gdf['bike_access']  = 1
   new_stops_gdf['rail_only']    = 1
-  # drop county_code as it's no longer needed; stop_id will get picked up later
-  new_stops_gdf.drop(columns=['county_code','stop_id','stop_name'], inplace=True)
+  # drop county_code, but keep stop_id for link creation
+  new_stops_gdf.drop(columns=['county_code'], inplace=True)
+  # rename stop_name to name
+  new_stops_gdf.rename(columns={'stop_name':'name'}, inplace=True)
   # convert to the same crs as nodes_gdf
   new_stops_gdf.to_crs(nodes_gdf.crs, inplace=True)
 
   WranglerLogger.debug(f"returning {type(new_stops_gdf)} new_stops_gdf:\n{new_stops_gdf}")
   return new_stops_gdf
+
+def create_transit_links_for_new_stations(
+    stop_pairs: typing.List[typing.Tuple[str, str, bool]],
+    stop_id_to_model_node_id: typing.Dict[str, int],
+    node_gdf: gpd.GeoDataFrame,
+    existing_links_gdf: gpd.GeoDataFrame,
+  ) -> gpd.GeoDataFrame:
+  """Creates transit links between specified stop pairs.
+  
+  This function creates uni-directional links between stop pairs to ensure transit
+  connectivity in the roadway network.
+  
+  Args:
+      stop_pairs: List of tuples (from_stop_id, to_stop_id, oneway) representing links to create
+      stop_id_to_model_node_id: Dictionary mapping relevant stop_id to model_node_id
+      
+  Returns:
+      GeoDataFrame of new transit links with appropriate attributes
+  """
+  WranglerLogger.debug("=== create_transit_links_for_new_stations() ====")
+
+  # Get the maximum model_link_id from existing links
+  max_link_id = existing_links_gdf['model_link_id'].max()
+  next_link_id = max_link_id + 1
+  
+  link_dicts = []
+  for (from_stop_id, to_stop_id, oneway) in stop_pairs:
+    from_model_node_id = stop_id_to_model_node_id.get(from_stop_id)
+    to_model_node_id = stop_id_to_model_node_id.get(to_stop_id)
+    
+    if from_model_node_id is None:
+      WranglerLogger.warning(f"Stop {from_stop_id} not found in stop_id_to_model_node_id mapping - skipping link")
+      continue
+    if to_model_node_id is None:
+      WranglerLogger.warning(f"Stop {to_stop_id} not found in stop_id_to_model_node_id mapping - skipping link")
+      continue
+    
+    point_A_series = node_gdf.loc[node_gdf.model_node_id == from_model_node_id].geometry
+    point_B_series = node_gdf.loc[node_gdf.model_node_id == to_model_node_id].geometry
+    
+    if len(point_A_series) == 0:
+      WranglerLogger.warning(f"Node {from_model_node_id} for stop {from_stop_id} not found in node_gdf - skipping link")
+      continue
+    if len(point_B_series) == 0:
+      WranglerLogger.warning(f"Node {to_model_node_id} for stop {to_stop_id} not found in node_gdf - skipping link")
+      continue
+    
+    # Extract the actual Point object from the GeoSeries
+    point_A = point_A_series.values[0]
+    point_B = point_B_series.values[0]
+    
+    # Create LineString and calculate distance
+    line_geom = shapely.geometry.LineString([point_A, point_B])
+    
+    # Calculate distance in miles (assuming coordinates are in feet - EPSG:2227)
+    distance_ft = line_geom.length
+    distance_miles = distance_ft / 5280.0
+    
+    # Create forward link
+    forward_link = {
+      'model_link_id': next_link_id,
+      'shape_id': str(next_link_id),
+      'A': from_model_node_id,
+      'B': to_model_node_id,
+      'name': f'Transit link {from_stop_id} to {to_stop_id}',
+      'geometry': line_geom,
+      'distance': distance_miles,
+      # Set as rail-only link
+      'rail_only': 1,
+      'drive_access': 0,
+      'walk_access': 0,
+      'bike_access': 0,
+      'transit': 1,
+      # Copy lane and other attributes from template
+      'lanes': 0,
+      'managed': 0,
+      'bus_only': 0,
+    }
+    link_dicts.append(forward_link)
+    next_link_id += 1
+
+    if oneway: continue
+
+    # Create backward link
+    backward_link = {
+      'model_link_id': next_link_id,
+      'shape_id': str(next_link_id),
+      'A': to_model_node_id,
+      'B': from_model_node_id,
+      'name': f'Transit link {to_stop_id} to {from_stop_id}',
+      'geometry': shapely.geometry.LineString([point_B, point_A]),
+      'distance': distance_miles,
+      # Set as rail-only link
+      'rail_only': 1,
+      'drive_access': 0,
+      'walk_access': 0,
+      'bike_access': 0,
+      'transit': 1,
+      # Copy lane and other attributes from template
+      'lanes': 0,
+      'managed': 0,
+      'bus_only': 0,
+    }
+    link_dicts.append(backward_link)
+    next_link_id += 1
+
+  new_links_gdf = gpd.GeoDataFrame(data=link_dicts, crs=node_gdf.crs)    
+  WranglerLogger.debug(f"new_links_gdf:\n{new_links_gdf}")
+  return new_links_gdf
 
 if __name__ == "__main__":
   pd.options.display.max_columns = None
@@ -390,23 +504,88 @@ if __name__ == "__main__":
 
   # New stations which opened between 2015 and 2023
   ADD_STOP_IDS = {
-    'WARM',  # BART Warm Springs / South Fremont (opened 2017)
-    'MLPT',  # BART Milpitas (opened 2020)
-    'BERY',  # BART Berryessa (opened 2020)
-    'PCTR',  # BART Pittsburg Center
+    # BART to San Jose
+    'WARM',  # Warm Springs / South Fremont (opened 2017)
+    'MLPT',  # Milpitas (opened 2020)
+    'BERY',  # Berryessa (opened 2020)
+    # BART to Antioch
+    'PCTR',  # Pittsburg Center (opened 2018)
+    'ANTC',  # Antioch (opened 2018)
+    # Muni Central Subway
+    '17876', # Muni Chinatown - Rose Pak Station
+    '17877', # Muni Union Square/Market St Station
+    '17878', # Muni Yerba Buena/Moscone Station Northbound
+    '17879', # Muni Fourth & Brannan Northbound
+    '17872', # Muni Fourth & Brannan Southbound
+    '17873', # Muni Yerba Buena/Moscone Station Southbound
+    '17874', # Muni Union Square/Market St Station Southbound
+    # Treasure Island Ferry
     'TF:1',  # Treasure Island Ferry Terminal
     'TF:2',  # San Francisco Ferry Terminal for Treasure Island route
-    '7211',  # Richmond Ferry Terminal
-    '17878', # Muni Yerba Buena/Moscone Station Northbound
-    '17873', # Muni Yerba Buena/Moscone Station Southbound
-    'FFV',   # Fairfield-Vacaville Station
-    'VAS',   # Vasco Rt Amtrak Station
+    # Richmond Ferry
+    '7211',  # Richmond Ferry Terminal (service started 2019)
+    # Capitol Corridor
+    'FFV',   # Fairfield-Vacaville Station (opened 2017)
+    'VAS',   # Vasco Rt Amtrak Station - wait, wasn't this already open?
+    # SMART
     '7101',  # Larkspur SMART
   }
   # create nodes for these stations
   new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
   # add them to road_nodes_gdf
-  road_nodes_gdf = gpd.GeoDataFrame(pd.concat([road_nodes_gdf, new_station_nodes_gdf], ignore_index=True))
+  road_nodes_gdf = gpd.GeoDataFrame(pd.concat([
+    road_nodes_gdf, 
+    new_station_nodes_gdf.drop(columns=['stop_id'])], ignore_index=True))
+
+  stop_id_to_model_node_id = new_station_nodes_gdf[['stop_id','model_node_id']].set_index('stop_id').to_dict()['model_node_id']
+  WranglerLogger.debug(f"stop_id_to_model_node_id={stop_id_to_model_node_id}")
+
+  stop_id_to_model_node_id['FRMT'] = 2625947
+  stop_id_to_model_node_id['PITT'] = 3097273
+  stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
+  stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
+  stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal
+
+  # Define transit links to add between new stations
+  # model_ids should either be mapped to model_node_ids 
+  # Format: (from_stop_id, to_stop_id, oneway)
+  TRANSIT_LINKS_TO_ADD = [
+    # BART to San Jose
+    ('FRMT', 'WARM', False),  # Fremont to Warm Springs
+    ('WARM', 'MLPT', False),  # Warm Springs to Milpitas
+    ('MLPT', 'BERY', False),  # Milpitas to Berryessa
+    # eBart extension
+    ('PITT', 'PCTR', False),  # Pittsburg/Baypoint to Pittsburg Center
+    ('PCTR', 'ANTC', False),  # Pittsburg Center to Antioch
+    # Muni Central Subway Northbound
+    ('17166', '17879', True), # Fourth and King St to Fouth and Brannan
+    ('17879', '17878', True), # Fourth and Brannan to Yerba Buena/Moscone Station
+    ('17878', '17877', True), # Yerba Buena/Moscone Station to Union Square/Market St Station
+    ('17877', '17876', True), # Union Square/Market St Station to Chinatown - Rose Pak Station
+    # Muni Central Subway Southbound
+    ('17876', '17874', True), # Chinatown - Rose Pak Station to Union Square/Market St Station
+    ('17874', '17873', True), # Union Square/Market St Station to Yerba Buena/Moscone Station
+    ('17873', '17872', True), # Yerba Buena/Moscone Station to Fourth & Brannan
+    ('17872', '17397', True), # Fourth & Brannan to Fourth and King
+    # Treasure Island Ferry
+    ('TF:1', 'TF:2', False),
+    # Richmond Ferry
+    ('7211', '72011', False),
+  ]
+  
+  # Create transit links for the new stations
+  # Note: Use road_nodes_gdf which contains the newly created station nodes
+  new_transit_links_gdf = create_transit_links_for_new_stations(
+    TRANSIT_LINKS_TO_ADD, 
+    stop_id_to_model_node_id,
+    road_nodes_gdf,
+    road_links_gdf
+  )
+  
+  # Add new links to road_links_gdf
+  if len(new_transit_links_gdf) > 0:
+    road_links_gdf = gpd.GeoDataFrame(pd.concat([road_links_gdf, new_transit_links_gdf], ignore_index=True))
+    WranglerLogger.info(f"Added {len(new_transit_links_gdf)} new transit links to roadway network")
 
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
