@@ -22,6 +22,9 @@ import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
+from network_wrangler.transit.network import TransitNetwork
+from network_wrangler.utils.transit import drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
+from network_wrangler.roadway.nodes.edit import NodeGeometryChangeTable
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
@@ -502,6 +505,12 @@ if __name__ == "__main__":
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
+  # drop SFO Airport rail/bus
+  gtfs_model = drop_transit_agency(gtfs_model, agency_id='SI')
+
+  # filter out routes outside of Bay Area
+  gtfs_model = filter_transit_by_boundary(gtfs_model, COUNTY_SHAPEFILE, remove_partial_routes=False)
+
   # New stations which opened between 2015 and 2023
   ADD_STOP_IDS = {
     # BART to San Jose
@@ -528,7 +537,18 @@ if __name__ == "__main__":
     'FFV',   # Fairfield-Vacaville Station (opened 2017)
     'VAS',   # Vasco Rt Amtrak Station - wait, wasn't this already open?
     # SMART
-    '7101',  # Larkspur SMART
+    '71011',  # Larkspur
+    '71021',  # San Rafael
+    '71031',  # Marin Civic Center
+    '71041',  # Novato Hamilton
+    '71051',  # Novato Downtown
+    '71061',  # Novato San Marin
+    '71071',  # Petaluma Downtown
+    '71091',  # Cotati
+    '71101',  # Rohnert Park
+    '71111',  # Santa Rosa Downtown
+    '71121',  # Santa Rosa North
+    '71131',  # Sonoma County Airport
   }
   # create nodes for these stations
   new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
@@ -571,6 +591,18 @@ if __name__ == "__main__":
     ('TF:1', 'TF:2', False),
     # Richmond Ferry
     ('7211', '72011', False),
+    # SMART
+    ('71011','71021', False), # Larkspur to San Rafael
+    ('71021','71031', False), # San Rafael to Marin Civic Center
+    ('71031','71041', False), # Marin Civic Center to Novato Hamilton
+    ('71041','71051', False), # Novato Hamilton to Novato Downtown
+    ('71051','71061', False), # Novato Downtown to Novato San Marin
+    ('71061','71071', False), # Novato San Marin to Petaluma Downtown
+    ('71071','71091', False), # Petaluma Downtown to Cotati
+    ('71091','71101', False), # Cotati to Rohnert Park
+    ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
+    ('71101','71121', False), # Santa Rosa Downtown to Santa Rosa North
+    ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
   ]
   
   # Create transit links for the new stations
@@ -587,6 +619,14 @@ if __name__ == "__main__":
     road_links_gdf = gpd.GeoDataFrame(pd.concat([road_links_gdf, new_transit_links_gdf], ignore_index=True))
     WranglerLogger.info(f"Added {len(new_transit_links_gdf)} new transit links to roadway network")
 
+  # The Hillsdale Caltrain station moved in 2021
+  HILLSDALE_STOP_ID = '70112'
+  hillsdale_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==HILLSDALE_STOP_ID].to_dict(orient='records')[0]
+  hillsdale_new_location = shapely.geometry.Point(hillsdale_stop_dict['stop_lon'], hillsdale_stop_dict['stop_lat'])
+  WranglerLogger.debug(f"Hillsdale stop:{hillsdale_stop_dict}")
+
+  HILLSDALE_MODEL_NODES = [1556382, 1556375]
+
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=road_links_gdf,
@@ -596,18 +636,27 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
+  # update hillsdale coordinates
+  move_hillsdale_nodes_df = pd.DataFrame([
+    {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
+    {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']}])
+  WranglerLogger.debug(f"move_hillsdale_nodes_df:\n{move_hillsdale_nodes_df}")
+
+  # use RoadwayNetwork.move_nodes()
+  move_hillsdale_nodes_table = NodeGeometryChangeTable(move_hillsdale_nodes_df)
+  WranglerLogger.debug(f"move_hillsdale_nodes_table:\n{move_hillsdale_nodes_table}")
+  roadway_network.move_nodes(move_hillsdale_nodes_table)
+
   tableau_utils.write_geodataframe_as_tableau_hyper(
-    road_links_gdf.loc[ road_links_gdf['distance'] > 0],  # drop distance==0 links because otherwise this will error
+    roadway_network.links_df,  # drop distance==0 links because otherwise this will error
     (OUTPUT_DIR / "mtc_links.hyper").resolve(),
     "mtc_links"
   )
   tableau_utils.write_geodataframe_as_tableau_hyper(
-    road_nodes_gdf,
+    roadway_network.nodes_df,
     (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
     "mtc_nodes"
   )
-
-  from network_wrangler.utils.transit import create_feed_from_gtfs_model
   
   # Define time periods for frequency calculation: 3a-6a, 6a-10a, 10a-3p, 3p-7p, 7p-3a
   time_periods = [
@@ -623,7 +672,6 @@ if __name__ == "__main__":
   
   # Create TransitNetwork from the Feed and validate it
   WranglerLogger.info("Creating TransitNetwork from Feed")
-  from network_wrangler.transit.network import TransitNetwork
   
   transit_network = TransitNetwork(feed=feed)
   WranglerLogger.info(f"TransitNetwork created with {len(transit_network.feed.stops)} stops and {len(transit_network.feed.routes)} routes")

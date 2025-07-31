@@ -4,19 +4,37 @@ USAGE = """
 """
 import shapely
 import geopandas as gpd
+import pandas as pd
+from shapely.geometry import Point
 from network_wrangler import WranglerLogger
 
 def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
     """
-    Write a GeoDataFrame to a Tableau Hyper file.
+    Write a GeoDataFrame or DataFrame with X,Y columns to a Tableau Hyper file.
     See https://tableau.github.io/hyper-db/docs/guides/hyper_file/geodata
 
     This is kind of a bummer because it would be preferrable to write to something more standard, like
     geofeather or geoparquet, but Tableau doesn't support those formats yet.
+    
+    Args:
+        in_gdf: A GeoDataFrame or a DataFrame with X,Y columns
+        filename: Output filename for the Hyper file
+        tablename: Name of the table within the Hyper file
     """
     WranglerLogger.info(f"write_geodataframe_as_tableau_hyper: {filename=}, {tablename=}")
-    # make a copy since we'll be messing with the columns
-    gdf = in_gdf.copy()
+    
+    # Handle regular DataFrame with X,Y columns
+    if isinstance(in_gdf, pd.DataFrame) and not isinstance(in_gdf, gpd.GeoDataFrame):
+        if 'X' in in_gdf.columns and 'Y' in in_gdf.columns:
+            WranglerLogger.info("Converting DataFrame with X,Y columns to GeoDataFrame")
+            # Create Point geometries from X,Y coordinates
+            geometry = [Point(xy) for xy in zip(in_gdf.X, in_gdf.Y)]
+            gdf = gpd.GeoDataFrame(in_gdf, geometry=geometry, crs='EPSG:4326')
+        else:
+            raise ValueError("Input DataFrame must have 'X' and 'Y' columns or be a GeoDataFrame")
+    else:
+        # make a copy since we'll be messing with the columns
+        gdf = in_gdf.copy()
 
     import tableauhyperapi
 
