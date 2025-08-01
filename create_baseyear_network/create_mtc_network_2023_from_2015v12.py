@@ -25,6 +25,7 @@ from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.utils.transit import drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
 from network_wrangler.roadway.nodes.edit import NodeGeometryChangeTable
+from network_wrangler.errors import NodeNotFoundError
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
@@ -345,6 +346,7 @@ def create_transit_links_for_new_stations(
 if __name__ == "__main__":
   pd.options.display.max_columns = None
   pd.options.display.width = None
+  pd.options.display.min_rows = 50
 
   # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.info.log"
   # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.debug.log"
@@ -532,10 +534,15 @@ if __name__ == "__main__":
     'TF:1',  # Treasure Island Ferry Terminal
     'TF:2',  # San Francisco Ferry Terminal for Treasure Island route
     # Richmond Ferry
-    '7211',  # Richmond Ferry Terminal (service started 2019)
+    '7211',  # (service started 2019)
+    # Vallejo Ferry Terminal
+    '7212',  # (service started)
+    # Mare Island Ferry Terminal
+    '7213',   # (service started in 2017)
     # Capitol Corridor
-    'FFV',   # Fairfield-Vacaville Station (opened 2017)
-    'VAS',   # Vasco Rt Amtrak Station - wait, wasn't this already open?
+    'AM:FFV', # Fairfield-Vacaville Station (opened 2017)
+    # ACE
+    'CE:VAS', # Vasco Rt Amtrak Station - wait, wasn't this already open?
     # SMART
     '71011',  # Larkspur
     '71021',  # San Rafael
@@ -560,8 +567,13 @@ if __name__ == "__main__":
   stop_id_to_model_node_id = new_station_nodes_gdf[['stop_id','model_node_id']].set_index('stop_id').to_dict()['model_node_id']
   WranglerLogger.debug(f"stop_id_to_model_node_id={stop_id_to_model_node_id}")
 
-  stop_id_to_model_node_id['FRMT'] = 2625947
-  stop_id_to_model_node_id['PITT'] = 3097273
+  stop_id_to_model_node_id['FRMT'] = 2625947  # BART Fremont
+  stop_id_to_model_node_id['PITT'] = 3097273  # BART Pittsburg/Baypoint
+  stop_id_to_model_node_id['SBRN'] = 1556366  # BART San Bruno
+  stop_id_to_model_node_id['SFIA'] = 1556368  # BART SFO
+  stop_id_to_model_node_id['MLBR'] = 1556367  # BART Millbrae
+  stop_id_to_model_node_id['AM:SUI'] = 3547320  # Capitol Corridor Suisun-Fairfield
+  stop_id_to_model_node_id['AM:DAV'] = 3547319  # Capitol Corridor Davis
   stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
   stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
   stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal
@@ -574,6 +586,9 @@ if __name__ == "__main__":
     ('FRMT', 'WARM', False),  # Fremont to Warm Springs
     ('WARM', 'MLPT', False),  # Warm Springs to Milpitas
     ('MLPT', 'BERY', False),  # Milpitas to Berryessa
+    # BART - these links are missing for some reason
+    ('SBRN', 'SFIA', True),   # San Bruno to SFO
+    ('SFIA', 'MLBR', True),   # SFO to Millbrae
     # eBart extension
     ('PITT', 'PCTR', False),  # Pittsburg/Baypoint to Pittsburg Center
     ('PCTR', 'ANTC', False),  # Pittsburg Center to Antioch
@@ -589,8 +604,13 @@ if __name__ == "__main__":
     ('17872', '17397', True), # Fourth & Brannan to Fourth and King
     # Treasure Island Ferry
     ('TF:1', 'TF:2', False),
-    # Richmond Ferry
-    ('7211', '72011', False),
+    # SF Ferry Terminal to Richmond Ferry 
+    ('72011', '7211', False),
+    # SF Ferry Terminal to Vallejo
+    ('72011', '7212', False),
+    # Capitol Corridor
+    ('AM:SUI','AM:FFV', False), # Suisun-Fairfield to Fairfield-Vacaville
+    ('AM:FFV','AM:DAV', False), # Fairfield-Vacaville to Davis
     # SMART
     ('71011','71021', False), # Larkspur to San Rafael
     ('71021','71031', False), # San Rafael to Marin Civic Center
@@ -601,7 +621,7 @@ if __name__ == "__main__":
     ('71071','71091', False), # Petaluma Downtown to Cotati
     ('71091','71101', False), # Cotati to Rohnert Park
     ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
-    ('71101','71121', False), # Santa Rosa Downtown to Santa Rosa North
+    ('71111','71121', False), # Santa Rosa Downtown to Santa Rosa North
     ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
   ]
   
@@ -618,6 +638,13 @@ if __name__ == "__main__":
   if len(new_transit_links_gdf) > 0:
     road_links_gdf = gpd.GeoDataFrame(pd.concat([road_links_gdf, new_transit_links_gdf], ignore_index=True))
     WranglerLogger.info(f"Added {len(new_transit_links_gdf)} new transit links to roadway network")
+
+  # remove Suisun-Fairfield to Davis and vice versa since Fairfield-Vacavaville was added in between
+  len_road_links_gdf = len(road_links_gdf)
+  road_links_gdf = road_links_gdf.loc[ (road_links_gdf.A != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.B != stop_id_to_model_node_id['AM:DAV']))]
+  road_links_gdf = road_links_gdf.loc[ (road_links_gdf.B != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.A != stop_id_to_model_node_id['AM:DAV']))]
+  WranglerLogger.debug(f"{len_road_links_gdf=:,} {len(road_links_gdf)=:,}")
+  assert(len(road_links_gdf) == len_road_links_gdf-2)
 
   # The Hillsdale Caltrain station moved in 2021
   HILLSDALE_STOP_ID = '70112'
@@ -668,7 +695,48 @@ if __name__ == "__main__":
   ]
   
   # Create feed with default 3-hour headway for routes with only one trip in a period
-  feed = create_feed_from_gtfs_model(gtfs_model, roadway_network, time_periods, default_frequency_for_onetime_route=10800)
+  try:
+    feed = create_feed_from_gtfs_model(
+      gtfs_model,
+      roadway_network,
+      time_periods, 
+      default_frequency_for_onetime_route=10800
+    )
+  except NodeNotFoundError as e:
+    # catch NodeNotFoundError and write out unmached stops to tableau for investigation
+    WranglerLogger.error(f"Failed to match some GTFS stops to roadway network nodes:")
+    WranglerLogger.error(str(e))
+    
+    # Write unmatched stops to Tableau for investigation if available
+    if hasattr(e, 'unmatched_stops_gdf') and len(e.unmatched_stops_gdf) > 0:
+      unmatched_stops_file = (OUTPUT_DIR / "unmatched_gtfs_stops.hyper").resolve()
+      WranglerLogger.info(f"Writing {len(e.unmatched_stops_gdf)} unmatched stops to {unmatched_stops_file}")
+      
+      # Prepare the unmatched stops data for Tableau - include ALL fields
+      unmatched_stops_gdf = e.unmatched_stops_gdf.copy()
+      WranglerLogger.debug(f"unmatched_stops_gdf type={type(unmatched_stops_gdf)} rows=\n{unmatched_stops_gdf}")
+      
+      # Convert any list columns to strings for Tableau
+      for col in unmatched_stops_gdf.columns:
+        if unmatched_stops_gdf[col].dtype == 'object':
+          # Check if any values are lists
+          if any(isinstance(val, list) for val in unmatched_stops_gdf[col].dropna()):
+            unmatched_stops_gdf[col] = unmatched_stops_gdf[col].apply(
+              lambda x: ', '.join(map(str, x)) if isinstance(x, list) else str(x) if pd.notna(x) else ''
+            )
+      
+      # Rename lat/lon to X/Y for the tableau utility if they exist
+      if 'stop_lon' in unmatched_stops_gdf.columns and 'stop_lat' in unmatched_stops_gdf.columns:
+        unmatched_stops_output = unmatched_stops_gdf.rename(columns={'stop_lon': 'X', 'stop_lat': 'Y'})
+      
+      # Write to Tableau
+      from tableau_utils import write_geodataframe_as_tableau_hyper
+      write_geodataframe_as_tableau_hyper(unmatched_stops_output, unmatched_stops_file, "unmatched_stops")
+      
+      WranglerLogger.error(f"Unmatched stops written to {unmatched_stops_file}")
+    
+    # Re-raise the exception to stop processing
+    raise
   
   # Create TransitNetwork from the Feed and validate it
   WranglerLogger.info("Creating TransitNetwork from Feed")
