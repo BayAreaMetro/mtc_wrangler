@@ -157,7 +157,8 @@ def create_nodes_for_new_stations(
     'Solano': 6,
     'Napa': 7,
     'Sonoma': 8,
-    'Marin': 9
+    'Marin': 9,
+    'External': 10,
   }
 
   # Get stop coordinates from GTFS for the new stations
@@ -180,12 +181,10 @@ def create_nodes_for_new_stations(
   new_stops_gdf['county_code'] = new_stops_gdf['NAME10'].map(COUNTY_NAME_TO_CODE)
   WranglerLogger.debug(f"new_stops_gdf:\n{new_stops_gdf}")
 
-  # Log any stops that couldn't be matched to a county and drop them
-  unmatched_stops = new_stops_gdf[new_stops_gdf['county_code'].isna()]
-  if len(unmatched_stops) > 0:
-    WranglerLogger.warning(f"Could not determine county for stops: {unmatched_stops['stop_id'].tolist()}; dropping")
-    new_stops_gdf = new_stops_gdf.loc[ new_stops_gdf.county_code.notna() ]
-  
+  # For stops that couldn't be matched, set to External
+  new_stops_gdf.loc[ new_stops_gdf.county_code.isna(), 'NAME10' ] = 'External'
+  new_stops_gdf.loc[ new_stops_gdf.county_code.isna(), 'county_code' ] = COUNTY_NAME_TO_CODE['External']
+
   # rename columns for returning
   new_stops_gdf.rename(columns={
     'stop_lon':'X', 'stop_lat':'Y',
@@ -195,30 +194,28 @@ def create_nodes_for_new_stations(
   new_stops_gdf = new_stops_gdf[['stop_id','stop_name','X','Y','county_code','county','geometry']]
   new_stops_gdf['model_node_id'] = -1
 
-  # Get existing node numbers to find unused ones
-  existing_node_ids = set(nodes_gdf['model_node_id'].values)
+  # Import generate_node_ids function
+  from network_wrangler.roadway.nodes.create import generate_node_ids
   
-  # Assign unused node numbers between COUNTY_NUM*1,000,000 and COUNTY_NUM*1,000,000 + 500,000
-  for _, stop_row in new_stops_gdf.iterrows():
-    stop_id = stop_row['stop_id']
-    county_code = stop_row['county_code']
-    
-    if pd.isna(county_code):
-      WranglerLogger.warning(f"Skipping node assignment for stop {stop_id} - no county found")
-      continue
-      
+  # Group stops by county to generate node IDs per county
+  for county_code, county_stops_df in new_stops_gdf.groupby('county_code'):      
     county_num = int(county_code)
-    start_range = county_num * 1_000_000
-    end_range = start_range + 500_000
+    start_range = (county_num-1) * 1_000_000 + 1  # Start at 1, not 0
+    end_range = (county_num-1) * 1_000_000 + 500_000
     
-    # Find first unused node number in the range
-    for node_id in range(start_range + 1, end_range):
-      if node_id not in existing_node_ids:
-        new_stops_gdf.loc[ new_stops_gdf.stop_id == stop_id, 'model_node_id'] = node_id
-        existing_node_ids.add(node_id)  # Mark as used
-        break
-    else:
-      WranglerLogger.warning(f"Could not find unused node ID for stop {stop_id} in county {county_num} range {start_range}-{end_range}")
+    # Generate unique node IDs for all stops in this county
+    num_stops = len(county_stops_df)
+    try:
+      new_node_ids = generate_node_ids(nodes_gdf, range(start_range, end_range), n=num_stops)
+      
+      # Assign the generated node IDs to the stops
+      for i, (idx, stop_row) in enumerate(county_stops_df.iterrows()):
+        stop_id = stop_row['stop_id']
+        new_stops_gdf.loc[new_stops_gdf.stop_id == stop_id, 'model_node_id'] = new_node_ids[i]
+        
+    except Exception as e:
+      WranglerLogger.error(f"Could not generate node IDs for county {county_num}: {e}")
+      raise
   
   new_stops_gdf['drive_access'] = 0
   new_stops_gdf['walk_access']  = 1
@@ -412,11 +409,28 @@ if __name__ == "__main__":
     how='left',
     indicator=True,
   )
-  # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
-  # Use all nodes, not just road nodes
   WranglerLogger.debug(f"After merging with shapes_gdf, road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
   road_links_df.drop(columns=['_merge'], inplace=True)
 
+  # Merging with shapes in the reverse direction
+  shapes_gdf.geometry = shapes_gdf.geometry.reverse()
+  road_links_df = pd.merge(
+    left=road_links_df,
+    right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
+    left_on=['id','fromIntersectionId','toIntersectionId'],
+    right_on=['id','toIntersectionId', 'fromIntersectionId'],
+    how='left',
+    indicator=True,
+    suffixes=('','_revgeom')
+  )
+  WranglerLogger.debug(f"After merging with shapes_gdf (reversed), road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
+  # now we have geometry and geometry_revgeom.  Use the latter if the former is na
+  road_links_df.loc[ road_links_df.geometry.isna(), 'geometry'] = road_links_df.geometry_revgeom
+  # drop new columns as we've used them to set geometry
+  road_links_df.drop(columns=['_merge', 'fromIntersectionId_revgeom','toIntersectionId_revgeom','geometry_revgeom'], inplace=True)
+
+  # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
+  # Use all nodes, not just road nodes
   no_geometry_links = road_links_df.loc[ pd.isnull(road_links_df.geometry) ]
   no_geometry_links = pd.merge(
     left=no_geometry_links,
@@ -511,7 +525,10 @@ if __name__ == "__main__":
   gtfs_model = drop_transit_agency(gtfs_model, agency_id='SI')
 
   # filter out routes outside of Bay Area
-  gtfs_model = filter_transit_by_boundary(gtfs_model, COUNTY_SHAPEFILE, remove_partial_routes=False)
+  gtfs_model = filter_transit_by_boundary(
+    gtfs_model,
+    COUNTY_SHAPEFILE, 
+    partially_include_route_type_action={2:'truncate'})
 
   # New stations which opened between 2015 and 2023
   ADD_STOP_IDS = {
@@ -538,11 +555,11 @@ if __name__ == "__main__":
     # Vallejo Ferry Terminal
     '7212',  # (service started)
     # Mare Island Ferry Terminal
-    '7213',   # (service started in 2017)
+    '7213',  # (service started in 2017)
+    # Alameda Seaplane Lagoon Ferry Terminal
+    '7207',  # (service started 2021) 
     # Capitol Corridor
     'AM:FFV', # Fairfield-Vacaville Station (opened 2017)
-    # ACE
-    'CE:VAS', # Vasco Rt Amtrak Station - wait, wasn't this already open?
     # SMART
     '71011',  # Larkspur
     '71021',  # San Rafael
@@ -556,9 +573,15 @@ if __name__ == "__main__":
     '71111',  # Santa Rosa Downtown
     '71121',  # Santa Rosa North
     '71131',  # Sonoma County Airport
+    # Soltrans Bus Stop: Mark Hall Dr & Alumni Ln (UC Davis Mondavi Center)
+    '829204', # Just outside Solano county boundary
   }
   # create nodes for these stations
   new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
+  # Soltrans Bus Stop is odd one out -- it's a bus stop
+  new_station_nodes_gdf.loc[ new_station_nodes_gdf.stop_id == '829204', 'drive_access'] = 1
+  new_station_nodes_gdf.loc[ new_station_nodes_gdf.stop_id == '829204', 'rail_only'] = 0
+
   # add them to road_nodes_gdf
   road_nodes_gdf = gpd.GeoDataFrame(pd.concat([
     road_nodes_gdf, 
@@ -577,6 +600,7 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
   stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
   stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal
+  stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
 
   # Define transit links to add between new stations
   # model_ids should either be mapped to model_node_ids 
@@ -606,8 +630,11 @@ if __name__ == "__main__":
     ('TF:1', 'TF:2', False),
     # SF Ferry Terminal to Richmond Ferry 
     ('72011', '7211', False),
-    # SF Ferry Terminal to Vallejo
+    # SF Ferry Terminal to Vallejo to Mare Island
     ('72011', '7212', False),
+    ('7212',  '7213', False),
+    # Alameda Seaplane Lagoon to South San Francisco Ferry
+    ('7207',  '7205', False),
     # Capitol Corridor
     ('AM:SUI','AM:FFV', False), # Suisun-Fairfield to Fairfield-Vacaville
     ('AM:FFV','AM:DAV', False), # Fairfield-Vacaville to Davis
@@ -649,10 +676,12 @@ if __name__ == "__main__":
   # The Hillsdale Caltrain station moved in 2021
   HILLSDALE_STOP_ID = '70112'
   hillsdale_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==HILLSDALE_STOP_ID].to_dict(orient='records')[0]
-  hillsdale_new_location = shapely.geometry.Point(hillsdale_stop_dict['stop_lon'], hillsdale_stop_dict['stop_lat'])
   WranglerLogger.debug(f"Hillsdale stop:{hillsdale_stop_dict}")
 
-  HILLSDALE_MODEL_NODES = [1556382, 1556375]
+  # Vasco Rt Amtrak Station seems to be located slightly incorrectly
+  AMTRAK_VASCO_STOP_ID = 'CE:VAS'
+  amtrak_vasco_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==AMTRAK_VASCO_STOP_ID].to_dict(orient='records')[0]
+  WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
 
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
@@ -663,16 +692,19 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
 
-  # update hillsdale coordinates
-  move_hillsdale_nodes_df = pd.DataFrame([
+  mode_transit_nodes_df = pd.DataFrame([
+    # update Hillsdale coordinates
     {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
-    {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']}])
-  WranglerLogger.debug(f"move_hillsdale_nodes_df:\n{move_hillsdale_nodes_df}")
+    {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
+    # update Amtrak Vasco coordinates
+    {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']}  
+  ])
+  WranglerLogger.debug(f"mode_transit_nodes_df:\n{mode_transit_nodes_df}")
 
   # use RoadwayNetwork.move_nodes()
-  move_hillsdale_nodes_table = NodeGeometryChangeTable(move_hillsdale_nodes_df)
-  WranglerLogger.debug(f"move_hillsdale_nodes_table:\n{move_hillsdale_nodes_table}")
-  roadway_network.move_nodes(move_hillsdale_nodes_table)
+  mode_transit_nodes_table = NodeGeometryChangeTable(mode_transit_nodes_df)
+  WranglerLogger.debug(f"mode_transit_nodes_table:\n{mode_transit_nodes_table}")
+  roadway_network.move_nodes(mode_transit_nodes_table)
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
     roadway_network.links_df,  # drop distance==0 links because otherwise this will error
