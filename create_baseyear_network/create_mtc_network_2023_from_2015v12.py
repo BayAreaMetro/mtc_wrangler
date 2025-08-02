@@ -24,7 +24,6 @@ from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.utils.transit import drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
-from network_wrangler.roadway.nodes.edit import NodeGeometryChangeTable
 from network_wrangler.errors import NodeNotFoundError
 from network_wrangler.roadway.nodes.create import generate_node_ids
 
@@ -689,6 +688,7 @@ if __name__ == "__main__":
   )
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
+  WranglerLogger.info(f"roadway_network.nodes_df.index:\n{roadway_network.nodes_df.index}")
 
   # Split Geyserville Avenue link to add transit stop 
   geyserville_stop_node_id = generate_node_ids(road_nodes_gdf, range(4_500_000 + 1, 5_000_000), n=1)[0]
@@ -702,19 +702,19 @@ if __name__ == "__main__":
     split_reverse_link=True
   )
 
-  mode_transit_nodes_df = pd.DataFrame([
+  move_transit_nodes_df = pd.DataFrame([
     # update Hillsdale coordinates
     {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
     {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
     # update Amtrak Vasco coordinates
     {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']}  
   ])
-  WranglerLogger.debug(f"mode_transit_nodes_df:\n{mode_transit_nodes_df}")
-
+  WranglerLogger.debug(f"move_transit_nodes_df:\n{move_transit_nodes_df}")
+  # check if any model_node_ids are missing
+  WranglerLogger.debug(f"roadway_network.nodes_df.tail():\n{roadway_network.nodes_df.tail()}")
+  WranglerLogger.debug(f"roadway_network.nodes_df.loc[roadway_network.nodes_df['model_node_id'].isna()]:\n{roadway_network.nodes_df.loc[ roadway_network.nodes_df['model_node_id'].isna()]}")
   # use RoadwayNetwork.move_nodes()
-  mode_transit_nodes_table = NodeGeometryChangeTable(mode_transit_nodes_df)
-  WranglerLogger.debug(f"mode_transit_nodes_table:\n{mode_transit_nodes_table}")
-  roadway_network.move_nodes(mode_transit_nodes_table)
+  roadway_network.move_nodes(move_transit_nodes_df)
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
     roadway_network.links_df,  # drop distance==0 links because otherwise this will error
