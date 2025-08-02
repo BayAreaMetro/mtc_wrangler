@@ -26,6 +26,7 @@ from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.utils.transit import drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
 from network_wrangler.roadway.nodes.edit import NodeGeometryChangeTable
 from network_wrangler.errors import NodeNotFoundError
+from network_wrangler.roadway.nodes.create import generate_node_ids
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
@@ -147,18 +148,19 @@ def create_nodes_for_new_stations(
   # Read county shapefile for spatial join
   counties_gdf = gpd.read_file(COUNTY_SHAPEFILE)
   
-  # Map county names to county codes based on https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
-  COUNTY_NAME_TO_CODE = {
-    'San Francisco': 1,
-    'San Mateo': 2,
-    'Santa Clara': 3,
-    'Alameda': 4,
-    'Contra Costa': 5,
-    'Solano': 6,
-    'Napa': 7,
-    'Sonoma': 8,
-    'Marin': 9,
-    'External': 10,
+  # Map county names to county network node start based on
+  # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+  COUNTY_NAME_TO_NODE_START_NUM = {
+    'San Francisco': 1_000_000,
+    'San Mateo'    : 1_500_000,
+    'Santa Clara'  : 2_000_000,
+    'Alameda'      : 2_500_000,
+    'Contra Costa' : 3_000_000,
+    'Solano'       : 3_500_000,
+    'Napa'         : 4_000_000,
+    'Sonoma'       : 4_500_000,
+    'Marin'        : 5_000_000,
+    'External'     : 900_001,
   }
 
   # Get stop coordinates from GTFS for the new stations
@@ -176,14 +178,8 @@ def create_nodes_for_new_stations(
   # Perform spatial join to determine county for each stop
   new_stops_gdf = gpd.sjoin(new_stops_gdf, counties_gdf[['NAME10', 'geometry']], 
                                  how='left', predicate='within')
-
-  # Map county names to codes
-  new_stops_gdf['county_code'] = new_stops_gdf['NAME10'].map(COUNTY_NAME_TO_CODE)
-  WranglerLogger.debug(f"new_stops_gdf:\n{new_stops_gdf}")
-
   # For stops that couldn't be matched, set to External
-  new_stops_gdf.loc[ new_stops_gdf.county_code.isna(), 'NAME10' ] = 'External'
-  new_stops_gdf.loc[ new_stops_gdf.county_code.isna(), 'county_code' ] = COUNTY_NAME_TO_CODE['External']
+  new_stops_gdf.loc[ new_stops_gdf['NAME10'].isna(), 'NAME10' ] = 'External'
 
   # rename columns for returning
   new_stops_gdf.rename(columns={
@@ -191,22 +187,24 @@ def create_nodes_for_new_stations(
     'NAME10':'county'
   }, inplace=True)
   # drop the other columns
-  new_stops_gdf = new_stops_gdf[['stop_id','stop_name','X','Y','county_code','county','geometry']]
+  new_stops_gdf = new_stops_gdf[['stop_id','stop_name','X','Y','county','geometry']]
   new_stops_gdf['model_node_id'] = -1
-
-  # Import generate_node_ids function
-  from network_wrangler.roadway.nodes.create import generate_node_ids
+  WranglerLogger.debug(f"new_stops_gdf:\n{new_stops_gdf}")
   
   # Group stops by county to generate node IDs per county
-  for county_code, county_stops_df in new_stops_gdf.groupby('county_code'):      
-    county_num = int(county_code)
-    start_range = (county_num-1) * 1_000_000 + 1  # Start at 1, not 0
-    end_range = (county_num-1) * 1_000_000 + 500_000
+  for county_name, county_stops_df in new_stops_gdf.groupby('county'):      
+    start_range = COUNTY_NAME_TO_NODE_START_NUM[county_name] + 1
+    if county_name == 'External':
+      end_range = start_range + 99_999
+    else:
+      end_range = start_range + 500_000
+    WranglerLogger.debug(f"For {county_name}, range:{start_range:,}-{end_range:,}")
     
     # Generate unique node IDs for all stops in this county
     num_stops = len(county_stops_df)
     try:
       new_node_ids = generate_node_ids(nodes_gdf, range(start_range, end_range), n=num_stops)
+      WranglerLogger.debug(f"new_node_ids: {new_node_ids}")
       
       # Assign the generated node IDs to the stops
       for i, (idx, stop_row) in enumerate(county_stops_df.iterrows()):
@@ -214,15 +212,13 @@ def create_nodes_for_new_stations(
         new_stops_gdf.loc[new_stops_gdf.stop_id == stop_id, 'model_node_id'] = new_node_ids[i]
         
     except Exception as e:
-      WranglerLogger.error(f"Could not generate node IDs for county {county_num}: {e}")
+      WranglerLogger.error(f"Could not generate node IDs for county {county_name}: {e}")
       raise
   
   new_stops_gdf['drive_access'] = 0
   new_stops_gdf['walk_access']  = 1
   new_stops_gdf['bike_access']  = 1
   new_stops_gdf['rail_only']    = 1
-  # drop county_code, but keep stop_id for link creation
-  new_stops_gdf.drop(columns=['county_code'], inplace=True)
   # rename stop_name to name
   new_stops_gdf.rename(columns={'stop_name':'name'}, inplace=True)
   # convert to the same crs as nodes_gdf
@@ -411,6 +407,7 @@ if __name__ == "__main__":
   )
   WranglerLogger.debug(f"After merging with shapes_gdf, road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
   road_links_df.drop(columns=['_merge'], inplace=True)
+  WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
 
   # Merging with shapes in the reverse direction
   shapes_gdf.geometry = shapes_gdf.geometry.reverse()
@@ -428,6 +425,7 @@ if __name__ == "__main__":
   road_links_df.loc[ road_links_df.geometry.isna(), 'geometry'] = road_links_df.geometry_revgeom
   # drop new columns as we've used them to set geometry
   road_links_df.drop(columns=['_merge', 'fromIntersectionId_revgeom','toIntersectionId_revgeom','geometry_revgeom'], inplace=True)
+  WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
 
   # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
   # Use all nodes, not just road nodes
@@ -691,6 +689,18 @@ if __name__ == "__main__":
   )
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
+
+  # Split Geyserville Avenue link to add transit stop 
+  geyserville_stop_node_id = generate_node_ids(road_nodes_gdf, range(4_500_000 + 1, 5_000_000), n=1)[0]
+  WranglerLogger.debug(f"Adding node for {geyserville_stop_node_id=}")
+  # Get the A and B nodes for the Geyserville Avenue link
+  roadway_network.split_link(
+    A=4514838, 
+    B=4540403,
+    new_model_node_id=geyserville_stop_node_id,
+    fraction=0.3,
+    split_reverse_link=True
+  )
 
   mode_transit_nodes_df = pd.DataFrame([
     # update Hillsdale coordinates
