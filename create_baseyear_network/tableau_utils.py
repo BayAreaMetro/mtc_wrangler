@@ -28,24 +28,16 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
         if 'X' in in_gdf.columns and 'Y' in in_gdf.columns:
             WranglerLogger.info("Converting DataFrame with X,Y columns to GeoDataFrame")
             # Create Point geometries from X,Y coordinates
-            geometry = [Point(xy) for xy in zip(in_gdf.X, in_gdf.Y)]
-            gdf = gpd.GeoDataFrame(in_gdf, geometry=geometry, crs='EPSG:4326')
+            in_gdf['geometry'] = [Point(xy) for xy in zip(in_gdf.X, in_gdf.Y)]
+            gdf = gpd.GeoDataFrame(in_gdf, crs='EPSG:4326')
         else:
             raise ValueError("Input DataFrame must have 'X' and 'Y' columns or be a GeoDataFrame")
     else:
         # make a copy since we'll be messing with the columns
-        gdf = in_gdf.copy()
+        # make sure it's in WSG84
+        gdf = in_gdf.to_crs(crs='EPSG:4326')
 
     import tableauhyperapi
-
-    # Check if all entries in the geometry column are valid Shapely geometries
-    is_valid_geometry = gdf['geometry'].apply(lambda x: isinstance(x, shapely.geometry.base.BaseGeometry))
-    WranglerLogger.debug(f"is_valid_geometry: \n{is_valid_geometry.value_counts()}")
-
-    # count coordinates per geometry
-    gdf['coord_count'] = gdf.geometry.count_coordinates()
-    WranglerLogger.debug(f"gdf.coord_count.value_counts(): \n{gdf.coord_count.value_counts()}")
-    WranglerLogger.debug(f"gdf.coord_count==1: \n{gdf.loc[gdf.coord_count == 1]}")
 
     # Convert geometry to WKT format
     gdf['geometry_wkt'] = gdf['geometry'].apply(lambda geom: geom.wkt)

@@ -23,7 +23,8 @@ import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
-from network_wrangler.utils.transit import drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
+from network_wrangler.utils.transit import \
+  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
 from network_wrangler.errors import NodeNotFoundError
 from network_wrangler.roadway.nodes.create import generate_node_ids
 
@@ -526,6 +527,7 @@ if __name__ == "__main__":
     gtfs_model,
     COUNTY_SHAPEFILE, 
     partially_include_route_type_action={2:'truncate'})
+  WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
   # New stations which opened between 2015 and 2023
   ADD_STOP_IDS = {
@@ -570,14 +572,9 @@ if __name__ == "__main__":
     '71111',  # Santa Rosa Downtown
     '71121',  # Santa Rosa North
     '71131',  # Sonoma County Airport
-    # Soltrans Bus Stop: Mark Hall Dr & Alumni Ln (UC Davis Mondavi Center)
-    '829204', # Just outside Solano county boundary
   }
   # create nodes for these stations
   new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
-  # Soltrans Bus Stop is odd one out -- it's a bus stop
-  new_station_nodes_gdf.loc[ new_station_nodes_gdf.stop_id == '829204', 'drive_access'] = 1
-  new_station_nodes_gdf.loc[ new_station_nodes_gdf.stop_id == '829204', 'rail_only'] = 0
 
   # add them to road_nodes_gdf
   road_nodes_gdf = gpd.GeoDataFrame(pd.concat([
@@ -680,6 +677,10 @@ if __name__ == "__main__":
   amtrak_vasco_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==AMTRAK_VASCO_STOP_ID].to_dict(orient='records')[0]
   WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
 
+  # Finally, truncate the gtfs_model SolTrans Route B because it includes one stop out of region
+  gtfs_model = truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
+  gtfs_model = truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
+
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=road_links_gdf,
@@ -688,7 +689,6 @@ if __name__ == "__main__":
   )
   WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
   WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
-  WranglerLogger.info(f"roadway_network.nodes_df.index:\n{roadway_network.nodes_df.index}")
 
   # Split Geyserville Avenue link to add transit stop 
   geyserville_stop_node_id = generate_node_ids(road_nodes_gdf, range(4_500_000 + 1, 5_000_000), n=1)[0]
@@ -744,6 +744,7 @@ if __name__ == "__main__":
       time_periods, 
       default_frequency_for_onetime_route=10800
     )
+    WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
   except NodeNotFoundError as e:
     # catch NodeNotFoundError and write out unmached stops to tableau for investigation
     WranglerLogger.error(f"Failed to match some GTFS stops to roadway network nodes:")
@@ -786,7 +787,7 @@ if __name__ == "__main__":
   transit_network = TransitNetwork(feed=feed)
   WranglerLogger.info(f"TransitNetwork created with {len(transit_network.feed.stops)} stops and {len(transit_network.feed.routes)} routes")
   
-  # debugging: check if any stops.stop_id or shapes.shape_mode_node_ids are not in the roadway network
+  # debugging: check if any stops.stop_id or shapes.shape_model_node_ids are not in the roadway network
   stops_roadway_gdf = pd.merge(
     left=feed.stops,
     right=roadway_network.nodes_df,
@@ -794,6 +795,7 @@ if __name__ == "__main__":
     left_on='stop_id',
     right_on='model_node_id',
     indicator=True,
+    suffixes=('','_road')
   )
   stops_roadway_gdf = gpd.GeoDataFrame(stops_roadway_gdf)
   WranglerLogger.debug(f"type(stops_roadway_gdf):\n{type(stops_roadway_gdf)}")
@@ -813,7 +815,8 @@ if __name__ == "__main__":
     how='outer',
     left_on='shape_model_node_id',
     right_on='model_node_id',
-    indicator=True
+    indicator=True,
+    suffixes=('','_road')
   )
   shapes_roadway_gdf = gpd.GeoDataFrame(shapes_roadway_gdf)
   WranglerLogger.debug(f"shapes_roadway_gdf._merge.value_counts():\n{shapes_roadway_gdf._merge.value_counts()}")
