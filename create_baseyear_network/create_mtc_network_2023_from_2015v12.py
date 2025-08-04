@@ -219,6 +219,7 @@ def create_nodes_for_new_stations(
   new_stops_gdf['walk_access']  = 1
   new_stops_gdf['bike_access']  = 1
   new_stops_gdf['rail_only']    = 1
+  new_stops_gdf['ferry_only']   = 1
   # rename stop_name to name
   new_stops_gdf.rename(columns={'stop_name':'name'}, inplace=True)
   # convert to the same crs as nodes_gdf
@@ -293,8 +294,9 @@ def create_transit_links_for_new_stations(
       'name': f'Transit link {from_stop_id} to {to_stop_id}',
       'geometry': line_geom,
       'distance': distance_miles,
-      # Set as rail-only link
+      # Set as rail-only / ferry_only link
       'rail_only': 1,
+      'ferry_only': 1,
       'drive_access': 0,
       'walk_access': 0,
       'bike_access': 0,
@@ -318,8 +320,9 @@ def create_transit_links_for_new_stations(
       'name': f'Transit link {to_stop_id} to {from_stop_id}',
       'geometry': shapely.geometry.LineString([point_B, point_A]),
       'distance': distance_miles,
-      # Set as rail-only link
+      # Set as rail-only/ferry-only link
       'rail_only': 1,
+      'ferry_only': 1,
       'drive_access': 0,
       'walk_access': 0,
       'bike_access': 0,
@@ -518,12 +521,15 @@ if __name__ == "__main__":
   # Read a GTFS network (not wrangler_flavored)
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
+  # drop some columns that are not required or useful
+  gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'])
 
+  WranglerLogger.debug(f"gtfs_model.stops.loc[ gtfs_model.stops['stop_id'] == 'mtc:powell']\n{gtfs_model.stops.loc[ gtfs_model.stops['stop_id'] == 'mtc:powell']}")
   # drop SFO Airport rail/bus
-  gtfs_model = drop_transit_agency(gtfs_model, agency_id='SI')
+  drop_transit_agency(gtfs_model, agency_id='SI')
 
   # filter out routes outside of Bay Area
-  gtfs_model = filter_transit_by_boundary(
+  filter_transit_by_boundary(
     gtfs_model,
     COUNTY_SHAPEFILE, 
     partially_include_route_type_action={2:'truncate'})
@@ -678,8 +684,8 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
 
   # Finally, truncate the gtfs_model SolTrans Route B because it includes one stop out of region
-  gtfs_model = truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
-  gtfs_model = truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
+  truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
+  truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
 
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
@@ -783,10 +789,19 @@ if __name__ == "__main__":
   
   # Create TransitNetwork from the Feed and validate it
   WranglerLogger.info("Creating TransitNetwork from Feed")
-  
   transit_network = TransitNetwork(feed=feed)
   WranglerLogger.info(f"TransitNetwork created with {len(transit_network.feed.stops)} stops and {len(transit_network.feed.routes)} routes")
-  
+
+  # Save the transit network regardless of validation issues
+  WranglerLogger.info("Saving TransitNetwork to files")
+  transit_output_dir = OUTPUT_DIR / "transit_network"
+  transit_output_dir.mkdir(exist_ok=True)
+  try:
+    write_transit(transit_network, out_dir=transit_output_dir, file_format="csv")
+    WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
+  except Exception as e:
+    WranglerLogger.error(f"Failed to save transit network: {e}")
+
   # debugging: check if any stops.stop_id or shapes.shape_model_node_ids are not in the roadway network
   stops_roadway_gdf = pd.merge(
     left=feed.stops,
@@ -808,7 +823,6 @@ if __name__ == "__main__":
     (OUTPUT_DIR / "stops_roadway.hyper").resolve(),
     "stops_roadway"
   )
-
   shapes_roadway_gdf = pd.merge(
     left=feed.shapes,
     right=roadway_network.nodes_df,
@@ -829,7 +843,7 @@ if __name__ == "__main__":
     "shapes_roadway"
   )
 
-  # This is dont by setting the road_net to roadway_network but we'll call this explicitly so
+  # This is done by setting the road_net to roadway_network but we'll call this explicitly so
   # we can write out more useful debug data
   missing_shape_links = network_wrangler.transit.validate.shape_links_without_road_links(feed.shapes, roadway_network.links_df)
   WranglerLogger.debug(f"missing_shape_links:\n{missing_shape_links}")
@@ -844,14 +858,9 @@ if __name__ == "__main__":
   except Exception as e:
     WranglerLogger.warning(f"Could not associate roadway network: {e}")
     WranglerLogger.warning("Continuing without roadway network association")
-  
-  # Save the transit network regardless of validation issues
-  WranglerLogger.info("Saving TransitNetwork to files")
-  transit_output_dir = OUTPUT_DIR / "transit_network"
-  transit_output_dir.mkdir(exist_ok=True)
+
   
   try:
-    # Write transit network tables using the correct function
     write_transit(transit_network, out_dir=transit_output_dir, file_format="csv")
     WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
   except Exception as e:
