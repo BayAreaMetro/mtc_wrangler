@@ -242,6 +242,8 @@ def create_transit_links_for_new_stations(
   Args:
       stop_pairs: List of tuples (from_stop_id, to_stop_id, oneway) representing links to create
       stop_id_to_model_node_id: Dictionary mapping relevant stop_id to model_node_id
+      node_gdf: Roadway nodes
+      existing_links_gdf: Existing roadway links
       
   Returns:
       GeoDataFrame of new transit links with appropriate attributes
@@ -253,6 +255,9 @@ def create_transit_links_for_new_stations(
   next_link_id = max_link_id + 1
   
   link_dicts = []
+  # Track created links to avoid duplicates within this batch
+  created_links = set()
+  
   for (from_stop_id, to_stop_id, oneway) in stop_pairs:
     from_model_node_id = stop_id_to_model_node_id.get(from_stop_id)
     to_model_node_id = stop_id_to_model_node_id.get(to_stop_id)
@@ -273,6 +278,41 @@ def create_transit_links_for_new_stations(
     if len(point_B_series) == 0:
       WranglerLogger.warning(f"Node {to_model_node_id} for stop {to_stop_id} not found in node_gdf - skipping link")
       continue
+
+    # Check if link already exists in the network
+    forward_exists = ((existing_links_gdf['A'] == from_model_node_id) & 
+                      (existing_links_gdf['B'] == to_model_node_id)).any()
+    if forward_exists:
+      raise ValueError(
+        f"Link from node {from_model_node_id} (stop {from_stop_id}) to node {to_model_node_id} (stop {to_stop_id}) "
+        f"already exists in the network. Duplicate transit links are not allowed."
+      )
+    
+    # Check if link was already created in this batch
+    link_tuple = (from_model_node_id, to_model_node_id)
+    if link_tuple in created_links:
+      raise ValueError(
+        f"Duplicate link from node {from_model_node_id} (stop {from_stop_id}) to node {to_model_node_id} (stop {to_stop_id}) "
+        f"in stop_pairs list. Each link should only be specified once."
+      )
+    
+    # For two-way links, also check if reverse link exists
+    if not oneway:
+      reverse_exists = ((existing_links_gdf['A'] == to_model_node_id) & 
+                        (existing_links_gdf['B'] == from_model_node_id)).any()
+      if reverse_exists:
+        raise ValueError(
+          f"Reverse link from node {to_model_node_id} (stop {to_stop_id}) to node {from_model_node_id} (stop {from_stop_id}) "
+          f"already exists in the network. Cannot create bidirectional link when reverse already exists."
+        )
+      
+      # Check if reverse was already created in this batch
+      reverse_tuple = (to_model_node_id, from_model_node_id)
+      if reverse_tuple in created_links:
+        raise ValueError(
+          f"Duplicate reverse link from node {to_model_node_id} (stop {to_stop_id}) to node {from_model_node_id} (stop {from_stop_id}) "
+          f"in stop_pairs list. Bidirectional links should be specified with oneway=False, not as two separate entries."
+        )
     
     # Extract the actual Point object from the GeoSeries
     point_A = point_A_series.values[0]
@@ -307,6 +347,7 @@ def create_transit_links_for_new_stations(
       'bus_only': 0,
     }
     link_dicts.append(forward_link)
+    created_links.add(link_tuple)  # Track this link as created
     next_link_id += 1
 
     if oneway: continue
@@ -333,6 +374,7 @@ def create_transit_links_for_new_stations(
       'bus_only': 0,
     }
     link_dicts.append(backward_link)
+    created_links.add(reverse_tuple)  # Track the reverse link as created
     next_link_id += 1
 
   new_links_gdf = gpd.GeoDataFrame(data=link_dicts, crs=node_gdf.crs)    
@@ -342,7 +384,7 @@ def create_transit_links_for_new_stations(
 if __name__ == "__main__":
   pd.options.display.max_columns = None
   pd.options.display.width = None
-  pd.options.display.min_rows = 50
+  pd.options.display.min_rows = 30
 
   # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.info.log"
   # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.debug.log"
@@ -522,10 +564,9 @@ if __name__ == "__main__":
   gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
   WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
   # drop some columns that are not required or useful
-  gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'])
+  gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
 
-  WranglerLogger.debug(f"gtfs_model.stops.loc[ gtfs_model.stops['stop_id'] == 'mtc:powell']\n{gtfs_model.stops.loc[ gtfs_model.stops['stop_id'] == 'mtc:powell']}")
-  # drop SFO Airport rail/bus
+  # drop SFO Airport rail/bus for now
   drop_transit_agency(gtfs_model, agency_id='SI')
 
   # filter out routes outside of Bay Area
@@ -554,7 +595,6 @@ if __name__ == "__main__":
     '17874', # Muni Union Square/Market St Station Southbound
     # Treasure Island Ferry
     'TF:1',  # Treasure Island Ferry Terminal
-    'TF:2',  # San Francisco Ferry Terminal for Treasure Island route
     # Richmond Ferry
     '7211',  # (service started 2019)
     # Vallejo Ferry Terminal
@@ -600,7 +640,38 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
   stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
   stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal
+  stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal (combine with previous?)
   stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
+  stop_id_to_model_node_id['7208']  = 2625971 # Main Street Alameda Ferry Terminal
+  stop_id_to_model_node_id['TF:2']  = 1026197 # San Francisco Ferry Terminal for Treasure Island route
+  stop_id_to_model_node_id['GF:43007'] = 5026530 # Tiburon Ferry Landing
+  stop_id_to_model_node_id['GF:43002'] = 5026531 # Angel Island Ferry Landing
+
+  # Caltrain NB
+  stop_id_to_model_node_id['70261'] = 2192815 # San Jose Diridon NB
+  stop_id_to_model_node_id['70231'] = 2192817 # Lawrence NB
+  stop_id_to_model_node_id['70241'] = 2192816 # Santa Clara NB
+  stop_id_to_model_node_id['70221'] = 2192818 # Sunnyvale NB
+  stop_id_to_model_node_id['70211'] = 2192819 # Mountain View NB
+  stop_id_to_model_node_id['70171'] = 2192822 # Palo Alto NB
+  stop_id_to_model_node_id['70141'] = 1556381 # Redwood City NB
+  stop_id_to_model_node_id['70121'] = 1556386 # Belmont NB
+  stop_id_to_model_node_id['70111'] = 1556382 # Hillsdale NB
+  stop_id_to_model_node_id['70091'] = 1556388 # San Mateo NB
+  stop_id_to_model_node_id['70061'] = 1556383 # Millbrae NB
+  stop_id_to_model_node_id['70041'] = 1556384 # South San Francisco NB
+  stop_id_to_model_node_id['70021'] = 1027622 # 22nd Street NB
+  stop_id_to_model_node_id['70011'] = 1027620 # San Francisco NB
+  # Caltrain SB
+  stop_id_to_model_node_id['70022'] = 1027618 # 22nd Street SB
+  stop_id_to_model_node_id['70052'] = 1556370 # San Bruno SB
+  stop_id_to_model_node_id['70092'] = 1556373 # San Mateo SB
+  stop_id_to_model_node_id['70132'] = 1556377 # San Carlos SB
+  stop_id_to_model_node_id['70142'] = 1556378 # Redwood City SB
+  stop_id_to_model_node_id['70172'] = 2192799 # Palo Alto SB
+  stop_id_to_model_node_id['70212'] = 2192802 # Mountain View SB
+  stop_id_to_model_node_id['70222'] = 2192803 # Sunnyvale SB
+  stop_id_to_model_node_id['70242'] = 2192805 # Santa Clara SB
 
   # Define transit links to add between new stations
   # model_ids should either be mapped to model_node_ids 
@@ -627,14 +698,26 @@ if __name__ == "__main__":
     ('17873', '17872', True), # Yerba Buena/Moscone Station to Fourth & Brannan
     ('17872', '17397', True), # Fourth & Brannan to Fourth and King
     # Treasure Island Ferry
-    ('TF:1', 'TF:2', False),
+    ('TF:1',  'TF:2',  False),
     # SF Ferry Terminal to Richmond Ferry 
-    ('72011', '7211', False),
+    ('72011', '7211',  False),
+    # SF Ferry Terminal to Tiburon Ferry
+    ('TF:2',  'GF:43007', False),
     # SF Ferry Terminal to Vallejo to Mare Island
-    ('72011', '7212', False),
-    ('7212',  '7213', False),
+    ('72011', '7212',  False),
+    ('7212',  '7213',  False),
     # Alameda Seaplane Lagoon to South San Francisco Ferry
-    ('7207',  '7205', False),
+    ('7207',  '7205',  False),
+    # Alameda Seaplane Lagoon to San Francisco
+    ('7207',  '72011', False),
+    # Alameda Main Street Ferry Terminal to South San Francisco Ferry Terminal
+    ('7208',  '7205',  True), # reverse link already exists
+    # Alameda Main Street Ferry Terminal to San Francisco
+    ('7208', '72013', False),
+    # Angel Island to San Francisco
+    ('GF:43002', '72011', False),
+    # Angel Island to Tiburon
+    ('GF:43002', 'GF:43007', False),
     # Capitol Corridor
     ('AM:SUI','AM:FFV', False), # Suisun-Fairfield to Fairfield-Vacaville
     ('AM:FFV','AM:DAV', False), # Fairfield-Vacaville to Davis
@@ -650,6 +733,24 @@ if __name__ == "__main__":
     ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
     ('71111','71121', False), # Santa Rosa Downtown to Santa Rosa North
     ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
+    # Caltrain limited links - Northbound
+    ('70261','70231', True), # San Jose Diridon to Lawrence NB
+    ('70261','70211', True), # San Jose Diridon to Mountain View NB
+    ('70241','70221', True), # Santa Clara to Sunnyvale NB
+    ('70211','70171', True), # Mountain View to Palo Alto NB
+    ('70171','70141', True), # Palo Alto to Redwood City NB
+    ('70141','70121', True), # Redwood City to Belmont NB
+    ('70111','70091', True), # Hillsdale to San Mateo NB
+    ('70091','70061', True), # San Mateo NB to Millbrae NB
+    ('70041','70021', True), # South San Francisco to 22nd Street NB
+    ('70061','70021', True), # Millbrae to 22nd Street NB
+    ('70061','70011', True), # Millbrae to San Francisco NB
+    # Caltrain limited links - Southbound
+    ('70022','70052', True), # 22nd Street to San Bruno SB
+    ('70092','70132', True), # San Mateo to San Carlos SB
+    ('70142','70172', True), # Redwood City to Palo Alto SB
+    ('70172','70212', True), # Palo Alto to Mountain View SB
+    ('70222','70242', True), # Sunnyvale to Santa Clara SB
   ]
   
   # Create transit links for the new stations
@@ -747,7 +848,9 @@ if __name__ == "__main__":
     feed = create_feed_from_gtfs_model(
       gtfs_model,
       roadway_network,
-      time_periods, 
+      local_crs="EPSG:2227", # https://epsg.io/2227
+      crs_units="feet",
+      time_periods=time_periods,
       default_frequency_for_onetime_route=10800
     )
     WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
@@ -847,6 +950,45 @@ if __name__ == "__main__":
   # we can write out more useful debug data
   missing_shape_links = network_wrangler.transit.validate.shape_links_without_road_links(feed.shapes, roadway_network.links_df)
   WranglerLogger.debug(f"missing_shape_links:\n{missing_shape_links}")
+
+  if len(missing_shape_links) > 0:
+    # Write out missing_shape_links as tableau hyper
+    WranglerLogger.warning(f"Found {len(missing_shape_links):,} missing shape links - writing to Tableau Hyper file")
+    # check for A==B
+    WranglerLogger.warning(f"Found the following missing_shape_links with A==B:\n" + \
+                           f"{missing_shape_links.loc[ missing_shape_links.A==missing_shape_links.B]}")
+    missing_shape_links = missing_shape_links.loc[ missing_shape_links.A != missing_shape_links.B]
+    WranglerLogger.warning(f"Filtered these out; have {len(missing_shape_links):,} remaining")
+
+    # Create LineString geometry from shape point coordinates
+    from shapely.geometry import LineString, Point
+    import geopandas as gpd
+    
+    def create_line_from_shape_pts(row):
+      # Use shape_pt_lat/lon columns directly
+      point_a = Point(row['shape_pt_lon_A'], row['shape_pt_lat_A'])
+      point_b = Point(row['shape_pt_lon_B'], row['shape_pt_lat_B'])
+      return LineString([point_a, point_b])
+    
+    missing_shape_links['geometry'] = missing_shape_links.apply(create_line_from_shape_pts, axis=1)
+    
+    # Convert to GeoDataFrame if there are valid geometries
+    if len(missing_shape_links) > 0:
+        missing_shape_links_gdf = gpd.GeoDataFrame(
+            missing_shape_links,
+            geometry='geometry',
+            crs='EPSG:4326'  # lat/lon coordinates are in WGS84
+        )
+        
+        # Write to Tableau Hyper
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            missing_shape_links_gdf,
+            (OUTPUT_DIR / "missing_shape_links.hyper").resolve(),
+            "missing_shape_links"
+        )
+        WranglerLogger.info(f"Wrote {len(missing_shape_links_gdf)} missing shape links to Tableau Hyper file")
+    else:
+        WranglerLogger.warning("No valid missing shape links to write (all had invalid coordinates)")
 
   missing_nodes = network_wrangler.transit.validate.transit_nodes_without_road_nodes(feed, roadway_network.nodes_df)
   WranglerLogger.debug(f"missing_nodes:\n{missing_nodes}")
