@@ -15,6 +15,7 @@ import getpass
 import pathlib
 import typing
 import pandas as pd
+import numpy as np
 import geopandas as gpd
 import shapely.geometry
 
@@ -25,7 +26,8 @@ from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
-from network_wrangler.errors import NodeNotFoundError
+from network_wrangler.errors import \
+  NodeNotFoundError, TransitValidationError
 from network_wrangler.roadway.nodes.create import generate_node_ids
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
@@ -115,6 +117,188 @@ def fix_link_lanes(road_links_gdf: pd.DataFrame, lanes_col: str):
 
   WranglerLogger.debug(f"strings value_counts():")
   WranglerLogger.debug(road_links_gdf.loc[ road_links_gdf[lanes_col].apply(lambda x: isinstance(x, str)), lanes_col])
+
+def fix_mixed_type_columns(road_links_gdf: pd.DataFrame):
+  """Fix columns with mixed types that prevent parquet writing.
+  
+  Identifies columns with mixed types and converts them to strings.
+  """
+  WranglerLogger.debug("Checking for columns with mixed types...")
+  
+  for col in road_links_gdf.columns:
+    if road_links_gdf[col].dtype == 'object':
+      # Check if column has mixed types
+      types_in_col = set()
+      sample_size = min(1000, len(road_links_gdf))
+      for val in road_links_gdf[col].head(sample_size):
+        if pd.notna(val):
+          types_in_col.add(type(val).__name__)
+      
+      if len(types_in_col) > 1:
+        WranglerLogger.debug(f"  Column {col} has mixed types: {types_in_col}. Converting to string.")
+        road_links_gdf[col] = road_links_gdf[col].astype(str)
+        # Replace 'nan' strings with empty strings for cleaner output
+        road_links_gdf[col] = road_links_gdf[col].replace('nan', '')
+
+def fix_numeric_columns(road_links_gdf: pd.DataFrame):
+  """Fix numeric columns that have empty strings or invalid values.
+  
+  Converts empty strings to NaN for numeric columns so they can be written to parquet.
+  """
+  # Find all columns that should be numeric based on their current dtype or content
+  # Include all columns that end with common numeric suffixes
+  numeric_suffixes = ['time', 'cost', 'distance', 'speed', 'capacity', 'toll', 'lanes']
+  numeric_cols = []
+  
+  for col in road_links_gdf.columns:
+    # Check if column name suggests it should be numeric
+    if any(suffix in col.lower() for suffix in numeric_suffixes):
+      numeric_cols.append(col)
+    # Also include single letter columns that are typically coordinates
+    elif col in ['u', 'v', 'w', 'x', 'y', 'z', 'A', 'B']:
+      numeric_cols.append(col)
+    # Check if the column is already numeric but has some string values
+    elif road_links_gdf[col].dtype == 'object':
+      # Sample the column to see if it contains numeric-looking values
+      sample = road_links_gdf[col].dropna().head(100)
+      if len(sample) > 0:
+        try:
+          # Try to convert a sample to numeric
+          pd.to_numeric(sample, errors='coerce')
+          # If more than 50% convert successfully, consider it numeric
+          converted = pd.to_numeric(sample, errors='coerce')
+          if converted.notna().sum() / len(sample) > 0.5:
+            numeric_cols.append(col)
+        except:
+          pass
+  
+  WranglerLogger.debug(f"  Identified {len(numeric_cols)} potentially numeric columns to fix")
+  
+  for col in numeric_cols:
+    if col in road_links_gdf.columns:
+      # Replace empty strings and string NaN values with np.nan
+      road_links_gdf[col] = road_links_gdf[col].replace('', np.nan)
+      road_links_gdf[col] = road_links_gdf[col].replace('nan', np.nan)
+      road_links_gdf[col] = road_links_gdf[col].replace('NaN', np.nan)
+      road_links_gdf[col] = road_links_gdf[col].replace('NAN', np.nan)
+      
+      # Try to convert to numeric
+      try:
+        road_links_gdf[col] = pd.to_numeric(road_links_gdf[col], errors='coerce')
+        non_nan_count = road_links_gdf[col].notna().sum()
+        if non_nan_count > 0:
+          WranglerLogger.debug(f"    Converted column {col} to numeric (has {non_nan_count:,} non-NaN values)")
+      except Exception as e:
+        WranglerLogger.warning(f"    Could not convert column {col} to numeric: {e}")
+
+def fix_link_access(road_links_gdf: pd.DataFrame, access_col: str):
+  """Converts access columns to strings and renames them with 'orig_' prefix.
+  
+  Converts all values to strings for parquet compatibility and renames the column
+  to have 'orig_' prefix. The original column name is removed.
+  
+  Args:
+      road_links_gdf (pd.DataFrame): the RoadLinks DataFrame
+      access_col (str): 'access', 'ML_access', or 'locationReferences'
+  """
+  if access_col not in road_links_gdf.columns:
+    WranglerLogger.debug(f"fix_link_access: Column {access_col} not found, skipping")
+    return
+    
+  WranglerLogger.debug(f"fix_link_access(access_col={access_col})")
+  
+  # Get initial statistics - both types and value counts
+  initial_types = {}
+  for val in road_links_gdf[access_col]:
+    try:
+      # Check if it's not NaN - handle arrays properly
+      if pd.isna(val):
+        continue
+    except (ValueError, TypeError):
+      # Arrays or other complex types - treat as not-NaN
+      pass
+    t = type(val).__name__
+    initial_types[t] = initial_types.get(t, 0) + 1
+  WranglerLogger.debug(f"  Initial type distribution: {initial_types}")
+  
+  # Log value counts before transformation (handling unhashable types)
+  # For ML_access and locationReferences, skip value_counts as they have many unhashable types and are slow
+  if access_col in ['ML_access', 'locationReferences']:
+    WranglerLogger.debug(f"  Skipping value_counts for {access_col} (too many unhashable types)")
+    # Just show a sample
+    for i, val in enumerate(road_links_gdf[access_col].head(10)):
+      try:
+        if not pd.isna(val):
+          WranglerLogger.debug(f"    Row {i}: {repr(val)[:100] if len(repr(val)) > 100 else repr(val)} ({type(val).__name__})")
+      except (ValueError, TypeError):
+        # Complex type like array
+        WranglerLogger.debug(f"    Row {i}: {str(val)[:100] if len(str(val)) > 100 else str(val)} ({type(val).__name__})")
+  else:
+    WranglerLogger.debug(f"  Initial value counts (sample):")
+    try:
+      value_counts = road_links_gdf[access_col].value_counts().head(20)
+      for val, count in value_counts.items():
+        WranglerLogger.debug(f"    {repr(val)} ({type(val).__name__}): {count}")
+    except TypeError:
+      # Can't do value_counts if there are unhashable types like lists
+      WranglerLogger.debug("    Could not compute value_counts due to unhashable types")
+      # Show a sample instead
+      for i, val in enumerate(road_links_gdf[access_col].head(20)):
+        try:
+          if not pd.isna(val):
+            WranglerLogger.debug(f"    Row {i}: {repr(val)[:100] if len(repr(val)) > 100 else repr(val)} ({type(val).__name__})")
+        except (ValueError, TypeError):
+          # Complex type like array
+          WranglerLogger.debug(f"    Row {i}: {str(val)[:100] if len(str(val)) > 100 else str(val)} ({type(val).__name__})")
+  
+  # Simple conversion: everything to string using str()
+  WranglerLogger.debug(f"  Converting {access_col} to strings...")
+  
+  # For ML_access and locationReferences, process in chunks to avoid memory issues
+  if access_col in ['ML_access', 'locationReferences']:
+    WranglerLogger.debug(f"  Processing {access_col} in chunks due to size...")
+    chunk_size = 50000
+    total_rows = len(road_links_gdf)
+    
+    for i in range(0, total_rows, chunk_size):
+      end_idx = min(i + chunk_size, total_rows)
+      if i % 100000 == 0:
+        WranglerLogger.debug(f"    Processing rows {i:,} to {end_idx:,} of {total_rows:,}")
+      
+      # Convert chunk to string, replacing NaN with empty string
+      chunk_data = road_links_gdf[access_col].iloc[i:end_idx].fillna('').astype(str)
+      road_links_gdf.loc[road_links_gdf.index[i:end_idx], access_col] = chunk_data
+    
+    WranglerLogger.debug(f"  Completed {access_col} string conversion")
+  else:
+    # For other columns, convert all at once
+    road_links_gdf[access_col] = road_links_gdf[access_col].fillna('').astype(str)
+  
+  # Ensure string dtype
+  road_links_gdf[access_col] = road_links_gdf[access_col].astype(str)
+  
+  # Log final statistics
+  WranglerLogger.debug(f"  Final column dtype: {road_links_gdf[access_col].dtype}")
+  
+  # Skip final value counts for ML_access and locationReferences as they're slow
+  if access_col not in ['ML_access', 'locationReferences']:
+    WranglerLogger.debug(f"  Final value counts (first 10):")
+    try:
+      value_counts = road_links_gdf[access_col].value_counts().head(10)
+      for val, count in value_counts.items():
+        WranglerLogger.debug(f"    {repr(val)}: {count}")
+    except Exception as e:
+      WranglerLogger.debug(f"    Could not compute final value_counts: {e}")
+  
+  # Rename the column to orig_
+  orig_col = f'orig_{access_col}'
+  road_links_gdf.rename(columns={access_col: orig_col}, inplace=True)
+  WranglerLogger.debug(f"  Renamed {access_col} to {orig_col}")
+  
+  # For access and ML_access, add back a simple None column to satisfy schema
+  if access_col in ['access', 'ML_access']:
+    road_links_gdf[access_col] = None
+    WranglerLogger.debug(f"  Added back {access_col} column with None values")
 
 def create_nodes_for_new_stations(
     new_stop_ids: typing.List[str],
@@ -384,7 +568,7 @@ def create_transit_links_for_new_stations(
 if __name__ == "__main__":
   pd.options.display.max_columns = None
   pd.options.display.width = None
-  pd.options.display.min_rows = 30
+  pd.options.display.min_rows = 20
 
   # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.info.log"
   # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_2015_{NOW}.debug.log"
@@ -526,6 +710,8 @@ if __name__ == "__main__":
   # Fix this according to network_wrangler standard
   fix_link_lanes(road_links_gdf, lanes_col='lanes')
   fix_link_lanes(road_links_gdf, lanes_col='ML_lanes')
+  
+  # Access columns will be fixed after all links are added (including transit links)
 
   # network_wrangler requires distance field
   road_links_gdf_feet = road_links_gdf.to_crs(epsg=2227)
@@ -788,6 +974,31 @@ if __name__ == "__main__":
   truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
   truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
 
+  # Fix access and other object columns to be parquet-compatible after all links have been added
+  # Find all columns that have list or mixed types and need fixing
+  WranglerLogger.debug("Identifying columns with lists or mixed types...")
+  columns_to_fix = []
+  for col in road_links_gdf.columns:
+    if road_links_gdf[col].dtype == 'object':
+      # Check the first non-null value to see if it's a list
+      sample = road_links_gdf[col].dropna().head(100)
+      if len(sample) > 0:
+        has_lists = any(isinstance(val, list) for val in sample)
+        if has_lists:
+          columns_to_fix.append(col)
+          WranglerLogger.debug(f"  Column {col} contains lists - will convert to string")
+  
+  # Fix all identified columns
+  for col in columns_to_fix:
+    fix_link_access(road_links_gdf, access_col=col)
+  
+  # Fix numeric columns before creating the roadway network
+  WranglerLogger.debug("Fixing numeric columns with empty strings...")
+  fix_numeric_columns(road_links_gdf)
+  
+  # Fix columns with mixed types
+  fix_mixed_type_columns(road_links_gdf)
+  
   # create roadway network
   roadway_network =  network_wrangler.load_roadway_from_dataframes(
     links_df=road_links_gdf,
@@ -822,6 +1033,49 @@ if __name__ == "__main__":
   WranglerLogger.debug(f"roadway_network.nodes_df.loc[roadway_network.nodes_df['model_node_id'].isna()]:\n{roadway_network.nodes_df.loc[ roadway_network.nodes_df['model_node_id'].isna()]}")
   # use RoadwayNetwork.move_nodes()
   roadway_network.move_nodes(move_transit_nodes_df)
+
+  # Check for any columns with lists after project application and convert them all to strings
+  WranglerLogger.debug("Checking for list columns after project application...")
+  for col in roadway_network.links_df.columns:
+    if roadway_network.links_df[col].dtype == 'object':
+      # Check entire column, not just sample
+      has_lists = False
+      for val in roadway_network.links_df[col]:
+        if isinstance(val, list):
+          has_lists = True
+          break
+      
+      if has_lists:
+        WranglerLogger.debug(f"  Column {col} still contains lists - converting all values to string")
+        # Convert each value individually to handle lists properly
+        roadway_network.links_df[col] = roadway_network.links_df[col].apply(
+          lambda x: str(x) if isinstance(x, list) else x
+        )
+        # Now ensure all values are strings
+        roadway_network.links_df[col] = roadway_network.links_df[col].fillna('').astype(str)
+  
+  # Write the 2023 roadway network to parquet files
+  WranglerLogger.info("Writing 2023 roadway network to parquet files...")
+  from network_wrangler.roadway.io import write_roadway
+  
+  # Create roadway_network subdirectory similar to transit_network
+  roadway_output_dir = OUTPUT_DIR / "roadway_network"
+  roadway_output_dir.mkdir(exist_ok=True)
+  
+  try:
+    write_roadway(
+      roadway_network, 
+      out_dir=roadway_output_dir,
+      prefix="road_net_2023",
+      file_format="parquet",
+      overwrite=True
+    )
+    WranglerLogger.info(f"Roadway network saved to {roadway_output_dir}")
+  except Exception as e:
+    WranglerLogger.error(f"Error writing roadway network: {e}")
+    raise
+  
+  WranglerLogger.info("Finished writing 2023 roadway network files")
 
   tableau_utils.write_geodataframe_as_tableau_hyper(
     roadway_network.links_df,  # drop distance==0 links because otherwise this will error
@@ -865,28 +1119,32 @@ if __name__ == "__main__":
       WranglerLogger.info(f"Writing {len(e.unmatched_stops_gdf)} unmatched stops to {unmatched_stops_file}")
       
       # Prepare the unmatched stops data for Tableau - include ALL fields
-      unmatched_stops_gdf = e.unmatched_stops_gdf.copy()
-      WranglerLogger.debug(f"unmatched_stops_gdf type={type(unmatched_stops_gdf)} rows=\n{unmatched_stops_gdf}")
-      
-      # Convert any list columns to strings for Tableau
-      for col in unmatched_stops_gdf.columns:
-        if unmatched_stops_gdf[col].dtype == 'object':
-          # Check if any values are lists
-          if any(isinstance(val, list) for val in unmatched_stops_gdf[col].dropna()):
-            unmatched_stops_gdf[col] = unmatched_stops_gdf[col].apply(
-              lambda x: ', '.join(map(str, x)) if isinstance(x, list) else str(x) if pd.notna(x) else ''
-            )
+      WranglerLogger.debug(f"e.unmatched_stops_gdf type={type(e.unmatched_stops_gdf)} rows=\n{e.unmatched_stops_gdf}")
       
       # Rename lat/lon to X/Y for the tableau utility if they exist
-      if 'stop_lon' in unmatched_stops_gdf.columns and 'stop_lat' in unmatched_stops_gdf.columns:
-        unmatched_stops_output = unmatched_stops_gdf.rename(columns={'stop_lon': 'X', 'stop_lat': 'Y'})
+      if 'stop_lon' in e.unmatched_stops_gdf.columns and 'stop_lat' in e.unmatched_stops_gdf.columns:
+        e.unmatched_stops_gdf.rename(columns={'stop_lon': 'X', 'stop_lat': 'Y'}, inplace=True)
       
       # Write to Tableau
       from tableau_utils import write_geodataframe_as_tableau_hyper
-      write_geodataframe_as_tableau_hyper(unmatched_stops_output, unmatched_stops_file, "unmatched_stops")
+      write_geodataframe_as_tableau_hyper(e.unmatched_stops_gdf, unmatched_stops_file, "unmatched_stops")
       
       WranglerLogger.error(f"Unmatched stops written to {unmatched_stops_file}")
     
+    # Re-raise the exception to stop processing
+    raise
+  except TransitValidationError as e:
+    # catch TransitValidationError and write out unmached stops to tableau for investigation
+    WranglerLogger.error(f"Failed to match some GTFS shape sequences to network nodes:")
+    WranglerLogger.error(str(e))
+    if hasattr(e, 'invalid_shape_sequences_gdf') and len(e.invalid_shape_sequences_gdf) > 0:
+      invalid_shape_sequences_file = (OUTPUT_DIR / "invalid_shape_sequences.hyper").resolve()
+      WranglerLogger.info(f"Writing {len(e.invalid_shape_sequences_gdf)} unmatched stops to {invalid_shape_sequences_file}")
+      # Write to Tableau
+      from tableau_utils import write_geodataframe_as_tableau_hyper
+      write_geodataframe_as_tableau_hyper(e.invalid_shape_sequences_gdf, invalid_shape_sequences_file, "unmatched_stops")
+      
+      WranglerLogger.error(f"Unmatched stops written to {invalid_shape_sequences_file}")
     # Re-raise the exception to stop processing
     raise
   
