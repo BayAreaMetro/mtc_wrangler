@@ -37,6 +37,15 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
         # make sure it's in WSG84
         gdf = in_gdf.to_crs(crs='EPSG:4326')
 
+    # Convert any list columns to strings for Tableau
+    for col in gdf.columns:
+        if gdf[col].dtype == 'object':
+            # Check if any values are lists
+            if any(isinstance(val, list) for val in gdf[col].dropna()):
+                gdf[col] = gdf[col].apply(
+                    lambda x: ', '.join(map(str, x)) if isinstance(x, list) else str(x) if pd.notna(x) else ''
+                )
+
     import tableauhyperapi
 
     # Convert geometry to WKT format
@@ -53,7 +62,6 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
     # Specify all columns into which data is inserter in Inserter.ColumnMapping list. For columns that do not require any
     # transformations provide only the names
     column_mappings = []
-  
 
     for col in gdf.columns:
         # geometry_wkt to be converted from WKT to geometry via column_mapping
