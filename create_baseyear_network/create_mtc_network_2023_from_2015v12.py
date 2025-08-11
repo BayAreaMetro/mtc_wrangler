@@ -172,7 +172,7 @@ def fix_numeric_columns(road_links_gdf: pd.DataFrame):
         except:
           pass
   
-  WranglerLogger.debug(f"  Identified {len(numeric_cols)} potentially numeric columns to fix")
+  WranglerLogger.debug(f"  Identified {len(numeric_cols)} potentially numeric columns to fix: {numeric_cols}")
   
   for col in numeric_cols:
     if col in road_links_gdf.columns:
@@ -199,106 +199,20 @@ def fix_link_access(road_links_gdf: pd.DataFrame, access_col: str):
   
   Args:
       road_links_gdf (pd.DataFrame): the RoadLinks DataFrame
-      access_col (str): 'access', 'ML_access', or 'locationReferences'
+      access_col (str): 'access', 'ML_access'
   """
   if access_col not in road_links_gdf.columns:
     WranglerLogger.debug(f"fix_link_access: Column {access_col} not found, skipping")
     return
     
-  WranglerLogger.debug(f"fix_link_access(access_col={access_col})")
-  
-  # Get initial statistics - both types and value counts
-  initial_types = {}
-  for val in road_links_gdf[access_col]:
-    try:
-      # Check if it's not NaN - handle arrays properly
-      if pd.isna(val):
-        continue
-    except (ValueError, TypeError):
-      # Arrays or other complex types - treat as not-NaN
-      pass
-    t = type(val).__name__
-    initial_types[t] = initial_types.get(t, 0) + 1
-  WranglerLogger.debug(f"  Initial type distribution: {initial_types}")
-  
-  # Log value counts before transformation (handling unhashable types)
-  # For ML_access and locationReferences, skip value_counts as they have many unhashable types and are slow
-  if access_col in ['ML_access', 'locationReferences']:
-    WranglerLogger.debug(f"  Skipping value_counts for {access_col} (too many unhashable types)")
-    # Just show a sample
-    for i, val in enumerate(road_links_gdf[access_col].head(10)):
-      try:
-        if not pd.isna(val):
-          WranglerLogger.debug(f"    Row {i}: {repr(val)[:100] if len(repr(val)) > 100 else repr(val)} ({type(val).__name__})")
-      except (ValueError, TypeError):
-        # Complex type like array
-        WranglerLogger.debug(f"    Row {i}: {str(val)[:100] if len(str(val)) > 100 else str(val)} ({type(val).__name__})")
-  else:
-    WranglerLogger.debug(f"  Initial value counts (sample):")
-    try:
-      value_counts = road_links_gdf[access_col].value_counts().head(20)
-      for val, count in value_counts.items():
-        WranglerLogger.debug(f"    {repr(val)} ({type(val).__name__}): {count}")
-    except TypeError:
-      # Can't do value_counts if there are unhashable types like lists
-      WranglerLogger.debug("    Could not compute value_counts due to unhashable types")
-      # Show a sample instead
-      for i, val in enumerate(road_links_gdf[access_col].head(20)):
-        try:
-          if not pd.isna(val):
-            WranglerLogger.debug(f"    Row {i}: {repr(val)[:100] if len(repr(val)) > 100 else repr(val)} ({type(val).__name__})")
-        except (ValueError, TypeError):
-          # Complex type like array
-          WranglerLogger.debug(f"    Row {i}: {str(val)[:100] if len(str(val)) > 100 else str(val)} ({type(val).__name__})")
-  
-  # Simple conversion: everything to string using str()
-  WranglerLogger.debug(f"  Converting {access_col} to strings...")
-  
-  # For ML_access and locationReferences, process in chunks to avoid memory issues
-  if access_col in ['ML_access', 'locationReferences']:
-    WranglerLogger.debug(f"  Processing {access_col} in chunks due to size...")
-    chunk_size = 50000
-    total_rows = len(road_links_gdf)
-    
-    for i in range(0, total_rows, chunk_size):
-      end_idx = min(i + chunk_size, total_rows)
-      if i % 100000 == 0:
-        WranglerLogger.debug(f"    Processing rows {i:,} to {end_idx:,} of {total_rows:,}")
-      
-      # Convert chunk to string, replacing NaN with empty string
-      chunk_data = road_links_gdf[access_col].iloc[i:end_idx].fillna('').astype(str)
-      road_links_gdf.loc[road_links_gdf.index[i:end_idx], access_col] = chunk_data
-    
-    WranglerLogger.debug(f"  Completed {access_col} string conversion")
-  else:
-    # For other columns, convert all at once
-    road_links_gdf[access_col] = road_links_gdf[access_col].fillna('').astype(str)
-  
-  # Ensure string dtype
+  WranglerLogger.debug(f"fix_link_access(access_col='{access_col}')")
+  col_type = road_links_gdf[access_col].apply(type).astype(str)
+  WranglerLogger.debug(f"col_type.value_counts(dropna=False):\n{col_type.value_counts(dropna=False)}")
+  # convert to string
   road_links_gdf[access_col] = road_links_gdf[access_col].astype(str)
-  
-  # Log final statistics
-  WranglerLogger.debug(f"  Final column dtype: {road_links_gdf[access_col].dtype}")
-  
-  # Skip final value counts for ML_access and locationReferences as they're slow
-  if access_col not in ['ML_access', 'locationReferences']:
-    WranglerLogger.debug(f"  Final value counts (first 10):")
-    try:
-      value_counts = road_links_gdf[access_col].value_counts().head(10)
-      for val, count in value_counts.items():
-        WranglerLogger.debug(f"    {repr(val)}: {count}")
-    except Exception as e:
-      WranglerLogger.debug(f"    Could not compute final value_counts: {e}")
-  
-  # Rename the column to orig_
-  orig_col = f'orig_{access_col}'
-  road_links_gdf.rename(columns={access_col: orig_col}, inplace=True)
-  WranglerLogger.debug(f"  Renamed {access_col} to {orig_col}")
-  
-  # For access and ML_access, add back a simple None column to satisfy schema
-  if access_col in ['access', 'ML_access']:
-    road_links_gdf[access_col] = None
-    WranglerLogger.debug(f"  Added back {access_col} column with None values")
+  # rename
+  road_links_gdf.rename({access_col:f'orig_{access_col}'}, inplace=True)
+  WranglerLogger.debug(f"Converted column '{access_col}' to str and renamed to 'orig_{access_col}'")
 
 def create_nodes_for_new_stations(
     new_stop_ids: typing.List[str],
@@ -974,23 +888,11 @@ if __name__ == "__main__":
   truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
   truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
 
-  # Fix access and other object columns to be parquet-compatible after all links have been added
-  # Find all columns that have list or mixed types and need fixing
-  WranglerLogger.debug("Identifying columns with lists or mixed types...")
-  columns_to_fix = []
-  for col in road_links_gdf.columns:
-    if road_links_gdf[col].dtype == 'object':
-      # Check the first non-null value to see if it's a list
-      sample = road_links_gdf[col].dropna().head(100)
-      if len(sample) > 0:
-        has_lists = any(isinstance(val, list) for val in sample)
-        if has_lists:
-          columns_to_fix.append(col)
-          WranglerLogger.debug(f"  Column {col} contains lists - will convert to string")
+  # TODO: What is locationReferences?  Can we drop?  Convert to string for now
+  road_links_gdf['locationReferences'] = road_links_gdf['locationReferences'].astype(str)
   
-  # Fix all identified columns
-  for col in columns_to_fix:
-    fix_link_access(road_links_gdf, access_col=col)
+  fix_link_access(road_links_gdf, 'access')
+  fix_link_access(road_links_gdf, 'ML_access')
   
   # Fix numeric columns before creating the roadway network
   WranglerLogger.debug("Fixing numeric columns with empty strings...")
