@@ -797,7 +797,7 @@ if __name__ == "__main__":
   stop_node_mapping_df = pd.DataFrame(
     list(stop_id_to_model_node_id.items()), 
     columns=['stop_id', 'model_node_id']
-  )
+  ).drop_duplicates(subset=['model_node_id'], keep='first') # don't create duplicate model_node_ids
   # Join with gtfs stops to get stop names
   stop_node_mapping_df = stop_node_mapping_df.merge(
     gtfs_model.stops[['stop_id', 'stop_name']], 
