@@ -744,9 +744,15 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal (combine with previous?)
   stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
   stop_id_to_model_node_id['7208']  = 2625971 # Main Street Alameda Ferry Terminal
+  stop_id_to_model_node_id['7209'] = 2625970 # Oakland Ferry Terminal
   stop_id_to_model_node_id['TF:2']  = 1026197 # San Francisco Ferry Terminal for Treasure Island route
   stop_id_to_model_node_id['GF:43007'] = 5026530 # Tiburon Ferry Landing
   stop_id_to_model_node_id['GF:43002'] = 5026531 # Angel Island Ferry Landing
+
+  stop_id_to_model_node_id['64806'] = 2192891 # Baypointe WB
+  stop_id_to_model_node_id['64807'] = 2192908 # Champion WB
+
+  # TODO: this is silly. Should just specify local sequence and then create these automatically...
 
   # Caltrain NB
   stop_id_to_model_node_id['70261'] = 2192815 # San Jose Diridon NB
@@ -758,21 +764,54 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['70141'] = 1556381 # Redwood City NB
   stop_id_to_model_node_id['70121'] = 1556386 # Belmont NB
   stop_id_to_model_node_id['70111'] = 1556382 # Hillsdale NB
+  stop_id_to_model_node_id['70131'] = 1556385 # San Carlos NB
+  stop_id_to_model_node_id['70051'] = 1556390 # San Bruno NB
   stop_id_to_model_node_id['70091'] = 1556388 # San Mateo NB
   stop_id_to_model_node_id['70061'] = 1556383 # Millbrae NB
   stop_id_to_model_node_id['70041'] = 1556384 # South San Francisco NB
   stop_id_to_model_node_id['70021'] = 1027622 # 22nd Street NB
   stop_id_to_model_node_id['70011'] = 1027620 # San Francisco NB
   # Caltrain SB
+  stop_id_to_model_node_id['70012'] = 1027617 # San Francisco SB
   stop_id_to_model_node_id['70022'] = 1027618 # 22nd Street SB
+  stop_id_to_model_node_id['70042'] = 1556369 # South San Francisco SB
   stop_id_to_model_node_id['70052'] = 1556370 # San Bruno SB
+  stop_id_to_model_node_id['70062'] = 1556371 # Millbrae SB
   stop_id_to_model_node_id['70092'] = 1556373 # San Mateo SB
   stop_id_to_model_node_id['70132'] = 1556377 # San Carlos SB
+  stop_id_to_model_node_id['70112'] = 1556375 # Hillsdale SB
   stop_id_to_model_node_id['70142'] = 1556378 # Redwood City SB
   stop_id_to_model_node_id['70172'] = 2192799 # Palo Alto SB
   stop_id_to_model_node_id['70212'] = 2192802 # Mountain View SB
   stop_id_to_model_node_id['70222'] = 2192803 # Sunnyvale SB
   stop_id_to_model_node_id['70242'] = 2192805 # Santa Clara SB
+
+  # Set the name in road_nodes_gdf to the stop_name for these nodes using dataframe joins
+  WranglerLogger.info("Setting node names to stop names for mapped transit stops")
+  
+  # Create a dataframe from the stop_id to model_node_id mapping
+  stop_node_mapping_df = pd.DataFrame(
+    list(stop_id_to_model_node_id.items()), 
+    columns=['stop_id', 'model_node_id']
+  )
+  # Join with gtfs stops to get stop names
+  stop_node_mapping_df = stop_node_mapping_df.merge(
+    gtfs_model.stops[['stop_id', 'stop_name']], 
+    on='stop_id', 
+    how='left'
+  )
+  # Merge with the mapping to get stop names
+  road_nodes_gdf = road_nodes_gdf.merge(
+    stop_node_mapping_df[['model_node_id', 'stop_name']], 
+    on='model_node_id', 
+    how='left',
+    indicator=True
+  )
+ #  WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
+  road_nodes_gdf.loc[ pd.isna(road_nodes_gdf['name']) & (road_nodes_gdf._merge == 'both'), 'name'] = road_nodes_gdf['stop_name']
+  # CT:L5WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
+  # Drop temporary columns
+  road_nodes_gdf.drop(columns=['stop_name','_merge'], inplace=True)
 
   # Define transit links to add between new stations
   # model_ids should either be mapped to model_node_ids 
@@ -802,6 +841,8 @@ if __name__ == "__main__":
     ('TF:1',  'TF:2',  False),
     # SF Ferry Terminal to Richmond Ferry 
     ('72011', '7211',  False),
+    # SF Ferry Terminal to Oakland Ferry Terminal
+    ('72012', '7209', True),
     # SF Ferry Terminal to Tiburon Ferry
     ('TF:2',  'GF:43007', False),
     # SF Ferry Terminal to Vallejo to Mare Island
@@ -834,6 +875,9 @@ if __name__ == "__main__":
     ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
     ('71111','71121', False), # Santa Rosa Downtown to Santa Rosa North
     ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
+    # VTA Orange Line WB
+    ('64806', '64807', True), # Baypointe to Champion WB
+
     # Caltrain limited links - Northbound
     ('70261','70231', True), # San Jose Diridon to Lawrence NB
     ('70261','70211', True), # San Jose Diridon to Mountain View NB
@@ -842,12 +886,20 @@ if __name__ == "__main__":
     ('70171','70141', True), # Palo Alto to Redwood City NB
     ('70141','70121', True), # Redwood City to Belmont NB
     ('70111','70091', True), # Hillsdale to San Mateo NB
+    ('70131','70091', True), # San Carlos to San Mateo NP
     ('70091','70061', True), # San Mateo NB to Millbrae NB
+    ('70051','70021', True), # San Bruno to 22nd Street NB
     ('70041','70021', True), # South San Francisco to 22nd Street NB
     ('70061','70021', True), # Millbrae to 22nd Street NB
     ('70061','70011', True), # Millbrae to San Francisco NB
     # Caltrain limited links - Southbound
+    ('70012','70042', True), # San Francisco to South San Francisco SB
+    ('70042','70062', True), # South San Francisco to Millbrae SB
     ('70022','70052', True), # 22nd Street to San Bruno SB
+    ('70022','70062', True), # 22nd Street to Millbrae SB
+    ('70062','70092', True), # Millbrae to San Mateo SB
+    ('70062','70112', True), # Millbrae to Hillsdale SB
+    ('70112','70142', True), # Hillsdale to Redwood City SB
     ('70092','70132', True), # San Mateo to San Carlos SB
     ('70142','70172', True), # Redwood City to Palo Alto SB
     ('70172','70212', True), # Palo Alto to Mountain View SB
@@ -921,6 +973,17 @@ if __name__ == "__main__":
     new_model_node_id=geyserville_stop_node_id,
     fraction=0.3,
     split_reverse_link=True
+  )
+  # Split VTA Blue Line link to add Santa Clara NB station
+  vta_santa_clara_nb_stop_node_id = generate_node_ids(road_nodes_gdf, range(2_000_000 + 1, 2_500_000), n=1)[0]
+  WranglerLogger.debug(f"Adding node for {vta_santa_clara_nb_stop_node_id=}")
+  # Get the A and B nodes for the Geyserville Avenue link
+  roadway_network.split_link(
+    A=2192868, 
+    B=2192869,
+    new_model_node_id=vta_santa_clara_nb_stop_node_id,
+    fraction=0.5,
+    split_reverse_link=False
   )
 
   move_transit_nodes_df = pd.DataFrame([
