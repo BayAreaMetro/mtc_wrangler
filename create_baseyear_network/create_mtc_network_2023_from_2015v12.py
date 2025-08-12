@@ -740,11 +740,12 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['AM:DAV'] = 3547319  # Capitol Corridor Davis
   stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
   stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
-  stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal
-  stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal (combine with previous?)
+  stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal Gate E
+  stop_id_to_model_node_id['72012'] = 1028039 # SF Ferry Terminal Gate G
+  stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal Gate F (combine with previous?)
   stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
   stop_id_to_model_node_id['7208']  = 2625971 # Main Street Alameda Ferry Terminal
-  stop_id_to_model_node_id['7209'] = 2625970 # Oakland Ferry Terminal
+  stop_id_to_model_node_id['7209']  = 2625970 # Oakland Ferry Terminal
   stop_id_to_model_node_id['TF:2']  = 1026197 # San Francisco Ferry Terminal for Treasure Island route
   stop_id_to_model_node_id['GF:43007'] = 5026530 # Tiburon Ferry Landing
   stop_id_to_model_node_id['GF:43002'] = 5026531 # Angel Island Ferry Landing
@@ -780,11 +781,14 @@ if __name__ == "__main__":
   stop_id_to_model_node_id['70092'] = 1556373 # San Mateo SB
   stop_id_to_model_node_id['70132'] = 1556377 # San Carlos SB
   stop_id_to_model_node_id['70112'] = 1556375 # Hillsdale SB
+  stop_id_to_model_node_id['70122'] = 1556376 # Belmont
   stop_id_to_model_node_id['70142'] = 1556378 # Redwood City SB
   stop_id_to_model_node_id['70172'] = 2192799 # Palo Alto SB
   stop_id_to_model_node_id['70212'] = 2192802 # Mountain View SB
   stop_id_to_model_node_id['70222'] = 2192803 # Sunnyvale SB
   stop_id_to_model_node_id['70242'] = 2192805 # Santa Clara SB
+  stop_id_to_model_node_id['70232'] = 2192804 # Lawrence SB
+  stop_id_to_model_node_id['70262'] = 2192807 # San Jose SB
 
   # Set the name in road_nodes_gdf to the stop_name for these nodes using dataframe joins
   WranglerLogger.info("Setting node names to stop names for mapped transit stops")
@@ -842,8 +846,8 @@ if __name__ == "__main__":
     # SF Ferry Terminal to Richmond Ferry 
     ('72011', '7211',  False),
     # SF Ferry Terminal to Oakland Ferry Terminal
-    ('72012', '7209', True),
-    # SF Ferry Terminal to Tiburon Ferry
+    ('72012', '7209', True), # reverse already exists
+     # SF Ferry Terminal to Tiburon Ferry
     ('TF:2',  'GF:43007', False),
     # SF Ferry Terminal to Vallejo to Mare Island
     ('72011', '7212',  False),
@@ -899,11 +903,14 @@ if __name__ == "__main__":
     ('70022','70062', True), # 22nd Street to Millbrae SB
     ('70062','70092', True), # Millbrae to San Mateo SB
     ('70062','70112', True), # Millbrae to Hillsdale SB
+    ('70122','70142', True), # Belmont to Redwood City SB
     ('70112','70142', True), # Hillsdale to Redwood City SB
     ('70092','70132', True), # San Mateo to San Carlos SB
     ('70142','70172', True), # Redwood City to Palo Alto SB
     ('70172','70212', True), # Palo Alto to Mountain View SB
     ('70222','70242', True), # Sunnyvale to Santa Clara SB
+    ('70212','70262', True), # Mountain View to San Jose SB
+    ('70232','70262', True), # Lawrence to San Jose SB
   ]
   
   # Create transit links for the new stations
