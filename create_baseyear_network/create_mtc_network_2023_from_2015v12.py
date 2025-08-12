@@ -13,6 +13,7 @@ References:
 import datetime, time
 import getpass
 import pathlib
+import pprint
 import typing
 import pandas as pd
 import numpy as np
@@ -1012,7 +1013,7 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
   except NodeNotFoundError as e:
     # catch NodeNotFoundError and write out unmached stops to tableau for investigation
-    WranglerLogger.error(f"Failed to match some GTFS stops to roadway network nodes:")
+    WranglerLogger.error(f"Caught NodeNotFoundError: Failed to match some GTFS stops to roadway network nodes")
     WranglerLogger.error(str(e))
     
     # Write unmatched stops to Tableau for investigation if available
@@ -1037,8 +1038,12 @@ if __name__ == "__main__":
     raise
   except TransitValidationError as e:
     # catch TransitValidationError and write out unmached stops to tableau for investigation
-    WranglerLogger.error(f"Failed to match some GTFS shape sequences to network nodes:")
-    WranglerLogger.error(str(e))
+    WranglerLogger.error(f"Caught TransitValidationError: {e}")
+    WranglerLogger.error(f"{e.exception_source}")
+
+    if hasattr(e, 'failed_connectivity_sequences'):
+      WranglerLogger.error(f"failed_connectivity_sequences (pprinted):\n{pprint.pformat(e.failed_connectivity_sequences)}")
+
     if hasattr(e, 'invalid_shape_sequences_gdf') and len(e.invalid_shape_sequences_gdf) > 0:
       invalid_shape_sequences_file = (OUTPUT_DIR / "invalid_shape_sequences.hyper").resolve()
       WranglerLogger.info(f"Writing {len(e.invalid_shape_sequences_gdf)} unmatched stops to {invalid_shape_sequences_file}")
@@ -1047,6 +1052,8 @@ if __name__ == "__main__":
       write_geodataframe_as_tableau_hyper(e.invalid_shape_sequences_gdf, invalid_shape_sequences_file, "unmatched_stops")
       
       WranglerLogger.error(f"Unmatched stops written to {invalid_shape_sequences_file}")
+
+
     # Re-raise the exception to stop processing
     raise
   
