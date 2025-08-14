@@ -1114,14 +1114,17 @@ if __name__ == "__main__":
     if hasattr(e, 'failed_connectivity_sequences'):
       WranglerLogger.error(f"failed_connectivity_sequences (pprinted):\n{pprint.pformat(e.failed_connectivity_sequences)}")
 
-    if hasattr(e, 'invalid_shape_sequences_gdf') and len(e.invalid_shape_sequences_gdf) > 0:
-      invalid_shape_sequences_file = (OUTPUT_DIR / "invalid_shape_sequences.hyper").resolve()
-      WranglerLogger.info(f"Writing {len(e.invalid_shape_sequences_gdf)} unmatched stops to {invalid_shape_sequences_file}")
+    if hasattr(e, 'shape_links_gdf') and len(e.shape_links_gdf) > 0:
+      shape_links_file = (OUTPUT_DIR / "shape_links.hyper").resolve()
+      WranglerLogger.info(f"Writing {len(e.shape_links_gdf)} shape links to {shape_links_file}")
+
+      WranglerLogger.debug(f"e.shape_links_gdf.head():\n{e.shape_links_gdf.head()}")
+
       # Write to Tableau
       from tableau_utils import write_geodataframe_as_tableau_hyper
-      write_geodataframe_as_tableau_hyper(e.invalid_shape_sequences_gdf, invalid_shape_sequences_file, "invalid_shapes")
+      write_geodataframe_as_tableau_hyper(e.shape_links_gdf, shape_links_file, "shape_link")
       
-      WranglerLogger.error(f"Unmatched stops written to {invalid_shape_sequences_file}")
+      WranglerLogger.error(f"Shape links written to {shape_links_file}")
 
 
     # Re-raise the exception to stop processing
