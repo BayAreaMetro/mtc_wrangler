@@ -1119,7 +1119,7 @@ if __name__ == "__main__":
       WranglerLogger.info(f"Writing {len(e.invalid_shape_sequences_gdf)} unmatched stops to {invalid_shape_sequences_file}")
       # Write to Tableau
       from tableau_utils import write_geodataframe_as_tableau_hyper
-      write_geodataframe_as_tableau_hyper(e.invalid_shape_sequences_gdf, invalid_shape_sequences_file, "unmatched_stops")
+      write_geodataframe_as_tableau_hyper(e.invalid_shape_sequences_gdf, invalid_shape_sequences_file, "invalid_shapes")
       
       WranglerLogger.error(f"Unmatched stops written to {invalid_shape_sequences_file}")
 
