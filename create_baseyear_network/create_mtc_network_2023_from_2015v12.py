@@ -22,6 +22,7 @@ import shapely.geometry
 
 import tableau_utils
 import network_wrangler
+
 from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
@@ -30,6 +31,8 @@ from network_wrangler.utils.transit import \
 from network_wrangler.errors import \
   NodeNotFoundError, TransitValidationError
 from network_wrangler.roadway.nodes.create import generate_node_ids
+from network_wrangler.roadway.io import load_roadway_from_dir, write_roadway
+from network_wrangler.transit.io import load_feed_from_path
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
@@ -498,587 +501,630 @@ if __name__ == "__main__":
   )
   WranglerLogger.info(f"Created by {__file__}")
 
-  nodes_gdf = network_wrangler.utils.io_table.read_table(filename=NODES_FILE)
-  WranglerLogger.debug(f"Read {NODES_FILE}:\n{nodes_gdf}")
-  WranglerLogger.debug(f"type(nodes_gdf)={type(nodes_gdf)} crs={nodes_gdf.crs}")
-  WranglerLogger.debug(f"nodes_df.dtypes:\n{nodes_gdf.dtypes:}")
-  
-  links_df = network_wrangler.utils.io_table.read_table(filename=LINKS_FILE)
-  WranglerLogger.debug(f"Read {LINKS_FILE}:\n{links_df}")
-  WranglerLogger.debug(f"type(links_df)={type(links_df)}")
-  WranglerLogger.debug(f"links_df.dtypes:\n{links_df.dtypes:}")
+  # Create roadway and transit subdirectories for output
+  roadway_network_dir    = OUTPUT_DIR / "roadway_network"
+  transit_gtfs_model_dir = OUTPUT_DIR / "gtfs_model"
+  transit_network_dir    = OUTPUT_DIR / "transit_network"
 
-  shapes_gdf = network_wrangler.utils.io_table.read_table(filename=SHAPES_FILE)
-  WranglerLogger.debug(f"Read {SHAPES_FILE}:\n{shapes_gdf}")
-  WranglerLogger.debug(f"type(shapes_gdf)={type(shapes_gdf)} crs={shapes_gdf.crs}")
-  WranglerLogger.debug(f"shapes_df.dtypes:\n{shapes_gdf.dtypes:}")
-
-  # make transit into an int instead of an object, default to 0
-  WranglerLogger.debug(f"Initial links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
-  links_df.transit = links_df.transit.fillna(0)
-  links_df.transit = links_df.transit.astype(bool)
-  WranglerLogger.debug(f"Updated links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
-
-  # This is a model network and we'll come back to that later, but we're starting with roadway.
-  # So drop the TAZ and MAZ nodes, and the centroid connectors (FT=99, transit==False)
-  WranglerLogger.debug(f"links_df[['ft','transit']].value_counts(dropna=False)=\n{links_df[['ft','transit']].value_counts(dropna=False)}")
-  road_links_df = links_df.loc[ (links_df.ft != 99) | (links_df.transit == True) ]
-  WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links from {len(links_df):,} model links")
-
-  # filter out tap, taz, maz links
-  WranglerLogger.debug(f"road_links_df.roadway.value_counts(dropna=False)=\n{road_links_df.roadway.value_counts(dropna=False)}")
-  road_links_df = road_links_df.loc[road_links_df.roadway != 'tap']
-  road_links_df = road_links_df.loc[road_links_df.roadway != 'taz']
-  road_links_df = road_links_df.loc[road_links_df.roadway != 'maz']
-  WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links after dropping roadway=tap,taz,maz")
-
-  # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
-  # MAZs and TAZs have node numbers < 1M
-  road_nodes_gdf = nodes_gdf.loc[ nodes_gdf.model_node_id > 999999 ]
-  WranglerLogger.info(f"Filtering to {len(road_nodes_gdf):,} road nodes from {len(nodes_gdf):,} model nodes")
-
-  # Noting that 'id','fromIntersectionId','toIntersectionId' is not unicque
-  # because there are a bunch with id='walktorailN' or 'tap_N', and fromIntersectionId/toIntersectionId=None
-  duplicates = road_links_df.loc[road_links_df.duplicated(subset=['id','fromIntersectionId','toIntersectionId'], keep=False)]
-  WranglerLogger.debug(f"duplicated: len={len(duplicates):,}:\n{duplicates}")
-
-  road_links_df = pd.merge(
-    left=road_links_df,
-    right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
-    on=['id','fromIntersectionId','toIntersectionId'],
-    how='left',
-    indicator=True,
-  )
-  WranglerLogger.debug(f"After merging with shapes_gdf, road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
-  road_links_df.drop(columns=['_merge'], inplace=True)
-  WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
-
-  # Merging with shapes in the reverse direction
-  shapes_gdf.geometry = shapes_gdf.geometry.reverse()
-  road_links_df = pd.merge(
-    left=road_links_df,
-    right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
-    left_on=['id','fromIntersectionId','toIntersectionId'],
-    right_on=['id','toIntersectionId', 'fromIntersectionId'],
-    how='left',
-    indicator=True,
-    suffixes=('','_revgeom')
-  )
-  WranglerLogger.debug(f"After merging with shapes_gdf (reversed), road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
-  # now we have geometry and geometry_revgeom.  Use the latter if the former is na
-  road_links_df.loc[ road_links_df.geometry.isna(), 'geometry'] = road_links_df.geometry_revgeom
-  # drop new columns as we've used them to set geometry
-  road_links_df.drop(columns=['_merge', 'fromIntersectionId_revgeom','toIntersectionId_revgeom','geometry_revgeom'], inplace=True)
-  WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
-
-  # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
-  # Use all nodes, not just road nodes
-  no_geometry_links = road_links_df.loc[ pd.isnull(road_links_df.geometry) ]
-  no_geometry_links = pd.merge(
-    left=no_geometry_links,
-    right=nodes_gdf[['model_node_id','X','Y']],
-    how='left',
-    left_on='A',
-    right_on='model_node_id',
-    validate='many_to_one',
-    indicator=True,
-    suffixes=('','_A')
-  ).rename(columns={'_merge':'_merge_A','X':'X_A','Y':'Y_A','model_node_id':'model_node_id_A'})
-
-  no_geometry_links = pd.merge(
-    left=no_geometry_links,
-    right=nodes_gdf[['model_node_id','X','Y']],
-    how='left',
-    left_on='B',
-    right_on='model_node_id',
-    validate='many_to_one',
-    indicator=True,
-    suffixes=('','_B')
-  ).rename(columns={'_merge':'_merge_B','X':'X_B','Y':'Y_B','model_node_id':'model_node_id_B'})
-
-  # check that they all merged
-  WranglerLogger.debug(f"After merging with nodes, no_geometry_links[['_merge_A','_merge_B']].value_counts():\n{no_geometry_links[['_merge_A','_merge_B']].value_counts()}")
-  WranglerLogger.debug(f"no_geometry_links:\n{no_geometry_links}")
-  no_geometry_links['geometry'] = no_geometry_links.apply(create_line, axis=1)
-  # we're done with these columns -- drop them
-  no_geometry_links.drop(columns=[
-    'model_node_id_A','X_A','Y_A','_merge_A',
-    'model_node_id_B','X_B','Y_B','_merge_B'], 
-    inplace=True)
-  
-  # create road_links_gdf now that we have geometry for everything
-  road_links_gdf = gpd.GeoDataFrame(pd.concat([
-    road_links_df.loc[ pd.notnull(road_links_df.geometry) ],
-    no_geometry_links]),
-    crs=shapes_gdf.crs)
-  WranglerLogger.debug(f"Created road_links_gdf with dtypes:\n{road_links_gdf.dtypes}")
-  WranglerLogger.debug(f"road_links_gdf:\n{road_links_gdf}")
-
-  # fill in missing managed values with 0
-  WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
-  WranglerLogger.debug(f"road_links_gdf['managed'].apply(type).value_counts():\n{road_links_gdf['managed'].apply(type).value_counts()}")
-  road_links_gdf.loc[road_links_gdf.managed == '', 'managed'] = 0 # blank -> 0
-  road_links_gdf['managed'] = road_links_gdf['managed'].astype(int)
-  WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
-
-  # The columns lanes and ML_lanes are a combination of types, including dictionaries representing time-scoped versions
-  # Fix this according to network_wrangler standard
-  fix_link_lanes(road_links_gdf, lanes_col='lanes')
-  fix_link_lanes(road_links_gdf, lanes_col='ML_lanes')
-  
-  # Access columns will be fixed after all links are added (including transit links)
-
-  # network_wrangler requires distance field
-  road_links_gdf_feet = road_links_gdf.to_crs(epsg=2227)
-  road_links_gdf_feet['distance'] = road_links_gdf_feet.length / 5280 # distance is in miles
-  # join back to road_links_gdf
-  road_links_gdf = road_links_gdf.merge(
-    right=road_links_gdf_feet[['A','B','distance']],
-    how='left',
-    on=['A','B'],
-    validate='one_to_one'
-  )
-  # shape_id is a string
-  road_links_gdf['shape_id'] = road_links_gdf.model_link_id.astype(str)
-
-  # are there links with distance==0?
-  WranglerLogger.debug(f"road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]:\n{road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]}")
-
-  #TODO: This includes connectors so it's technically a model roadway network rather than a roadway network...
-
-  # Before creating the RoadwayNetwork object, there are a few transit stops and links that are missing because they didn't
-  # exist in 2015.  Add these to the roadway network because we'll need them to be compatible.
-
-  # The gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
-  # gtfs_model doesn't include calendar_dates so read this ourselves
-  # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
-  calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
-  WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-  calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
-  WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-  # make service_id a string
-  calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-  service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-  WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
-
-  # Read a GTFS network (not wrangler_flavored)
-  gtfs_model = network_wrangler.transit.io.load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
-  WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
-  # drop some columns that are not required or useful
-  gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
-
-  # drop SFO Airport rail/bus for now
-  drop_transit_agency(gtfs_model, agency_id='SI')
-
-  # filter out routes outside of Bay Area
-  filter_transit_by_boundary(
-    gtfs_model,
-    COUNTY_SHAPEFILE, 
-    partially_include_route_type_action={2:'truncate'})
-  WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
-
-  # New stations which opened between 2015 and 2023
-  ADD_STOP_IDS = {
-    # BART to San Jose
-    'WARM',  # Warm Springs / South Fremont (opened 2017)
-    'MLPT',  # Milpitas (opened 2020)
-    'BERY',  # Berryessa (opened 2020)
-    # BART to Antioch
-    'PCTR',  # Pittsburg Center (opened 2018)
-    'ANTC',  # Antioch (opened 2018)
-    # Muni Central Subway
-    '17876', # Muni Chinatown - Rose Pak Station
-    '17877', # Muni Union Square/Market St Station
-    '17878', # Muni Yerba Buena/Moscone Station Northbound
-    '17879', # Muni Fourth & Brannan Northbound
-    '17872', # Muni Fourth & Brannan Southbound
-    '17873', # Muni Yerba Buena/Moscone Station Southbound
-    '17874', # Muni Union Square/Market St Station Southbound
-    # Treasure Island Ferry
-    'TF:1',  # Treasure Island Ferry Terminal
-    # Richmond Ferry
-    '7211',  # (service started 2019)
-    # Vallejo Ferry Terminal
-    '7212',  # (service started)
-    # Mare Island Ferry Terminal
-    '7213',  # (service started in 2017)
-    # Alameda Seaplane Lagoon Ferry Terminal
-    '7207',  # (service started 2021) 
-    # Capitol Corridor
-    'AM:FFV', # Fairfield-Vacaville Station (opened 2017)
-    # SMART
-    '71011',  # Larkspur
-    '71021',  # San Rafael
-    '71031',  # Marin Civic Center
-    '71041',  # Novato Hamilton
-    '71051',  # Novato Downtown
-    '71061',  # Novato San Marin
-    '71071',  # Petaluma Downtown
-    '71091',  # Cotati
-    '71101',  # Rohnert Park
-    '71111',  # Santa Rosa Downtown
-    '71121',  # Santa Rosa North
-    '71131',  # Sonoma County Airport
-  }
-  # create nodes for these stations
-  new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
-
-  # add them to road_nodes_gdf
-  road_nodes_gdf = gpd.GeoDataFrame(pd.concat([
-    road_nodes_gdf, 
-    new_station_nodes_gdf.drop(columns=['stop_id'])], ignore_index=True))
-
-  stop_id_to_model_node_id = new_station_nodes_gdf[['stop_id','model_node_id']].set_index('stop_id').to_dict()['model_node_id']
-  WranglerLogger.debug(f"stop_id_to_model_node_id={stop_id_to_model_node_id}")
-
-  stop_id_to_model_node_id['FRMT'] = 2625947  # BART Fremont
-  stop_id_to_model_node_id['PITT'] = 3097273  # BART Pittsburg/Baypoint
-  stop_id_to_model_node_id['SBRN'] = 1556366  # BART San Bruno
-  stop_id_to_model_node_id['SFIA'] = 1556368  # BART SFO
-  stop_id_to_model_node_id['MLBR'] = 1556367  # BART Millbrae
-  stop_id_to_model_node_id['AM:SUI'] = 3547320  # Capitol Corridor Suisun-Fairfield
-  stop_id_to_model_node_id['AM:DAV'] = 3547319  # Capitol Corridor Davis
-  stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
-  stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
-  stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal Gate E
-  stop_id_to_model_node_id['72012'] = 1028039 # SF Ferry Terminal Gate G
-  stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal Gate F (combine with previous?)
-  stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
-  stop_id_to_model_node_id['7208']  = 2625971 # Main Street Alameda Ferry Terminal
-  stop_id_to_model_node_id['7209']  = 2625970 # Oakland Ferry Terminal
-  stop_id_to_model_node_id['TF:2']  = 1026197 # San Francisco Ferry Terminal for Treasure Island route
-  stop_id_to_model_node_id['GF:43007'] = 5026530 # Tiburon Ferry Landing
-  stop_id_to_model_node_id['GF:43002'] = 5026531 # Angel Island Ferry Landing
-
-  stop_id_to_model_node_id['64806'] = 2192891 # Baypointe WB
-  stop_id_to_model_node_id['64807'] = 2192908 # Champion WB
-  stop_id_to_model_node_id['64800'] = 2192937 # Champion EB
-  stop_id_to_model_node_id['64760'] = 2192855 # Baypointe EB
-
-  # TODO: this is silly. Should just specify local sequence and then create these automatically...
-
-  # Caltrain NB
-  stop_id_to_model_node_id['70321'] = 2192813 # Gilroy NB 
-  stop_id_to_model_node_id['70311'] = 2192812 # San Martin NB
-  stop_id_to_model_node_id['70301'] = 2192811 # Morgan Hill NB
-  stop_id_to_model_node_id['70291'] = 2192810 # Blossom Hill NB
-  stop_id_to_model_node_id['70281'] = 2192809 # Capitol NB
-  stop_id_to_model_node_id['70271'] = 2192808 # Tamien NB
-  stop_id_to_model_node_id['70261'] = 2192815 # San Jose Diridon NB
-  stop_id_to_model_node_id['70251'] = 2172876 # College Park Station NB
-  stop_id_to_model_node_id['70231'] = 2192817 # Lawrence NB
-  stop_id_to_model_node_id['70241'] = 2192816 # Santa Clara NB
-  stop_id_to_model_node_id['70221'] = 2192818 # Sunnyvale NB
-  stop_id_to_model_node_id['70211'] = 2192819 # Mountain View NB
-  stop_id_to_model_node_id['70171'] = 2192822 # Palo Alto NB
-  stop_id_to_model_node_id['70141'] = 1556381 # Redwood City NB
-  stop_id_to_model_node_id['70121'] = 1556386 # Belmont NB
-  stop_id_to_model_node_id['70111'] = 1556382 # Hillsdale NB
-  stop_id_to_model_node_id['70131'] = 1556385 # San Carlos NB
-  stop_id_to_model_node_id['70051'] = 1556390 # San Bruno NB
-  stop_id_to_model_node_id['70091'] = 1556388 # San Mateo NB
-  stop_id_to_model_node_id['70061'] = 1556383 # Millbrae NB
-  stop_id_to_model_node_id['70041'] = 1556384 # South San Francisco NB
-  stop_id_to_model_node_id['70021'] = 1027622 # 22nd Street NB
-  stop_id_to_model_node_id['70011'] = 1027620 # San Francisco NB
-  # Caltrain SB
-  stop_id_to_model_node_id['70012'] = 1027617 # San Francisco SB
-  stop_id_to_model_node_id['70022'] = 1027618 # 22nd Street SB
-  stop_id_to_model_node_id['70042'] = 1556369 # South San Francisco SB
-  stop_id_to_model_node_id['70052'] = 1556370 # San Bruno SB
-  stop_id_to_model_node_id['70062'] = 1556371 # Millbrae SB
-  stop_id_to_model_node_id['70092'] = 1556373 # San Mateo SB
-  stop_id_to_model_node_id['70132'] = 1556377 # San Carlos SB
-  stop_id_to_model_node_id['70112'] = 1556375 # Hillsdale SB
-  stop_id_to_model_node_id['70122'] = 1556376 # Belmont
-  stop_id_to_model_node_id['70142'] = 1556378 # Redwood City SB
-  stop_id_to_model_node_id['70172'] = 2192799 # Palo Alto SB
-  stop_id_to_model_node_id['70212'] = 2192802 # Mountain View SB
-  stop_id_to_model_node_id['70222'] = 2192803 # Sunnyvale SB
-  stop_id_to_model_node_id['70242'] = 2192805 # Santa Clara SB
-  stop_id_to_model_node_id['70232'] = 2192804 # Lawrence SB
-  stop_id_to_model_node_id['70262'] = 2192807 # San Jose SB
-
-  # Set the name in road_nodes_gdf to the stop_name for these nodes using dataframe joins
-  WranglerLogger.info("Setting node names to stop names for mapped transit stops")
-  
-  # Create a dataframe from the stop_id to model_node_id mapping
-  stop_node_mapping_df = pd.DataFrame(
-    list(stop_id_to_model_node_id.items()), 
-    columns=['stop_id', 'model_node_id']
-  ).drop_duplicates(subset=['model_node_id'], keep='first') # don't create duplicate model_node_ids
-  # Join with gtfs stops to get stop names
-  stop_node_mapping_df = stop_node_mapping_df.merge(
-    gtfs_model.stops[['stop_id', 'stop_name']], 
-    on='stop_id', 
-    how='left'
-  )
-  # Merge with the mapping to get stop names
-  road_nodes_gdf = road_nodes_gdf.merge(
-    stop_node_mapping_df[['model_node_id', 'stop_name']], 
-    on='model_node_id', 
-    how='left',
-    indicator=True
-  )
- #  WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
-  road_nodes_gdf.loc[ pd.isna(road_nodes_gdf['name']) & (road_nodes_gdf._merge == 'both'), 'name'] = road_nodes_gdf['stop_name']
-  # CT:L5WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
-  # Drop temporary columns
-  road_nodes_gdf.drop(columns=['stop_name','_merge'], inplace=True)
-
-  # Define transit links to add between new stations
-  # model_ids should either be mapped to model_node_ids 
-  # Format: (from_stop_id, to_stop_id, oneway)
-  TRANSIT_LINKS_TO_ADD = [
-    # BART to San Jose
-    ('FRMT', 'WARM', False),  # Fremont to Warm Springs
-    ('WARM', 'MLPT', False),  # Warm Springs to Milpitas
-    ('MLPT', 'BERY', False),  # Milpitas to Berryessa
-    # BART - these links are missing for some reason
-    ('SBRN', 'SFIA', True),   # San Bruno to SFO
-    ('SFIA', 'MLBR', True),   # SFO to Millbrae
-    # eBart extension
-    ('PITT', 'PCTR', False),  # Pittsburg/Baypoint to Pittsburg Center
-    ('PCTR', 'ANTC', False),  # Pittsburg Center to Antioch
-    # Muni Central Subway Northbound
-    ('17166', '17879', True), # Fourth and King St to Fouth and Brannan
-    ('17879', '17878', True), # Fourth and Brannan to Yerba Buena/Moscone Station
-    ('17878', '17877', True), # Yerba Buena/Moscone Station to Union Square/Market St Station
-    ('17877', '17876', True), # Union Square/Market St Station to Chinatown - Rose Pak Station
-    # Muni Central Subway Southbound
-    ('17876', '17874', True), # Chinatown - Rose Pak Station to Union Square/Market St Station
-    ('17874', '17873', True), # Union Square/Market St Station to Yerba Buena/Moscone Station
-    ('17873', '17872', True), # Yerba Buena/Moscone Station to Fourth & Brannan
-    ('17872', '17397', True), # Fourth & Brannan to Fourth and King
-    # Treasure Island Ferry
-    ('TF:1',  'TF:2',  False),
-    # SF Ferry Terminal to Richmond Ferry 
-    ('72011', '7211',  False),
-    # SF Ferry Terminal to Oakland Ferry Terminal
-    ('72012', '7209', True), # reverse already exists
-     # SF Ferry Terminal to Tiburon Ferry
-    ('TF:2',  'GF:43007', False),
-    # SF Ferry Terminal to Vallejo to Mare Island
-    ('72011', '7212',  False),
-    ('7212',  '7213',  False),
-    # Alameda Seaplane Lagoon to South San Francisco Ferry
-    ('7207',  '7205',  False),
-    # Alameda Seaplane Lagoon to San Francisco
-    ('7207',  '72011', False),
-    # Alameda Main Street Ferry Terminal to South San Francisco Ferry Terminal
-    ('7208',  '7205',  True), # reverse link already exists
-    # Alameda Main Street Ferry Terminal to San Francisco
-    ('7208', '72013', False),
-    # Angel Island to San Francisco
-    ('GF:43002', '72011', False),
-    # Angel Island to Tiburon
-    ('GF:43002', 'GF:43007', False),
-    # Capitol Corridor
-    ('AM:SUI','AM:FFV', False), # Suisun-Fairfield to Fairfield-Vacaville
-    ('AM:FFV','AM:DAV', False), # Fairfield-Vacaville to Davis
-    # SMART
-    ('71011','71021', False), # Larkspur to San Rafael
-    ('71021','71031', False), # San Rafael to Marin Civic Center
-    ('71031','71041', False), # Marin Civic Center to Novato Hamilton
-    ('71041','71051', False), # Novato Hamilton to Novato Downtown
-    ('71051','71061', False), # Novato Downtown to Novato San Marin
-    ('71061','71071', False), # Novato San Marin to Petaluma Downtown
-    ('71071','71091', False), # Petaluma Downtown to Cotati
-    ('71091','71101', False), # Cotati to Rohnert Park
-    ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
-    ('71111','71121', False), # Santa Rosa Downtown to Santa Rosa North
-    ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
-    # VTA Orange Line WB
-    ('64806', '64807', True), # Baypointe to Champion WB
-    # VTA Orange Line EB
-    ('64800', '64760', True), # Champion to Baypointe EB
-
-    # Caltrain limited links - Northbound
-    ('70321','70311', True), # Gilroy to San Martin NB
-    ('70311','70301', True), # San Martin to Morgan Hill NB
-    ('70301','70291', True), # Morgan Hill to Blossom Hill NB
-    ('70291','70281', True), # Blossom Hill to Capitol NB
-    ('70281','70271', True), # Capitol to Tamien NB
-    ('70271','70261', True), # Tamien to San Jose Diridon
-    ('70261','70251', True), # San Jose Diridon to College Park NB
-    ('70251','70241', True), # College Park to Santa Clara NB
-    ('70261','70231', True), # San Jose Diridon to Lawrence NB
-    ('70261','70211', True), # San Jose Diridon to Mountain View NB
-    ('70241','70221', True), # Santa Clara to Sunnyvale NB
-    ('70211','70171', True), # Mountain View to Palo Alto NB
-    ('70171','70141', True), # Palo Alto to Redwood City NB
-    ('70141','70121', True), # Redwood City to Belmont NB
-    ('70111','70091', True), # Hillsdale to San Mateo NB
-    ('70131','70091', True), # San Carlos to San Mateo NP
-    ('70091','70061', True), # San Mateo NB to Millbrae NB
-    ('70051','70021', True), # San Bruno to 22nd Street NB
-    ('70041','70021', True), # South San Francisco to 22nd Street NB
-    ('70061','70021', True), # Millbrae to 22nd Street NB
-    ('70061','70011', True), # Millbrae to San Francisco NB
-    # Caltrain limited links - Southbound
-    ('70012','70042', True), # San Francisco to South San Francisco SB
-    ('70042','70062', True), # South San Francisco to Millbrae SB
-    ('70022','70052', True), # 22nd Street to San Bruno SB
-    ('70022','70062', True), # 22nd Street to Millbrae SB
-    ('70062','70092', True), # Millbrae to San Mateo SB
-    ('70062','70112', True), # Millbrae to Hillsdale SB
-    ('70122','70142', True), # Belmont to Redwood City SB
-    ('70112','70142', True), # Hillsdale to Redwood City SB
-    ('70092','70132', True), # San Mateo to San Carlos SB
-    ('70142','70172', True), # Redwood City to Palo Alto SB
-    ('70172','70212', True), # Palo Alto to Mountain View SB
-    ('70222','70242', True), # Sunnyvale to Santa Clara SB
-    ('70212','70262', True), # Mountain View to San Jose SB
-    ('70232','70262', True), # Lawrence to San Jose SB
-  ]
-  
-  # Create transit links for the new stations
-  # Note: Use road_nodes_gdf which contains the newly created station nodes
-  new_transit_links_gdf = create_transit_links_for_new_stations(
-    TRANSIT_LINKS_TO_ADD, 
-    stop_id_to_model_node_id,
-    road_nodes_gdf,
-    road_links_gdf
-  )
-  
-  # Add new links to road_links_gdf
-  if len(new_transit_links_gdf) > 0:
-    road_links_gdf = gpd.GeoDataFrame(pd.concat([road_links_gdf, new_transit_links_gdf], ignore_index=True))
-    WranglerLogger.info(f"Added {len(new_transit_links_gdf)} new transit links to roadway network")
-
-  # remove Suisun-Fairfield to Davis and vice versa since Fairfield-Vacavaville was added in between
-  len_road_links_gdf = len(road_links_gdf)
-  road_links_gdf = road_links_gdf.loc[ (road_links_gdf.A != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.B != stop_id_to_model_node_id['AM:DAV']))]
-  road_links_gdf = road_links_gdf.loc[ (road_links_gdf.B != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.A != stop_id_to_model_node_id['AM:DAV']))]
-  WranglerLogger.debug(f"{len_road_links_gdf=:,} {len(road_links_gdf)=:,}")
-  assert(len(road_links_gdf) == len_road_links_gdf-2)
-
-  # The Hillsdale Caltrain station moved in 2021
-  HILLSDALE_STOP_ID = '70112'
-  hillsdale_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==HILLSDALE_STOP_ID].to_dict(orient='records')[0]
-  WranglerLogger.debug(f"Hillsdale stop:{hillsdale_stop_dict}")
-
-  # Vasco Rt Amtrak Station seems to be located slightly incorrectly
-  AMTRAK_VASCO_STOP_ID = 'CE:VAS'
-  amtrak_vasco_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==AMTRAK_VASCO_STOP_ID].to_dict(orient='records')[0]
-  WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
-
-  # Finally, truncate the gtfs_model SolTrans Route B because it includes one stop out of region
-  truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
-  truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
-
-  # TODO: What is locationReferences?  Can we drop?  Convert to string for now
-  road_links_gdf['locationReferences'] = road_links_gdf['locationReferences'].astype(str)
-  
-  fix_link_access(road_links_gdf, 'access')
-  fix_link_access(road_links_gdf, 'ML_access')
-  
-  # Fix numeric columns before creating the roadway network
-  WranglerLogger.debug("Fixing numeric columns with empty strings...")
-  fix_numeric_columns(road_links_gdf)
-  
-  # Fix columns with mixed types
-  fix_mixed_type_columns(road_links_gdf)
-  
-  # create roadway network
-  roadway_network =  network_wrangler.load_roadway_from_dataframes(
-    links_df=road_links_gdf,
-    nodes_df=road_nodes_gdf,
-    shapes_df=road_links_gdf
-  )
-  WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
-  WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
-
-  # Split Geyserville Avenue link to add transit stop 
-  geyserville_stop_node_id = generate_node_ids(road_nodes_gdf, range(4_500_000 + 1, 5_000_000), n=1)[0]
-  WranglerLogger.debug(f"Adding node for {geyserville_stop_node_id=}")
-  # Get the A and B nodes for the Geyserville Avenue link
-  roadway_network.split_link(
-    A=4514838, 
-    B=4540403,
-    new_model_node_id=geyserville_stop_node_id,
-    fraction=0.3,
-    split_reverse_link=True
-  )
-  # Split VTA Blue Line link to add Santa Clara NB station
-  vta_santa_clara_nb_stop_node_id = generate_node_ids(road_nodes_gdf, range(2_000_000 + 1, 2_500_000), n=1)[0]
-  WranglerLogger.debug(f"Adding node for {vta_santa_clara_nb_stop_node_id=}")
-  # Get the A and B nodes for the Geyserville Avenue link
-  roadway_network.split_link(
-    A=2192868, 
-    B=2192869,
-    new_model_node_id=vta_santa_clara_nb_stop_node_id,
-    fraction=0.5,
-    split_reverse_link=False
-  )
-
-  move_transit_nodes_df = pd.DataFrame([
-    # update Hillsdale coordinates
-    {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
-    {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
-    # update Amtrak Vasco coordinates
-    {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']}  
-  ])
-  WranglerLogger.debug(f"move_transit_nodes_df:\n{move_transit_nodes_df}")
-  # check if any model_node_ids are missing
-  WranglerLogger.debug(f"roadway_network.nodes_df.tail():\n{roadway_network.nodes_df.tail()}")
-  WranglerLogger.debug(f"roadway_network.nodes_df.loc[roadway_network.nodes_df['model_node_id'].isna()]:\n{roadway_network.nodes_df.loc[ roadway_network.nodes_df['model_node_id'].isna()]}")
-  # use RoadwayNetwork.move_nodes()
-  roadway_network.move_nodes(move_transit_nodes_df)
-
-  # Check for any columns with lists after project application and convert them all to strings
-  WranglerLogger.debug("Checking for list columns after project application...")
-  for col in roadway_network.links_df.columns:
-    if roadway_network.links_df[col].dtype == 'object':
-      # Check entire column, not just sample
-      has_lists = False
-      for val in roadway_network.links_df[col]:
-        if isinstance(val, list):
-          has_lists = True
-          break
-      
-      if has_lists:
-        WranglerLogger.debug(f"  Column {col} still contains lists - converting all values to string")
-        # Convert each value individually to handle lists properly
-        roadway_network.links_df[col] = roadway_network.links_df[col].apply(
-          lambda x: str(x) if isinstance(x, list) else x
-        )
-        # Now ensure all values are strings
-        roadway_network.links_df[col] = roadway_network.links_df[col].fillna('').astype(str)
-  
-  # Write the 2023 roadway network to parquet files
-  WranglerLogger.info("Writing 2023 roadway network to parquet files...")
-  from network_wrangler.roadway.io import write_roadway
-  
-  # Create roadway_network subdirectory similar to transit_network
-  roadway_output_dir = OUTPUT_DIR / "roadway_network"
-  roadway_output_dir.mkdir(exist_ok=True)
-  
+  roadway_network = None
+  gtfs_model = None
+  # skip initial steps if we've done them already
   try:
-    write_roadway(
-      roadway_network, 
-      out_dir=roadway_output_dir,
-      prefix="road_net_2023",
+    roadway_network = load_roadway_from_dir(
+      roadway_network_dir,
       file_format="parquet",
-      overwrite=True
     )
-    WranglerLogger.info(f"Roadway network saved to {roadway_output_dir}")
+    WranglerLogger.debug("After load_roadway_from_dir()")
+    WranglerLogger.debug(f"roadway_network.nodes_df.head():\n{roadway_network.nodes_df.head()}")
+    WranglerLogger.debug(f"roadway_network.links_df.head():\n{roadway_network.links_df.head()}")
   except Exception as e:
-    WranglerLogger.error(f"Error writing roadway network: {e}")
-    raise
-  
-  WranglerLogger.info("Finished writing 2023 roadway network files")
+    WranglerLogger.info(f"Could not read roadway_network from {roadway_network_dir}. Processing 2015 roadway network.")
+    WranglerLogger.error(e)
+  try:
+    gtfs_model = load_feed_from_path(
+      feed_path = transit_gtfs_model_dir,
+      wrangler_flavored = False
+    )
+    WranglerLogger.debug("After load_feed_from_path()")
+    WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
+  except Exception as e:
+    WranglerLogger.info(f"Could not read gtfs_model from {transit_gtfs_model_dir}. Processing 2015 roadway network.")
+    WranglerLogger.error(e)
 
-  tableau_utils.write_geodataframe_as_tableau_hyper(
-    roadway_network.links_df,  # drop distance==0 links because otherwise this will error
-    (OUTPUT_DIR / "mtc_links.hyper").resolve(),
-    "mtc_links"
-  )
-  tableau_utils.write_geodataframe_as_tableau_hyper(
-    roadway_network.nodes_df,
-    (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
-    "mtc_nodes"
-  )
+  if not roadway_network or not gtfs_model:
+    nodes_gdf = network_wrangler.utils.io_table.read_table(filename=NODES_FILE)
+    WranglerLogger.debug(f"Read {NODES_FILE}:\n{nodes_gdf}")
+    WranglerLogger.debug(f"type(nodes_gdf)={type(nodes_gdf)} crs={nodes_gdf.crs}")
+    WranglerLogger.debug(f"nodes_df.dtypes:\n{nodes_gdf.dtypes:}")
+
+    links_df = network_wrangler.utils.io_table.read_table(filename=LINKS_FILE)
+    WranglerLogger.debug(f"Read {LINKS_FILE}:\n{links_df}")
+    WranglerLogger.debug(f"type(links_df)={type(links_df)}")
+    WranglerLogger.debug(f"links_df.dtypes:\n{links_df.dtypes:}")
+
+    shapes_gdf = network_wrangler.utils.io_table.read_table(filename=SHAPES_FILE)
+    WranglerLogger.debug(f"Read {SHAPES_FILE}:\n{shapes_gdf}")
+    WranglerLogger.debug(f"type(shapes_gdf)={type(shapes_gdf)} crs={shapes_gdf.crs}")
+    WranglerLogger.debug(f"shapes_df.dtypes:\n{shapes_gdf.dtypes:}")
+
+    # make transit into an int instead of an object, default to 0
+    WranglerLogger.debug(f"Initial links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
+    links_df.transit = links_df.transit.fillna(0)
+    links_df.transit = links_df.transit.astype(bool)
+    WranglerLogger.debug(f"Updated links_df.transit.value_counts(dropna=False)\n{links_df.transit.value_counts(dropna=False)}")
+
+    # This is a model network and we'll come back to that later, but we're starting with roadway.
+    # So drop the TAZ and MAZ nodes, and the centroid connectors (FT=99, transit==False)
+    WranglerLogger.debug(f"links_df[['ft','transit']].value_counts(dropna=False)=\n{links_df[['ft','transit']].value_counts(dropna=False)}")
+    road_links_df = links_df.loc[ (links_df.ft != 99) | (links_df.transit == True) ]
+    WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links from {len(links_df):,} model links")
+
+    # filter out tap, taz, maz links
+    WranglerLogger.debug(f"road_links_df.roadway.value_counts(dropna=False)=\n{road_links_df.roadway.value_counts(dropna=False)}")
+    road_links_df = road_links_df.loc[road_links_df.roadway != 'tap']
+    road_links_df = road_links_df.loc[road_links_df.roadway != 'taz']
+    road_links_df = road_links_df.loc[road_links_df.roadway != 'maz']
+    WranglerLogger.info(f"Filtering to {len(road_links_df):,} road links after dropping roadway=tap,taz,maz")
+
+    # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+    # MAZs and TAZs have node numbers < 1M
+    road_nodes_gdf = nodes_gdf.loc[ nodes_gdf.model_node_id > 999999 ]
+    WranglerLogger.info(f"Filtering to {len(road_nodes_gdf):,} road nodes from {len(nodes_gdf):,} model nodes")
+
+    # Noting that 'id','fromIntersectionId','toIntersectionId' is not unicque
+    # because there are a bunch with id='walktorailN' or 'tap_N', and fromIntersectionId/toIntersectionId=None
+    duplicates = road_links_df.loc[road_links_df.duplicated(subset=['id','fromIntersectionId','toIntersectionId'], keep=False)]
+    WranglerLogger.debug(f"duplicated: len={len(duplicates):,}:\n{duplicates}")
+
+    road_links_df = pd.merge(
+      left=road_links_df,
+      right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
+      on=['id','fromIntersectionId','toIntersectionId'],
+      how='left',
+      indicator=True,
+    )
+    WranglerLogger.debug(f"After merging with shapes_gdf, road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
+    road_links_df.drop(columns=['_merge'], inplace=True)
+    WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
+
+    # Merging with shapes in the reverse direction
+    shapes_gdf.geometry = shapes_gdf.geometry.reverse()
+    road_links_df = pd.merge(
+      left=road_links_df,
+      right=shapes_gdf[['id','fromIntersectionId','toIntersectionId','geometry']],
+      left_on=['id','fromIntersectionId','toIntersectionId'],
+      right_on=['id','toIntersectionId', 'fromIntersectionId'],
+      how='left',
+      indicator=True,
+      suffixes=('','_revgeom')
+    )
+    WranglerLogger.debug(f"After merging with shapes_gdf (reversed), road_links_df[['_merge']].value_counts():\n{road_links_df[['_merge']].value_counts()}")
+    # now we have geometry and geometry_revgeom.  Use the latter if the former is na
+    road_links_df.loc[ road_links_df.geometry.isna(), 'geometry'] = road_links_df.geometry_revgeom
+    # drop new columns as we've used them to set geometry
+    road_links_df.drop(columns=['_merge', 'fromIntersectionId_revgeom','toIntersectionId_revgeom','geometry_revgeom'], inplace=True)
+    WranglerLogger.debug(f"{len(road_links_df.geometry.isna())=:,}")
+
+    # For the rows that do not have geometry, create a simple two-point line geometry from the node locations
+    # Use all nodes, not just road nodes
+    no_geometry_links = road_links_df.loc[ pd.isnull(road_links_df.geometry) ]
+    no_geometry_links = pd.merge(
+      left=no_geometry_links,
+      right=nodes_gdf[['model_node_id','X','Y']],
+      how='left',
+      left_on='A',
+      right_on='model_node_id',
+      validate='many_to_one',
+      indicator=True,
+      suffixes=('','_A')
+    ).rename(columns={'_merge':'_merge_A','X':'X_A','Y':'Y_A','model_node_id':'model_node_id_A'})
+
+    no_geometry_links = pd.merge(
+      left=no_geometry_links,
+      right=nodes_gdf[['model_node_id','X','Y']],
+      how='left',
+      left_on='B',
+      right_on='model_node_id',
+      validate='many_to_one',
+      indicator=True,
+      suffixes=('','_B')
+    ).rename(columns={'_merge':'_merge_B','X':'X_B','Y':'Y_B','model_node_id':'model_node_id_B'})
+
+    # check that they all merged
+    WranglerLogger.debug(f"After merging with nodes, no_geometry_links[['_merge_A','_merge_B']].value_counts():\n{no_geometry_links[['_merge_A','_merge_B']].value_counts()}")
+    WranglerLogger.debug(f"no_geometry_links:\n{no_geometry_links}")
+    no_geometry_links['geometry'] = no_geometry_links.apply(create_line, axis=1)
+    # we're done with these columns -- drop them
+    no_geometry_links.drop(columns=[
+      'model_node_id_A','X_A','Y_A','_merge_A',
+      'model_node_id_B','X_B','Y_B','_merge_B'], 
+      inplace=True)
+
+    # create road_links_gdf now that we have geometry for everything
+    road_links_gdf = gpd.GeoDataFrame(pd.concat([
+      road_links_df.loc[ pd.notnull(road_links_df.geometry) ],
+      no_geometry_links]),
+      crs=shapes_gdf.crs)
+    WranglerLogger.debug(f"Created road_links_gdf with dtypes:\n{road_links_gdf.dtypes}")
+    WranglerLogger.debug(f"road_links_gdf:\n{road_links_gdf}")
+
+    # fill in missing managed values with 0
+    WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
+    WranglerLogger.debug(f"road_links_gdf['managed'].apply(type).value_counts():\n{road_links_gdf['managed'].apply(type).value_counts()}")
+    road_links_gdf.loc[road_links_gdf.managed == '', 'managed'] = 0 # blank -> 0
+    road_links_gdf['managed'] = road_links_gdf['managed'].astype(int)
+    WranglerLogger.debug(f"road_links_gdf['managed'].value_counts():\n{road_links_gdf['managed'].value_counts()}")
+
+    # The columns lanes and ML_lanes are a combination of types, including dictionaries representing time-scoped versions
+    # Fix this according to network_wrangler standard
+    fix_link_lanes(road_links_gdf, lanes_col='lanes')
+    fix_link_lanes(road_links_gdf, lanes_col='ML_lanes')
+
+    # Access columns will be fixed after all links are added (including transit links)
+
+    # network_wrangler requires distance field
+    road_links_gdf_feet = road_links_gdf.to_crs(epsg=2227)
+    road_links_gdf_feet['distance'] = road_links_gdf_feet.length / 5280 # distance is in miles
+    # join back to road_links_gdf
+    road_links_gdf = road_links_gdf.merge(
+      right=road_links_gdf_feet[['A','B','distance']],
+      how='left',
+      on=['A','B'],
+      validate='one_to_one'
+    )
+    # shape_id is a string
+    road_links_gdf['shape_id'] = road_links_gdf.model_link_id.astype(str)
+
+    # are there links with distance==0?
+    WranglerLogger.debug(f"road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]:\n{road_links_gdf.loc[ road_links_gdf['distance'] == 0 ]}")
+
+    #TODO: This includes connectors so it's technically a model roadway network rather than a roadway network...
+
+    # Before creating the RoadwayNetwork object, there are a few transit stops and links that are missing because they didn't
+    # exist in 2015.  Add these to the roadway network because we'll need them to be compatible.
+
+    # The gtfs feed covers the month of October 2023; select to Wednesday, October 11, 2023
+    # gtfs_model doesn't include calendar_dates so read this ourselves
+    # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
+    calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
+    WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+    calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20231011) & (calendar_dates_df.exception_type == 1) ]
+    WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
+    # make service_id a string
+    calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
+    service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+    WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
+
+    # Read a GTFS network (not wrangler_flavored)
+    gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
+    WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
+    # drop some columns that are not required or useful
+    gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
+
+    # drop SFO Airport rail/bus for now
+    drop_transit_agency(gtfs_model, agency_id='SI')
+
+    # filter out routes outside of Bay Area
+    filter_transit_by_boundary(
+      gtfs_model,
+      COUNTY_SHAPEFILE, 
+      partially_include_route_type_action={2:'truncate'})
+    WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
+
+    # New stations which opened between 2015 and 2023
+    ADD_STOP_IDS = {
+      # BART to San Jose
+      'WARM',  # Warm Springs / South Fremont (opened 2017)
+      'MLPT',  # Milpitas (opened 2020)
+      'BERY',  # Berryessa (opened 2020)
+      # BART to Antioch
+      'PCTR',  # Pittsburg Center (opened 2018)
+      'ANTC',  # Antioch (opened 2018)
+      # Muni Central Subway
+      '17876', # Muni Chinatown - Rose Pak Station
+      '17877', # Muni Union Square/Market St Station
+      '17878', # Muni Yerba Buena/Moscone Station Northbound
+      '17879', # Muni Fourth & Brannan Northbound
+      '17872', # Muni Fourth & Brannan Southbound
+      '17873', # Muni Yerba Buena/Moscone Station Southbound
+      '17874', # Muni Union Square/Market St Station Southbound
+      # Treasure Island Ferry
+      'TF:1',  # Treasure Island Ferry Terminal
+      # Richmond Ferry
+      '7211',  # (service started 2019)
+      # Vallejo Ferry Terminal
+      '7212',  # (service started)
+      # Mare Island Ferry Terminal
+      '7213',  # (service started in 2017)
+      # Alameda Seaplane Lagoon Ferry Terminal
+      '7207',  # (service started 2021) 
+      # Capitol Corridor
+      'AM:FFV', # Fairfield-Vacaville Station (opened 2017)
+      # SMART
+      '71011',  # Larkspur
+      '71021',  # San Rafael
+      '71031',  # Marin Civic Center
+      '71041',  # Novato Hamilton
+      '71051',  # Novato Downtown
+      '71061',  # Novato San Marin
+      '71071',  # Petaluma Downtown
+      '71091',  # Cotati
+      '71101',  # Rohnert Park
+      '71111',  # Santa Rosa Downtown
+      '71121',  # Santa Rosa North
+      '71131',  # Sonoma County Airport
+      # VTA
+      # this was open but it's not in the network
+      '64746',  # San Antonio Station NB on the Green Line
+    }
+    # create nodes for these stations
+    new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
+
+    # add them to road_nodes_gdf
+    road_nodes_gdf = gpd.GeoDataFrame(pd.concat([
+      road_nodes_gdf, 
+      new_station_nodes_gdf.drop(columns=['stop_id'])], ignore_index=True))
+
+    stop_id_to_model_node_id = new_station_nodes_gdf[['stop_id','model_node_id']].set_index('stop_id').to_dict()['model_node_id']
+    WranglerLogger.debug(f"stop_id_to_model_node_id={stop_id_to_model_node_id}")
+
+    stop_id_to_model_node_id['FRMT'] = 2625947  # BART Fremont
+    stop_id_to_model_node_id['PITT'] = 3097273  # BART Pittsburg/Baypoint
+    stop_id_to_model_node_id['SBRN'] = 1556366  # BART San Bruno
+    stop_id_to_model_node_id['SFIA'] = 1556368  # BART SFO
+    stop_id_to_model_node_id['MLBR'] = 1556367  # BART Millbrae
+    stop_id_to_model_node_id['AM:SUI'] = 3547320  # Capitol Corridor Suisun-Fairfield
+    stop_id_to_model_node_id['AM:DAV'] = 3547319  # Capitol Corridor Davis
+    stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
+    stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
+    stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal Gate E
+    stop_id_to_model_node_id['72012'] = 1028039 # SF Ferry Terminal Gate G
+    stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal Gate F (combine with previous?)
+    stop_id_to_model_node_id['7205']  = 1556391 # South San Francisco Ferry Terminal
+    stop_id_to_model_node_id['7208']  = 2625971 # Main Street Alameda Ferry Terminal
+    stop_id_to_model_node_id['7209']  = 2625970 # Oakland Ferry Terminal
+    stop_id_to_model_node_id['TF:2']  = 1026197 # San Francisco Ferry Terminal for Treasure Island route
+    stop_id_to_model_node_id['GF:43007'] = 5026530 # Tiburon Ferry Landing
+    stop_id_to_model_node_id['GF:43002'] = 5026531 # Angel Island Ferry Landing
+
+    stop_id_to_model_node_id['64806'] = 2192891 # Baypointe WB
+    stop_id_to_model_node_id['64807'] = 2192908 # Champion WB
+    stop_id_to_model_node_id['64800'] = 2192937 # Champion EB
+    stop_id_to_model_node_id['64760'] = 2192855 # Baypointe EB
+
+    # TODO: this is silly. Should just specify local sequence and then create these automatically...
+
+    # Caltrain NB
+    stop_id_to_model_node_id['70321'] = 2192813 # Gilroy NB 
+    stop_id_to_model_node_id['70311'] = 2192812 # San Martin NB
+    stop_id_to_model_node_id['70301'] = 2192811 # Morgan Hill NB
+    stop_id_to_model_node_id['70291'] = 2192810 # Blossom Hill NB
+    stop_id_to_model_node_id['70281'] = 2192809 # Capitol NB
+    stop_id_to_model_node_id['70271'] = 2192808 # Tamien NB
+    stop_id_to_model_node_id['70261'] = 2192815 # San Jose Diridon NB
+    stop_id_to_model_node_id['70251'] = 2172876 # College Park Station NB
+    stop_id_to_model_node_id['70231'] = 2192817 # Lawrence NB
+    stop_id_to_model_node_id['70241'] = 2192816 # Santa Clara NB
+    stop_id_to_model_node_id['70221'] = 2192818 # Sunnyvale NB
+    stop_id_to_model_node_id['70211'] = 2192819 # Mountain View NB
+    stop_id_to_model_node_id['70171'] = 2192822 # Palo Alto NB
+    stop_id_to_model_node_id['70141'] = 1556381 # Redwood City NB
+    stop_id_to_model_node_id['70121'] = 1556386 # Belmont NB
+    stop_id_to_model_node_id['70111'] = 1556382 # Hillsdale NB
+    stop_id_to_model_node_id['70131'] = 1556385 # San Carlos NB
+    stop_id_to_model_node_id['70051'] = 1556390 # San Bruno NB
+    stop_id_to_model_node_id['70091'] = 1556388 # San Mateo NB
+    stop_id_to_model_node_id['70061'] = 1556383 # Millbrae NB
+    stop_id_to_model_node_id['70041'] = 1556384 # South San Francisco NB
+    stop_id_to_model_node_id['70021'] = 1027622 # 22nd Street NB
+    stop_id_to_model_node_id['70011'] = 1027620 # San Francisco NB
+    # Caltrain SB
+    stop_id_to_model_node_id['70012'] = 1027617 # San Francisco SB
+    stop_id_to_model_node_id['70022'] = 1027618 # 22nd Street SB
+    stop_id_to_model_node_id['70042'] = 1556369 # South San Francisco SB
+    stop_id_to_model_node_id['70052'] = 1556370 # San Bruno SB
+    stop_id_to_model_node_id['70062'] = 1556371 # Millbrae SB
+    stop_id_to_model_node_id['70092'] = 1556373 # San Mateo SB
+    stop_id_to_model_node_id['70132'] = 1556377 # San Carlos SB
+    stop_id_to_model_node_id['70112'] = 1556375 # Hillsdale SB
+    stop_id_to_model_node_id['70122'] = 1556376 # Belmont
+    stop_id_to_model_node_id['70142'] = 1556378 # Redwood City SB
+    stop_id_to_model_node_id['70172'] = 2192799 # Palo Alto SB
+    stop_id_to_model_node_id['70212'] = 2192802 # Mountain View SB
+    stop_id_to_model_node_id['70222'] = 2192803 # Sunnyvale SB
+    stop_id_to_model_node_id['70242'] = 2192805 # Santa Clara SB
+    stop_id_to_model_node_id['70232'] = 2192804 # Lawrence SB
+    stop_id_to_model_node_id['70262'] = 2192807 # San Jose SB
+    # VTA
+    stop_id_to_model_node_id['64746'] = 2192842 # Convention Center
+    stop_id_to_model_node_id['64748'] = 2192843 # San Antonio to Santa Clara
+
+    # Set the name in road_nodes_gdf to the stop_name for these nodes using dataframe joins
+    WranglerLogger.info("Setting node names to stop names for mapped transit stops")
+
+    # Create a dataframe from the stop_id to model_node_id mapping
+    stop_node_mapping_df = pd.DataFrame(
+      list(stop_id_to_model_node_id.items()), 
+      columns=['stop_id', 'model_node_id']
+    ).drop_duplicates(subset=['model_node_id'], keep='first') # don't create duplicate model_node_ids
+    # Join with gtfs stops to get stop names
+    stop_node_mapping_df = stop_node_mapping_df.merge(
+      gtfs_model.stops[['stop_id', 'stop_name']], 
+      on='stop_id', 
+      how='left'
+    )
+    # Merge with the mapping to get stop names
+    road_nodes_gdf = road_nodes_gdf.merge(
+      stop_node_mapping_df[['model_node_id', 'stop_name']], 
+      on='model_node_id', 
+      how='left',
+      indicator=True
+    )
+ #    WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
+    road_nodes_gdf.loc[ pd.isna(road_nodes_gdf['name']) & (road_nodes_gdf._merge == 'both'), 'name'] = road_nodes_gdf['stop_name']
+    # CT:L5WranglerLogger.debug(f"road_nodes_gdf.loc[road_nodes_gdf._merge=='both']:\n{road_nodes_gdf.loc[road_nodes_gdf._merge=='both']}")
+    # Drop temporary columns
+    road_nodes_gdf.drop(columns=['stop_name','_merge'], inplace=True)
+
+    # Define transit links to add between new stations
+    # model_ids should either be mapped to model_node_ids 
+    # Format: (from_stop_id, to_stop_id, oneway)
+    TRANSIT_LINKS_TO_ADD = [
+      # BART to San Jose
+      ('FRMT', 'WARM', False),  # Fremont to Warm Springs
+      ('WARM', 'MLPT', False),  # Warm Springs to Milpitas
+      ('MLPT', 'BERY', False),  # Milpitas to Berryessa
+      # BART - these links are missing for some reason
+      ('SBRN', 'SFIA', True),   # San Bruno to SFO
+      ('SFIA', 'MLBR', True),   # SFO to Millbrae
+      # eBart extension
+      ('PITT', 'PCTR', False),  # Pittsburg/Baypoint to Pittsburg Center
+      ('PCTR', 'ANTC', False),  # Pittsburg Center to Antioch
+      # Muni Central Subway Northbound
+      ('17166', '17879', True), # Fourth and King St to Fouth and Brannan
+      ('17879', '17878', True), # Fourth and Brannan to Yerba Buena/Moscone Station
+      ('17878', '17877', True), # Yerba Buena/Moscone Station to Union Square/Market St Station
+      ('17877', '17876', True), # Union Square/Market St Station to Chinatown - Rose Pak Station
+      # Muni Central Subway Southbound
+      ('17876', '17874', True), # Chinatown - Rose Pak Station to Union Square/Market St Station
+      ('17874', '17873', True), # Union Square/Market St Station to Yerba Buena/Moscone Station
+      ('17873', '17872', True), # Yerba Buena/Moscone Station to Fourth & Brannan
+      ('17872', '17397', True), # Fourth & Brannan to Fourth and King
+      # Treasure Island Ferry
+      ('TF:1',  'TF:2',  False),
+      # SF Ferry Terminal to Richmond Ferry 
+      ('72011', '7211',  False),
+      # SF Ferry Terminal to Oakland Ferry Terminal
+      ('72012', '7209', True), # reverse already exists
+       # SF Ferry Terminal to Tiburon Ferry
+      ('TF:2',  'GF:43007', False),
+      # SF Ferry Terminal to Vallejo to Mare Island
+      ('72011', '7212',  False),
+      ('7212',  '7213',  False),
+      # Alameda Seaplane Lagoon to South San Francisco Ferry
+      ('7207',  '7205',  False),
+      # Alameda Seaplane Lagoon to San Francisco
+      ('7207',  '72011', False),
+      # Alameda Main Street Ferry Terminal to South San Francisco Ferry Terminal
+      ('7208',  '7205',  True), # reverse link already exists
+      # Alameda Main Street Ferry Terminal to San Francisco
+      ('7208', '72013', False),
+      # Angel Island to San Francisco
+      ('GF:43002', '72011', False),
+      # Angel Island to Tiburon
+      ('GF:43002', 'GF:43007', False),
+      # Capitol Corridor
+      ('AM:SUI','AM:FFV', False), # Suisun-Fairfield to Fairfield-Vacaville
+      ('AM:FFV','AM:DAV', False), # Fairfield-Vacaville to Davis
+      # SMART
+      ('71011','71021', False), # Larkspur to San Rafael
+      ('71021','71031', False), # San Rafael to Marin Civic Center
+      ('71031','71041', False), # Marin Civic Center to Novato Hamilton
+      ('71041','71051', False), # Novato Hamilton to Novato Downtown
+      ('71051','71061', False), # Novato Downtown to Novato San Marin
+      ('71061','71071', False), # Novato San Marin to Petaluma Downtown
+      ('71071','71091', False), # Petaluma Downtown to Cotati
+      ('71091','71101', False), # Cotati to Rohnert Park
+      ('71101','71111', False), # Rohnert Park to Santa Rosa Downtown
+      ('71111','71121', False), # Santa Rosa Downtown to Santa Rosa North
+      ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
+      # VTA Orange Line WB
+      ('64806', '64807', True), # Baypointe to Champion WB
+      # VTA Orange Line EB
+      ('64800', '64760', True), # Champion to Baypointe EB
+
+      # Caltrain limited links - Northbound
+      ('70321','70311', True), # Gilroy to San Martin NB
+      ('70311','70301', True), # San Martin to Morgan Hill NB
+      ('70301','70291', True), # Morgan Hill to Blossom Hill NB
+      ('70291','70281', True), # Blossom Hill to Capitol NB
+      ('70281','70271', True), # Capitol to Tamien NB
+      ('70271','70261', True), # Tamien to San Jose Diridon
+      ('70261','70251', True), # San Jose Diridon to College Park NB
+      ('70251','70241', True), # College Park to Santa Clara NB
+      ('70261','70231', True), # San Jose Diridon to Lawrence NB
+      ('70261','70211', True), # San Jose Diridon to Mountain View NB
+      ('70241','70221', True), # Santa Clara to Sunnyvale NB
+      ('70211','70171', True), # Mountain View to Palo Alto NB
+      ('70171','70141', True), # Palo Alto to Redwood City NB
+      ('70141','70121', True), # Redwood City to Belmont NB
+      ('70111','70091', True), # Hillsdale to San Mateo NB
+      ('70131','70091', True), # San Carlos to San Mateo NP
+      ('70091','70061', True), # San Mateo NB to Millbrae NB
+      ('70051','70021', True), # San Bruno to 22nd Street NB
+      ('70041','70021', True), # South San Francisco to 22nd Street NB
+      ('70061','70021', True), # Millbrae to 22nd Street NB
+      ('70061','70011', True), # Millbrae to San Francisco NB
+      # Caltrain limited links - Southbound
+      ('70012','70042', True), # San Francisco to South San Francisco SB
+      ('70042','70062', True), # South San Francisco to Millbrae SB
+      ('70022','70052', True), # 22nd Street to San Bruno SB
+      ('70022','70062', True), # 22nd Street to Millbrae SB
+      ('70062','70092', True), # Millbrae to San Mateo SB
+      ('70062','70112', True), # Millbrae to Hillsdale SB
+      ('70122','70142', True), # Belmont to Redwood City SB
+      ('70112','70142', True), # Hillsdale to Redwood City SB
+      ('70092','70132', True), # San Mateo to San Carlos SB
+      ('70142','70172', True), # Redwood City to Palo Alto SB
+      ('70172','70212', True), # Palo Alto to Mountain View SB
+      ('70222','70242', True), # Sunnyvale to Santa Clara SB
+      ('70212','70262', True), # Mountain View to San Jose SB
+      ('70232','70262', True), # Lawrence to San Jose SB
+
+      # VTA links Green Line NB
+      ('64746', '64747', True), # Convention Center to San Antonio
+      ('64747', '64748', True), # San Antonio to Santa Clara
+    ]
+
+    # Create transit links for the new stations
+    # Note: Use road_nodes_gdf which contains the newly created station nodes
+    new_transit_links_gdf = create_transit_links_for_new_stations(
+      TRANSIT_LINKS_TO_ADD, 
+      stop_id_to_model_node_id,
+      road_nodes_gdf,
+      road_links_gdf
+    )
+
+    # Add new links to road_links_gdf
+    if len(new_transit_links_gdf) > 0:
+      road_links_gdf = gpd.GeoDataFrame(pd.concat([road_links_gdf, new_transit_links_gdf], ignore_index=True))
+      WranglerLogger.info(f"Added {len(new_transit_links_gdf)} new transit links to roadway network")
+
+    # remove Suisun-Fairfield to Davis and vice versa since Fairfield-Vacavaville was added in between
+    len_road_links_gdf = len(road_links_gdf)
+    road_links_gdf = road_links_gdf.loc[ (road_links_gdf.A != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.B != stop_id_to_model_node_id['AM:DAV']))]
+    road_links_gdf = road_links_gdf.loc[ (road_links_gdf.B != stop_id_to_model_node_id['AM:SUI']) | ((road_links_gdf.A != stop_id_to_model_node_id['AM:DAV']))]
+    WranglerLogger.debug(f"{len_road_links_gdf=:,} {len(road_links_gdf)=:,}")
+    assert(len(road_links_gdf) == len_road_links_gdf-2)
+
+    # The Hillsdale Caltrain station moved in 2021
+    HILLSDALE_STOP_ID = '70112'
+    hillsdale_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==HILLSDALE_STOP_ID].to_dict(orient='records')[0]
+    WranglerLogger.debug(f"Hillsdale stop:{hillsdale_stop_dict}")
+
+    # Vasco Rt Amtrak Station seems to be located slightly incorrectly
+    AMTRAK_VASCO_STOP_ID = 'CE:VAS'
+    amtrak_vasco_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==AMTRAK_VASCO_STOP_ID].to_dict(orient='records')[0]
+    WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
+
+    # Finally, truncate the gtfs_model SolTrans Route B because it includes one stop out of region
+    truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
+    truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=1, stop_id='829201', truncate="after")
+
+    # TODO: What is locationReferences?  Can we drop?  Convert to string for now
+    road_links_gdf['locationReferences'] = road_links_gdf['locationReferences'].astype(str)
+
+    fix_link_access(road_links_gdf, 'access')
+    fix_link_access(road_links_gdf, 'ML_access')
+
+    # Fix numeric columns before creating the roadway network
+    WranglerLogger.debug("Fixing numeric columns with empty strings...")
+    fix_numeric_columns(road_links_gdf)
+
+    # Fix columns with mixed types
+    fix_mixed_type_columns(road_links_gdf)
+
+    # create roadway network
+    roadway_network =  network_wrangler.load_roadway_from_dataframes(
+      links_df=road_links_gdf,
+      nodes_df=road_nodes_gdf,
+      shapes_df=road_links_gdf
+    )
+    WranglerLogger.debug(f"roadway_net:\n{roadway_network}")
+    WranglerLogger.info(f"RoadwayNetwork created with {len(roadway_network.nodes_df):,} nodes and {len(roadway_network.links_df):,} links.")
+
+    # Split Geyserville Avenue link to add transit stop 
+    geyserville_stop_node_id = generate_node_ids(road_nodes_gdf, range(4_500_000 + 1, 5_000_000), n=1)[0]
+    WranglerLogger.debug(f"Adding node for {geyserville_stop_node_id=}")
+    # Get the A and B nodes for the Geyserville Avenue link
+    roadway_network.split_link(
+      A=4514838, 
+      B=4540403,
+      new_model_node_id=geyserville_stop_node_id,
+      fraction=0.3,
+      split_reverse_link=True
+    )
+    # Split VTA Blue Line link to add Santa Clara NB station
+    vta_santa_clara_nb_stop_node_id = generate_node_ids(road_nodes_gdf, range(2_000_000 + 1, 2_500_000), n=1)[0]
+    WranglerLogger.debug(f"Adding node for {vta_santa_clara_nb_stop_node_id=}")
+    # Get the A and B nodes for the Geyserville Avenue link
+    roadway_network.split_link(
+      A=2192868, 
+      B=2192869,
+      new_model_node_id=vta_santa_clara_nb_stop_node_id,
+      fraction=0.5,
+      split_reverse_link=False
+    )
+
+    move_transit_nodes_df = pd.DataFrame([
+      # update Hillsdale coordinates
+      {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
+      {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
+      # update Amtrak Vasco coordinates
+      {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']}  
+    ])
+    WranglerLogger.debug(f"move_transit_nodes_df:\n{move_transit_nodes_df}")
+    # check if any model_node_ids are missing
+    WranglerLogger.debug(f"roadway_network.nodes_df.tail():\n{roadway_network.nodes_df.tail()}")
+    WranglerLogger.debug(f"roadway_network.nodes_df.loc[roadway_network.nodes_df['model_node_id'].isna()]:\n{roadway_network.nodes_df.loc[ roadway_network.nodes_df['model_node_id'].isna()]}")
+    # use RoadwayNetwork.move_nodes()
+    roadway_network.move_nodes(move_transit_nodes_df)
+
+    # Check for any columns with lists after project application and convert them all to strings
+    WranglerLogger.debug("Checking for list columns after project application...")
+    for col in roadway_network.links_df.columns:
+      if roadway_network.links_df[col].dtype == 'object':
+        # Check entire column, not just sample
+        has_lists = False
+        for val in roadway_network.links_df[col]:
+          if isinstance(val, list):
+            has_lists = True
+            break
+          
+        if has_lists:
+          WranglerLogger.debug(f"  Column {col} still contains lists - converting all values to string")
+          # Convert each value individually to handle lists properly
+          roadway_network.links_df[col] = roadway_network.links_df[col].apply(
+            lambda x: str(x) if isinstance(x, list) else x
+          )
+          # Now ensure all values are strings
+          roadway_network.links_df[col] = roadway_network.links_df[col].fillna('').astype(str)
+
+    # Write the 2023 roadway network to parquet files
+    WranglerLogger.info("Writing 2023 roadway network to parquet files...")
+
+    try:
+      roadway_network_dir.mkdir(exist_ok=True)
+      write_roadway(
+        roadway_network, 
+        out_dir=roadway_network_dir,
+        prefix="road_net_2023",
+        file_format="parquet",
+        overwrite=True,
+        true_shape=True
+      )
+      WranglerLogger.info(f"Roadway network saved to {roadway_network_dir}")
+    except Exception as e:
+      WranglerLogger.error(f"Error writing roadway network: {e}")
+      raise
+    
+    WranglerLogger.info("Finished writing 2023 roadway network files")
+
+    tableau_utils.write_geodataframe_as_tableau_hyper(
+      roadway_network.links_df,  # drop distance==0 links because otherwise this will error
+      (OUTPUT_DIR / "mtc_links.hyper").resolve(),
+      "mtc_links"
+    )
+    tableau_utils.write_geodataframe_as_tableau_hyper(
+      roadway_network.nodes_df,
+      (OUTPUT_DIR / "mtc_nodes.hyper").resolve(),
+      "mtc_nodes"
+    )
+
+    # write the gtfs version of the transit network now, before converting to Feed
+    WranglerLogger.info(f"Writing gtfs_model to {transit_network_dir}")
+    transit_gtfs_model_dir.mkdir(exist_ok=True)
+    write_transit(gtfs_model, out_dir=transit_gtfs_model_dir, file_format="txt", overwrite=True)
   
   # Define time periods for frequency calculation: 3a-6a, 6a-10a, 10a-3p, 3p-7p, 7p-3a
   time_periods = [
@@ -1119,8 +1165,7 @@ if __name__ == "__main__":
         e.unmatched_stops_gdf.rename(columns={'stop_lon': 'X', 'stop_lat': 'Y'}, inplace=True)
       
       # Write to Tableau
-      from tableau_utils import write_geodataframe_as_tableau_hyper
-      write_geodataframe_as_tableau_hyper(e.unmatched_stops_gdf, unmatched_stops_file, "unmatched_stops")
+      tableau_utils.write_geodataframe_as_tableau_hyper(e.unmatched_stops_gdf, unmatched_stops_file, "unmatched_stops")
       
       WranglerLogger.error(f"Unmatched stops written to {unmatched_stops_file}")
     
@@ -1141,8 +1186,7 @@ if __name__ == "__main__":
       WranglerLogger.debug(f"e.shape_links_gdf.head():\n{e.shape_links_gdf.head()}")
 
       # Write to Tableau
-      from tableau_utils import write_geodataframe_as_tableau_hyper
-      write_geodataframe_as_tableau_hyper(e.shape_links_gdf, shape_links_file, "shape_link")
+      tableau_utils.write_geodataframe_as_tableau_hyper(e.shape_links_gdf, shape_links_file, "shape_link")
       
       WranglerLogger.error(f"Shape links written to {shape_links_file}")
 
@@ -1157,11 +1201,11 @@ if __name__ == "__main__":
 
   # Save the transit network regardless of validation issues
   WranglerLogger.info("Saving TransitNetwork to files")
-  transit_output_dir = OUTPUT_DIR / "transit_network"
-  transit_output_dir.mkdir(exist_ok=True)
+
   try:
-    write_transit(transit_network, out_dir=transit_output_dir, file_format="csv")
-    WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
+    transit_network_dir.mkdir(exist_ok=True)
+    write_transit(transit_network, out_dir=transit_network_dir, file_format="csv")
+    WranglerLogger.info(f"Transit network saved to {transit_network_dir}")
   except Exception as e:
     WranglerLogger.error(f"Failed to save transit network: {e}")
 
@@ -1221,14 +1265,12 @@ if __name__ == "__main__":
     WranglerLogger.warning(f"Filtered these out; have {len(missing_shape_links):,} remaining")
 
     # Create LineString geometry from shape point coordinates
-    from shapely.geometry import LineString, Point
-    import geopandas as gpd
     
     def create_line_from_shape_pts(row):
       # Use shape_pt_lat/lon columns directly
-      point_a = Point(row['shape_pt_lon_A'], row['shape_pt_lat_A'])
-      point_b = Point(row['shape_pt_lon_B'], row['shape_pt_lat_B'])
-      return LineString([point_a, point_b])
+      point_a = shapely.geometry.Point(row['shape_pt_lon_A'], row['shape_pt_lat_A'])
+      point_b = shapely.geometry.Point(row['shape_pt_lon_B'], row['shape_pt_lat_B'])
+      return shapely.geometry.LineString([point_a, point_b])
     
     missing_shape_links['geometry'] = missing_shape_links.apply(create_line_from_shape_pts, axis=1)
     
@@ -1263,8 +1305,8 @@ if __name__ == "__main__":
 
   
   try:
-    write_transit(transit_network, out_dir=transit_output_dir, file_format="csv")
-    WranglerLogger.info(f"Transit network saved to {transit_output_dir}")
+    write_transit(transit_network, out_dir=transit_network_dir, file_format="csv")
+    WranglerLogger.info(f"Transit network saved to {transit_network_dir}")
   except Exception as e:
     WranglerLogger.error(f"Failed to save transit network: {e}")
   
