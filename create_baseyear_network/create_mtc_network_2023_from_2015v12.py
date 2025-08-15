@@ -752,11 +752,20 @@ if __name__ == "__main__":
 
   stop_id_to_model_node_id['64806'] = 2192891 # Baypointe WB
   stop_id_to_model_node_id['64807'] = 2192908 # Champion WB
+  stop_id_to_model_node_id['64800'] = 2192937 # Champion EB
+  stop_id_to_model_node_id['64760'] = 2192855 # Baypointe EB
 
   # TODO: this is silly. Should just specify local sequence and then create these automatically...
 
   # Caltrain NB
+  stop_id_to_model_node_id['70321'] = 2192813 # Gilroy NB 
+  stop_id_to_model_node_id['70311'] = 2192812 # San Martin NB
+  stop_id_to_model_node_id['70301'] = 2192811 # Morgan Hill NB
+  stop_id_to_model_node_id['70291'] = 2192810 # Blossom Hill NB
+  stop_id_to_model_node_id['70281'] = 2192809 # Capitol NB
+  stop_id_to_model_node_id['70271'] = 2192808 # Tamien NB
   stop_id_to_model_node_id['70261'] = 2192815 # San Jose Diridon NB
+  stop_id_to_model_node_id['70251'] = 2172876 # College Park Station NB
   stop_id_to_model_node_id['70231'] = 2192817 # Lawrence NB
   stop_id_to_model_node_id['70241'] = 2192816 # Santa Clara NB
   stop_id_to_model_node_id['70221'] = 2192818 # Sunnyvale NB
@@ -881,8 +890,18 @@ if __name__ == "__main__":
     ('71121','71131', False), # Santa Rosa North to Sonoma County Airport
     # VTA Orange Line WB
     ('64806', '64807', True), # Baypointe to Champion WB
+    # VTA Orange Line EB
+    ('64800', '64760', True), # Champion to Baypointe EB
 
     # Caltrain limited links - Northbound
+    ('70321','70311', True), # Gilroy to San Martin NB
+    ('70311','70301', True), # San Martin to Morgan Hill NB
+    ('70301','70291', True), # Morgan Hill to Blossom Hill NB
+    ('70291','70281', True), # Blossom Hill to Capitol NB
+    ('70281','70271', True), # Capitol to Tamien NB
+    ('70271','70261', True), # Tamien to San Jose Diridon
+    ('70261','70251', True), # San Jose Diridon to College Park NB
+    ('70251','70241', True), # College Park to Santa Clara NB
     ('70261','70231', True), # San Jose Diridon to Lawrence NB
     ('70261','70211', True), # San Jose Diridon to Mountain View NB
     ('70241','70221', True), # Santa Clara to Sunnyvale NB
@@ -1078,7 +1097,8 @@ if __name__ == "__main__":
       local_crs="EPSG:2227", # https://epsg.io/2227
       crs_units="feet",
       time_periods=time_periods,
-      default_frequency_for_onetime_route=10800
+      default_frequency_for_onetime_route=10800,
+      skip_stop_agencies = 'CT'
     )
     WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
   except NodeNotFoundError as e:
