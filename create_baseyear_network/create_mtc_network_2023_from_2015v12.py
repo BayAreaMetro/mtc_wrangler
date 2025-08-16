@@ -728,6 +728,14 @@ if __name__ == "__main__":
       '17872', # Muni Fourth & Brannan Southbound
       '17873', # Muni Yerba Buena/Moscone Station Southbound
       '17874', # Muni Union Square/Market St Station Southbound
+      # Muni F Line
+      '17283', # The Embarcadero & Ferry Building SB
+      '14513', # The Embarcadero & Ferry Building NB
+      # Muni J Line
+      '17073', # Church & Market Inbound
+      '15418', # Balboa Park BART/Mezzanine Level
+      # Muni M Line
+      '17164', # San Jose Ave & Geneva Ave (1 of 2)
       # Treasure Island Ferry
       'TF:1',  # Treasure Island Ferry Terminal
       # Richmond Ferry
@@ -755,7 +763,8 @@ if __name__ == "__main__":
       '71131',  # Sonoma County Airport
       # VTA
       # this was open but it's not in the network
-      '64746',  # San Antonio Station NB on the Green Line
+      '64747',  # San Antonio Station NB on the Green Line
+      '65866',  # "Patrick Henry Pocket Track"
     }
     # create nodes for these stations
     new_station_nodes_gdf = create_nodes_for_new_stations(ADD_STOP_IDS, gtfs_model, nodes_gdf)
@@ -777,6 +786,23 @@ if __name__ == "__main__":
     stop_id_to_model_node_id['AM:DAV'] = 3547319  # Capitol Corridor Davis
     stop_id_to_model_node_id['17166'] = 1027771 # Fourth and King NB
     stop_id_to_model_node_id['17397'] = 1027891 # Fourth and King SB
+
+    stop_id_to_model_node_id['14534'] = 1027749 # The Embarcadero & Washington St SB
+    stop_id_to_model_node_id['14726'] = 1027750 # Don Chee Way/Steuart St WB
+    stop_id_to_model_node_id['15682'] = 1027788 # Market St & Main St EB
+    stop_id_to_model_node_id['14727'] = 1027790 # Don Chee Way/Steuart St EB
+    stop_id_to_model_node_id['14532'] = 1027791 # The Embarcadero & Washington St NB
+    stop_id_to_model_node_id['14006'] = 1028013 # Church St & Duboce Ave
+
+    stop_id_to_model_node_id['13985'] = 1028012 # Church St & Market St
+    stop_id_to_model_node_id['14004'] = 1027961 # Church St & Day St
+    stop_id_to_model_node_id['13538'] = 1027963 # 30th St & Dolores St
+    stop_id_to_model_node_id['17778'] = 1027897 # Balboa Park BART/Mezzanine Level to San Jose Ave & Geneva Ave
+
+    stop_id_to_model_node_id['13385'] = 1027945 # 19th Ave & Randolph St NB
+    stop_id_to_model_node_id['13361'] = 1027946 # 19th Ave & Junipero Serra Blvd NB
+    stop_id_to_model_node_id['16262'] = 1027936 # San Jose Ave & Geneva Ave
+
     stop_id_to_model_node_id['72011'] = 1028039 # SF Ferry Terminal Gate E
     stop_id_to_model_node_id['72012'] = 1028039 # SF Ferry Terminal Gate G
     stop_id_to_model_node_id['72013'] = 1027623 # SF Ferry Terminal Gate F (combine with previous?)
@@ -838,7 +864,8 @@ if __name__ == "__main__":
     # VTA
     stop_id_to_model_node_id['64746'] = 2192842 # Convention Center
     stop_id_to_model_node_id['64748'] = 2192843 # San Antonio to Santa Clara
-
+    stop_id_to_model_node_id['64797'] = 2192934 # Old Ironsides
+    stop_id_to_model_node_id['64810'] = 2192911 # Old Ironsides
     # Set the name in road_nodes_gdf to the stop_name for these nodes using dataframe joins
     WranglerLogger.info("Setting node names to stop names for mapped transit stops")
 
@@ -890,6 +917,20 @@ if __name__ == "__main__":
       ('17874', '17873', True), # Union Square/Market St Station to Yerba Buena/Moscone Station
       ('17873', '17872', True), # Yerba Buena/Moscone Station to Fourth & Brannan
       ('17872', '17397', True), # Fourth & Brannan to Fourth and King
+      # Muni F line
+      ('14534', '17283', True), # The Embarcadero & Washington St to The Embarcadero & Ferry Building
+      ('17283', '14726', True), # The Embarcadero & Ferry Building to Don Chee Way/Steuart St
+
+      ('15682', '14727', True), # Market St & Main St to Don Chee Way/Steuart St
+      ('14727', '14513', True), # Don Chee Way/Steuart St to The Embarcadero & Ferry Building
+      ('14513', '14532', True), # The Embarcadero & Ferry Building to The Embarcadero & Washington St
+      # Muni J line
+      ('14004', '13538', True), # Church St & Day St to 30th and Dolores St
+      ('15418', '17778', True), # Balboa Park BART/Mezzanine Level to San Jose Ave & Geneva Ave
+      ('13985', '17073', True), # Church St & 16th St to Church St & Market St
+      ('17073', '14006', True), # Church & Market St to Church St & Duboce Ave
+      # Muni M line
+      ('17164', '16262', True), # San Jose Ave & Geneva Ave to same
       # Treasure Island Ferry
       ('TF:1',  'TF:2',  False),
       # SF Ferry Terminal to Richmond Ferry 
@@ -971,9 +1012,11 @@ if __name__ == "__main__":
       ('70212','70262', True), # Mountain View to San Jose SB
       ('70232','70262', True), # Lawrence to San Jose SB
 
-      # VTA links Green Line NB
+      # VTA links Green Line
       ('64746', '64747', True), # Convention Center to San Antonio
       ('64747', '64748', True), # San Antonio to Santa Clara
+      ('65866', '64797', True), # PATRICK HENRY POCKET TRACK to Old Ironsides
+      ('64810', '65866', True), # Old Ironsides to PATRICK HENRY POCKET TRACK
     ]
 
     # Create transit links for the new stations
@@ -997,6 +1040,14 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"{len_road_links_gdf=:,} {len(road_links_gdf)=:,}")
     assert(len(road_links_gdf) == len_road_links_gdf-2)
 
+    # remove VTA Convention Center to Santa Clara since San Antonio was added in between
+    len_road_links_gdf = len(road_links_gdf)
+    road_links_gdf = road_links_gdf.loc[ (road_links_gdf.A != stop_id_to_model_node_id['64746']) | ((road_links_gdf.B != stop_id_to_model_node_id['64748']))]
+    WranglerLogger.debug(f"{len_road_links_gdf=:,} {len(road_links_gdf)=:,}")
+    assert(len(road_links_gdf) == len_road_links_gdf-1)
+
+    # TODO: There are others to remove but maybe just do it programmatically :D
+
     # The Hillsdale Caltrain station moved in 2021
     HILLSDALE_STOP_ID = '70112'
     hillsdale_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==HILLSDALE_STOP_ID].to_dict(orient='records')[0]
@@ -1006,6 +1057,18 @@ if __name__ == "__main__":
     AMTRAK_VASCO_STOP_ID = 'CE:VAS'
     amtrak_vasco_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==AMTRAK_VASCO_STOP_ID].to_dict(orient='records')[0]
     WranglerLogger.debug(f"Amtrak Vasco stop:{amtrak_vasco_stop_dict}")
+
+    # J Church St & Market St Station seems to be located incorrectly
+    J_CHURCH_MARKET_STOP_ID = '18059'
+    j_church_market_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==J_CHURCH_MARKET_STOP_ID].to_dict(orient='records')[0]
+
+    # M 19th Ave & Randolf Street NB seems to located incorrectly
+    M_19TH_RANDOLF_STOP_ID = '13385'
+    m_19th_randolf_stop_dict = gtfs_model.stops.loc[gtfs_model.stops.stop_id==M_19TH_RANDOLF_STOP_ID].to_dict(orient='records')[0]
+
+    # M San Jose and Geneva move
+    M_SAN_JOSE_GENEVA_STOP_ID = '16262'
+    m_san_jose_geneva_stop_id = gtfs_model.stops.loc[gtfs_model.stops.stop_id==M_SAN_JOSE_GENEVA_STOP_ID].to_dict(orient='records')[0]
 
     # Finally, truncate the gtfs_model SolTrans Route B because it includes one stop out of region
     truncate_route_at_stop(gtfs_model, route_id="ST:B", direction_id=0, stop_id='829201', truncate="before")
@@ -1061,7 +1124,13 @@ if __name__ == "__main__":
       {'model_node_id':1556382, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
       {'model_node_id':1556375, 'X':hillsdale_stop_dict['stop_lon'], 'Y':hillsdale_stop_dict['stop_lat']},
       # update Amtrak Vasco coordinates
-      {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']}  
+      {'model_node_id':2625973, 'X':amtrak_vasco_stop_dict['stop_lon'], 'Y':amtrak_vasco_stop_dict['stop_lat']},
+      # update J Church and Market St coordinates
+      {'model_node_id':1027951, 'X':j_church_market_stop_dict['stop_lon'], 'Y':j_church_market_stop_dict['stop_lat']},
+      # update M 19th and Randolf coordinates
+      {'model_node_id':1027945, 'X':m_19th_randolf_stop_dict['stop_lon'], 'Y':m_19th_randolf_stop_dict['stop_lat']},
+      # Update M San Jose and Geneva coordinates
+      {'model_node_id':1027936, 'X':m_san_jose_geneva_stop_id['stop_lon'], 'Y':m_san_jose_geneva_stop_id['stop_lat']},
     ])
     WranglerLogger.debug(f"move_transit_nodes_df:\n{move_transit_nodes_df}")
     # check if any model_node_ids are missing
