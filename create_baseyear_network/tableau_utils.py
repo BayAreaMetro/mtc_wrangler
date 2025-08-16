@@ -46,6 +46,42 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
                     lambda x: ', '.join(map(str, x)) if isinstance(x, list) else str(x) if pd.notna(x) else ''
                 )
 
+    # Validate geometry bounds - check for invalid latitude/longitude values
+    def check_geometry_bounds(geom):
+        """Check if geometry has valid lat/lon bounds."""
+        if geom is None or geom.is_empty:
+            return True  # Consider empty geometries as valid
+        
+        # Get bounds of the geometry (minx, miny, maxx, maxy)
+        # where x is longitude and y is latitude
+        bounds = geom.bounds
+        min_lon, min_lat, max_lon, max_lat = bounds[0], bounds[1], bounds[2], bounds[3]
+        
+        # Check if latitude or longitude is outside valid range
+        lat_valid = -90 <= min_lat <= 90 and -90 <= max_lat <= 90
+        lon_valid = -180 <= min_lon <= 180 and -180 <= max_lon <= 180
+        
+        return lat_valid and lon_valid
+    
+    # Add column indicating invalid coordinates
+    gdf['invalid_coordinates'] = ~gdf['geometry'].apply(check_geometry_bounds)
+    
+    # Check if there are any invalid geometries
+    invalid_rows = gdf[gdf['invalid_coordinates']]
+    
+    if len(invalid_rows) > 0:
+        WranglerLogger.error(f"Found {len(invalid_rows)} rows with invalid latitude/longitude values.")
+        WranglerLogger.error("Latitude must be within [-90, 90] and longitude must be within [-180, 180].")
+        WranglerLogger.error(f"Invalid rows:\n{invalid_rows}")
+        
+        raise ValueError(
+            f"Found {len(invalid_rows)} geometries with invalid latitude/longitude values. "
+            f"See logs above for details."
+        )
+    
+    # Remove the temporary invalid_coordinates column
+    gdf = gdf.drop(columns=['invalid_coordinates'])
+
     import tableauhyperapi
 
     # Convert geometry to WKT format
