@@ -12,6 +12,7 @@ References:
 """
 import argparse
 import datetime
+import getpass
 import pathlib
 import statistics
 
@@ -27,6 +28,11 @@ from network_wrangler import WranglerLogger
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")
 OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM")
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+USERNAME = getpass.getuser()
+if USERNAME=="lmz":
+    INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-10")
+    OUTPUT_DIR = pathlib.Path("../../output_from_OSM")
+
 BAY_AREA_COUNTIES = [
     'Alameda', 
     'Contra Costa', 
@@ -103,7 +109,7 @@ def get_min_or_median_value(lane):
 def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the lanes value in the links GeoFataFrame.
     """
-    WranglerLogger.debug(f"standardize_lanes_value()")
+    WranglerLogger.debug(f"standardize_lanes_value() for {len(links_gdf):,} links")
     # oneway is always a bool
     # reversed is a bool or a list
     links_gdf['oneway_type']   = links_gdf['oneway'].apply(type).astype(str)
@@ -196,14 +202,54 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
     LANES_COLS += [f"{col}_rev" for col in LANES_COLS if col not in ['A','B']]
 
     # set the lanes from lanes:forward or lanes:backward
-    links_gdf['lanes'    ] = -1 # initialize to -1
-    links_gdf['lanes_rev'] = -1
+    links_gdf_wide['lanes'    ] = -1 # initialize to -1
+    links_gdf_wide['lanes_rev'] = -1
     links_gdf_wide.loc[ links_gdf_wide['lanes:forward' ].notna() & (links_gdf_wide.reversed == False), 'lanes'    ] = links_gdf_wide['lanes:forward']
     links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() & (links_gdf_wide.reversed == False), 'lanes_rev'] = links_gdf_wide['lanes:backward']
 
+    # set the lanes from lanes:both_ways
+    links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes'    ]==-1),     'lanes'    ] = links_gdf_wide['lanes:both_ways']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes:both_ways']
+
+    # set the lanes from lanes_orig
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1), 'lanes'    ] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes_orig']
+
     WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS]}")
     WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts(dropna=False)}")
-    raise
+    
+    # merge links_gdf_wide values back to links_gdf
+    links_gdf = links_gdf.merge(
+        right=links_gdf_wide[['A','B','lanes']],
+        how='left',
+        on=['A','B'],
+        validate='one_to_one'
+    )
+    WranglerLogger.debug(f"After merging links_gdf_wide back to links_gdf:\n{links_gdf.head()}")
+    links_gdf.fillna({'lanes':-1}, inplace=True)
+    WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    # and for the reverse
+    links_gdf = links_gdf.merge(
+        right=links_gdf_wide[['A','B','lanes_rev']],
+        how='left',
+        left_on=['A','B'],
+        right_on=['B','A'],
+        validate='one_to_one',
+        suffixes=('','_rev')
+    ).drop(columns=['A_rev','B_rev'])
+    WranglerLogger.debug(f"After merging links_gdf_wide back to links_gdf in reverse:\n{links_gdf.head()}")
+    # transfer lanes_rev to lanes if applicable
+    WranglerLogger.debug(f"lanes_rev.notna(): {links_gdf['lanes_rev'].notna().sum()}:,")
+    links_gdf.loc[ links_gdf['lanes_rev'].notna() & links_gdf['lanes'].isna(), 'lanes'] = links_gdf['lanes_rev']
+    links_gdf.fillna({'lanes':-1}, inplace=True)
+    WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"{len(links_gdf)=:,}")
+
+    # TODO: create a mapping from highway value -> most common number of lanes for that value
+    # and use that to assign the remaining unset lanes
+    highway_to_lanes = {}
+
+    return links_gdf
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
     """Standardize the highway value in the links GeoDataFrame.
@@ -361,46 +407,20 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     links_gdf.rename(columns={'u': 'A', 'v': 'B'}, inplace=True)
 
     standardize_highway_value(links_gdf)
-    standardize_lanes_value(links_gdf)
+    links_gdf = standardize_lanes_value(links_gdf)
 
     WranglerLogger.debug(f"2 links_gdf:\n{links_gdf}")
     WranglerLogger.debug(f"2 links_gdf.dtypes:\n{links_gdf.dtypes}")
 
-    for col in links_gdf.columns:
-        # report on value counts for non-unique columns
-        if col not in ['geometry', 'A', 'B', 'name', 'width','osm_link_id', 'length']:
-            WranglerLogger.debug(f"column {col} has value_counts:\n{links_gdf[col].value_counts(dropna=False)}")
-
-        elif col in ['length']:
-            # leave as float
-            pass
-        # A, B are too big for int64, so convert to str
-        elif col in ['A', 'B']:
-            WranglerLogger.debug(f"column {col} has min={links_gdf[col].min():,} and max={links_gdf[col].max():,}")
-            links_gdf[col] = links_gdf[col].astype(str)
-        # convert objects to strings but leave others as is
-        elif links_gdf[col].dtype == object:
-            links_gdf[col] = links_gdf[col].astype(str)
-
-    WranglerLogger.info(f"3 links_gdf:\n{links_gdf}")
-    WranglerLogger.info(f"3 links_gdf.dtypes:\n{links_gdf.dtypes}")
-
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
-        OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_links{suffix}.hyper", 
+        (OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_links{suffix}.hyper").resolve(), 
         f"{args.county.replace(' ','_').lower()}_links{suffix}"
     )
 
-    for col in nodes_gdf.columns:
-        if col in ['highway','ref','railway']:
-            nodes_gdf[col] = nodes_gdf[col].astype(str)
-
-    WranglerLogger.info(f"1 nodes_gdf:\n{nodes_gdf}")
-    WranglerLogger.info(f"1 {len(nodes_gdf)=:,} nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
-    WranglerLogger.info(f"1 nodes_gdf.index:\n{nodes_gdf.index}")
     tableau_utils.write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
-        OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_nodes{suffix}.hyper", 
+        (OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_nodes{suffix}.hyper").resolve(), 
         f"{args.county}_nodes{suffix}"
     )
     return (links_gdf, nodes_gdf)
@@ -409,6 +429,8 @@ if __name__ == "__main__":
 
     pd.options.display.max_columns = None
     pd.options.display.width = None
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     osmnx.settings.use_cache = True
     osmnx.settings.cache_folder = OUTPUT_DIR / "osmnx_cache"
@@ -420,10 +442,10 @@ if __name__ == "__main__":
     parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
     args = parser.parse_args()
 
-    # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.info.log"
-    # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_{args.county}_{NOW}.debug.log"
-    INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_{args.county}.info.log"
-    DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_{args.county}.debug.log"
+    # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county}_{NOW}.info.log"
+    # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county}_{NOW}.debug.log"
+    INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county}.info.log"
+    DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county}.debug.log"
 
     network_wrangler.setup_logging(
         info_log_filename=INFO_LOG,
@@ -432,6 +454,9 @@ if __name__ == "__main__":
         file_mode='w'
     )
     WranglerLogger.info(f"Created by {__file__}")
+    
+    # For now, doing drive as we'll add handle transit and walk/bike separately
+    OSM_network_type = "drive"
 
     counties = [args.county] if args.county != 'Bay Area' else BAY_AREA_COUNTIES
     for county in counties:
@@ -441,12 +466,12 @@ if __name__ == "__main__":
         #
         # g is a [networkx.MultiDiGraph](https://networkx.org/documentation/stable/reference/classes/multidigraph.html#), 
         # a directed graph with self loops and parallel edges (muliple edges can exist between two nodes)
+        #
         WranglerLogger.info(f"Creating network for {county}...")
-        g = osmnx.graph_from_place(f'{county}, California, USA', network_type='all')
+        g = osmnx.graph_from_place(f'{county}, California, USA', network_type=OSM_network_type)
         WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
-        (links_gdf, nodes_gdf) = standardize_and_write(g, "_unsimplified")
-        nodes_gdf.reset_index(names='osmid', inplace=True)
+        standardize_and_write(g, "_unsimplified")
 
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs="EPSG:2227")
@@ -454,17 +479,18 @@ if __name__ == "__main__":
         # TODO: If we do simplification, it should be access-based. Drive links shouldn't be simplified to pedestrian links and vice versa
         # consolidate intersections
         # https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.simplification.consolidate_intersections
-        # g = osmnx.simplification.consolidate_intersections(
-        #     g, 
-        #     tolerance=30, # feet
-        #     rebuild_graph=True,
-        #     dead_ends=True, # keep dead-ends
-        #     reconnect_edges=True,
-        # )
-        # WranglerLogger.info(f"After consolidating, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
+        g = osmnx.simplification.consolidate_intersections(
+            g, 
+            tolerance=30, # feet
+            rebuild_graph=True,
+            dead_ends=True, # keep dead-ends
+            reconnect_edges=True,
+        )
+        WranglerLogger.info(f"After consolidating, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
-        # TODO: For now, we're retaining the result from the unsimplified for creating networks, but we could revisit
-        # standardize_and_write(g, "_simplified30ft")
+        # Save this version
+        (links_gdf, nodes_gdf) =  standardize_and_write(g, "_simplified30ft")
+        nodes_gdf.reset_index(names='osmid', inplace=True)
 
     # rename osmid to model_node_id; osmid is an int
     nodes_gdf.rename(columns={'osmid':'model_node_id', 'x':'X', 'y':'Y'}, inplace=True)
