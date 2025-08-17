@@ -15,6 +15,7 @@ import datetime
 import getpass
 import pathlib
 import statistics
+from typing import Any, Union
 
 import networkx
 import osmnx
@@ -92,9 +93,31 @@ OSM_WAY_TAGS = {
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
 }
 
-def get_min_or_median_value(lane):
+def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int:
     """
-    For lists with two items, use min. For lists with more, use median.
+    Convert lane value to integer, handling various input formats.
+    
+    For lists with two items, returns the minimum value.
+    For lists with more than two items, returns the median value.
+    
+    Args:
+        lane: Lane value that can be:
+            - An integer
+            - A string representation of an integer  
+            - A list of integers or string representations of integers
+    
+    Returns:
+        The processed lane count as an integer.
+    
+    Examples:
+        >>> get_min_or_median_value(3)
+        3
+        >>> get_min_or_median_value('2')
+        2
+        >>> get_min_or_median_value([2, 4])  # Returns min for 2-item list
+        2
+        >>> get_min_or_median_value([1, 2, 3, 4, 5])  # Returns median for longer list
+        3
     """
     if isinstance(lane, list):
         lane = [int(s) for s in lane]
@@ -106,8 +129,36 @@ def get_min_or_median_value(lane):
         return int(lane)
     return lane
 
-def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
-    """Standardize the lanes value in the links GeoFataFrame.
+def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Standardize the lanes value in the links GeoDataFrame.
+    
+    Processes lane-related columns in the GeoDataFrame to ensure consistent
+    lane count representation. Handles various OSM lane tagging formats including
+    forward/backward lanes, handles reversed links, and fills missing lane values
+    based on highway type.
+    
+    Args:
+        links_gdf: GeoDataFrame containing OSM link data with columns:
+            - oneway: Boolean indicating if link is one-way
+            - reversed: Boolean or list indicating if link direction is reversed  
+            - lanes: Total number of lanes
+            - lanes:forward: Number of forward lanes (optional)
+            - lanes:backward: Number of backward lanes (optional)
+            - highway: OSM highway type
+    
+    Returns:
+        Modified links_gdf with standardized lane values.
+        The 'lanes' column will have integer values (no -1 placeholders).
+    
+    Side Effects:
+        Modifies the input GeoDataFrame in place.
+    
+    Notes:
+        - Handles OSM bidirectional links that are represented as lists
+        - Merges forward/backward lane counts when appropriate
+        - Creates highway-to-lanes mapping for filling missing values
+        - Uses sensible defaults for highway types without samples
     """
     WranglerLogger.debug(f"standardize_lanes_value() for {len(links_gdf):,} links")
     # oneway is always a bool
@@ -245,13 +296,80 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame):
     WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
     WranglerLogger.debug(f"{len(links_gdf)=:,}")
 
-    # TODO: create a mapping from highway value -> most common number of lanes for that value
+    # Create a mapping from highway value -> most common number of lanes for that value
     # and use that to assign the remaining unset lanes
-    highway_to_lanes = {}
+    
+    # First, get links that have valid lane counts (not -1)
+    links_with_lanes = links_gdf[links_gdf['lanes'] > 0].copy()
+    
+    if len(links_with_lanes) > 0:
+        # Calculate the most common (mode) number of lanes for each highway type
+        highway_lanes_mode = links_with_lanes.groupby('highway')['lanes'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.median())
+        highway_to_lanes = highway_lanes_mode.to_dict()
+        
+        WranglerLogger.info(f"Highway to lanes mapping based on mode:")
+        for highway, lanes in sorted(highway_to_lanes.items()):
+            count = len(links_with_lanes[links_with_lanes['highway'] == highway])
+            WranglerLogger.info(f"  {highway}: {lanes} lanes (based on {count} samples)")
+        
+        # Apply the mapping to links with missing lanes (-1)
+        links_missing_lanes = links_gdf['lanes'] == -1
+        missing_count = links_missing_lanes.sum()
+        
+        if missing_count > 0:
+            WranglerLogger.info(f"Filling {missing_count:,} links with missing lane counts using highway type mapping")
+            
+            # Apply the mapping
+            for highway, default_lanes in highway_to_lanes.items():
+                mask = links_missing_lanes & (links_gdf['highway'] == highway)
+                if mask.any():
+                    links_gdf.loc[mask, 'lanes'] = default_lanes
+                    WranglerLogger.debug(f"  Set {mask.sum()} {highway} links to {default_lanes} lanes")
+            
+            # Check how many are still missing
+            still_missing = (links_gdf['lanes'] == -1).sum()
+            if still_missing > 0:
+                # For any highway types not in our mapping, use a sensible default based on highway type
+                default_lanes_by_type = {
+                    'motorway': 3,
+                    'motorway_link': 1,
+                    'trunk': 2,
+                    'trunk_link': 1,
+                    'primary': 2,
+                    'primary_link': 1,
+                    'secondary': 2,
+                    'secondary_link': 1,
+                    'tertiary': 2,
+                    'tertiary_link': 1,
+                    'unclassified': 1,
+                    'residential': 1,
+                    'service': 1,
+                    'living_street': 1,
+                    'track': 1,
+                    'road': 1
+                }
+                
+                WranglerLogger.info(f"Still {still_missing:,} links with missing lanes, using fallback defaults")
+                for highway, default_lanes in default_lanes_by_type.items():
+                    mask = (links_gdf['lanes'] == -1) & (links_gdf['highway'] == highway)
+                    if mask.any():
+                        links_gdf.loc[mask, 'lanes'] = default_lanes
+                        WranglerLogger.debug(f"  Set {mask.sum()} {highway} links to {default_lanes} lanes (fallback)")
+                
+                # Final check - set any remaining to 1 lane
+                final_missing = links_gdf['lanes'] == -1
+                if final_missing.any():
+                    links_gdf.loc[final_missing, 'lanes'] = 1
+                    WranglerLogger.warning(f"Set {final_missing.sum()} remaining links with unknown highway type to 1 lane")
+            
+            WranglerLogger.info(f"After filling: lanes value counts:\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    else:
+        WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
+        highway_to_lanes = {}
 
     return links_gdf
 
-def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
+def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     """Standardize the highway value in the links GeoDataFrame.
 
     Standardized values - drive:
@@ -280,13 +398,27 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
     - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
 
     Args:
-        links_gdf (gpd.DataFrame): links from OSMnx with columns, highway, steps, and other OSM tags.  New columns:
-
-          steps: (bool) if there are stairs for the facility
-          drive_access: (bool)
-          bike_access: (bool)
-          walk_access: (bool)
-          truck_access: (bool)
+        links_gdf: Links GeoDataFrame from OSMnx with columns:
+            - highway: OSM highway type (str or list of str)
+            - Other OSM tags as columns
+    
+    Returns:
+        None (modifies links_gdf in place)
+    
+    Side Effects:
+        Adds the following columns to links_gdf:
+            - highway_orig: Original highway value prefixed with 'highway:'
+            - steps: Boolean indicating if there are stairs
+            - drive_access: Boolean for auto access
+            - bike_access: Boolean for bicycle access
+            - walk_access: Boolean for pedestrian access
+            - truck_access: Boolean for truck access
+            - bus_access: Boolean for bus access
+    
+    Notes:
+        - Processes highway values according to a hierarchy
+        - Converts lists to single values based on priority
+        - Sets appropriate access permissions for each facility type
     """
     # make a copy of highway: highway_orig
     links_gdf['highway_orig'] = 'highway:' + links_gdf['highway'].astype(str)
@@ -371,9 +503,23 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame):
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
     return
 
-def get_roadway_value(highway):
-    """ 
-    When multiple values are present, return the first one.
+def get_roadway_value(highway: Union[str, list[str]]) -> str:
+    """
+    Extract a single highway value from potentially multiple values.
+    
+    When multiple values are present (as a list), returns the first one.
+    
+    Args:
+        highway: Either a single highway type string or a list of highway types.
+    
+    Returns:
+        A single highway type string.
+    
+    Examples:
+        >>> get_roadway_value('primary')
+        'primary'
+        >>> get_roadway_value(['primary', 'secondary'])
+        'primary'
     """
     if isinstance(highway,list):
         WranglerLogger.debug(f"list: {highway}")
@@ -383,13 +529,34 @@ def get_roadway_value(highway):
 
 
 def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-    """Standardizes fields and writes the given graph's links and nodes to Tableau.
-
-    Args:
-        g (networkx.MultiDiGraph): _description_
-        suffix (str): _description_
+    """
+    Standardize fields and write the given graph's links and nodes to Tableau Hyper format.
     
-    Returns: links and nodes GeoDataFrame objects
+    Processes an OSMnx graph by:
+    1. Projecting to WGS84 (EPSG:4326)
+    2. Converting to GeoDataFrames
+    3. Removing duplicate edges (keeping shortest)
+    4. Standardizing highway and lane values
+    5. Writing to Tableau Hyper files
+    
+    Args:
+        g: NetworkX MultiDiGraph from OSMnx containing the road network.
+        suffix: String suffix to append to output filenames (e.g., '_unsimplified').
+    
+    Returns:
+        A tuple containing:
+            - links_gdf: GeoDataFrame of standardized road links/edges
+            - nodes_gdf: GeoDataFrame of road network nodes
+    
+    Side Effects:
+        Writes two Tableau Hyper files to OUTPUT_DIR:
+            - {county}_links{suffix}.hyper
+            - {county}_nodes{suffix}.hyper
+    
+    Notes:
+        - Renames columns u,v to A,B for consistency
+        - Drops duplicate edges between same nodes, keeping shortest
+        - Uses global args.county variable for output naming
     """
     WranglerLogger.info(f"======= standardize_and_write(g, {suffix}) =======")
     # project to long/lat
