@@ -37,7 +37,8 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
         # make sure it's in WSG84
         gdf = in_gdf.to_crs(crs='EPSG:4326')
 
-    # Convert any list columns to strings for Tableau
+    # Convert any list values to strings for Tableau
+    cols_to_str = set()
     for col in gdf.columns:
         if gdf[col].dtype == 'object':
             # Check if any values are lists
@@ -45,42 +46,113 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
                 gdf[col] = gdf[col].apply(
                     lambda x: ', '.join(map(str, x)) if isinstance(x, list) else str(x) if pd.notna(x) else ''
                 )
+                cols_to_str.add(col)
+        if gdf[col].dtype == 'int64':
+            # Check if any values are outside of int32 range (-2147483648 to 2147483647)
+            # Tableau Hyper uses int32, so we need to convert int64 values that exceed this range
+            min_val = gdf[col].min()
+            max_val = gdf[col].max()
+            int32_min = -2147483648
+            int32_max = 2147483647
+            
+            if pd.notna(min_val) and pd.notna(max_val):
+                if min_val < int32_min or max_val > int32_max:
+                    WranglerLogger.warning(
+                        f"Column '{col}' has int64 values outside int32 range "
+                        f"[{int32_min}, {int32_max}]: min={min_val}, max={max_val}. "
+                        f"Converting to string."
+                    )
+                    cols_to_str.add(col)
+    
+    # Convert columns in cols_to_str to string types
+    for col in cols_to_str:
+        if col in gdf.columns:
+            gdf[col] = gdf[col].astype(str)
 
-    # Validate geometry bounds - check for invalid latitude/longitude values
-    def check_geometry_bounds(geom):
-        """Check if geometry has valid lat/lon bounds."""
+
+    # Validate geometries - check for invalid lat/lon values and insufficient coordinates
+    def validate_geometry(geom):
+        """
+        Check if geometry is valid for Tableau Hyper.
+        Returns tuple (is_valid, reason).
+        """
         if geom is None or geom.is_empty:
-            return True  # Consider empty geometries as valid
+            return False, "Empty or null geometry"
         
-        # Get bounds of the geometry (minx, miny, maxx, maxy)
-        # where x is longitude and y is latitude
-        bounds = geom.bounds
-        min_lon, min_lat, max_lon, max_lat = bounds[0], bounds[1], bounds[2], bounds[3]
+        # Check if geometry has enough coordinates
+        # Points need 1 coordinate, lines need at least 2
+        try:
+            geom_type = geom.geom_type
+            coords = list(geom.coords) if hasattr(geom, 'coords') else []
+            
+            if geom_type == 'Point':
+                if len(coords) < 1:
+                    return False, "Point has no coordinates"
+            elif geom_type in ['LineString', 'LinearRing']:
+                if len(coords) < 2:
+                    return False, f"{geom_type} has less than 2 coordinates"
+                # Check if all coordinates are the same (zero-length line)
+                if len(coords) >= 2:
+                    first_coord = coords[0]
+                    if all(coord == first_coord for coord in coords):
+                        return False, f"{geom_type} has all coordinates at the same location"
+            elif geom_type == 'Polygon':
+                # Check exterior ring
+                if len(geom.exterior.coords) < 3:
+                    return False, "Polygon exterior has less than 3 coordinates"
+            elif geom_type in ['MultiPoint', 'MultiLineString', 'MultiPolygon']:
+                if len(geom.geoms) == 0:
+                    return False, f"Empty {geom_type}"
+                # Check each sub-geometry
+                for sub_geom in geom.geoms:
+                    is_valid, reason = validate_geometry(sub_geom)
+                    if not is_valid:
+                        return False, f"{geom_type} contains invalid geometry: {reason}"
+        except Exception as e:
+            return False, f"Error checking geometry: {e}"
         
-        # Check if latitude or longitude is outside valid range
-        lat_valid = -90 <= min_lat <= 90 and -90 <= max_lat <= 90
-        lon_valid = -180 <= min_lon <= 180 and -180 <= max_lon <= 180
+        # Check bounds for valid lat/lon values
+        try:
+            bounds = geom.bounds
+            min_lon, min_lat, max_lon, max_lat = bounds[0], bounds[1], bounds[2], bounds[3]
+            
+            # Check if latitude or longitude is outside valid range
+            lat_valid = -90 <= min_lat <= 90 and -90 <= max_lat <= 90
+            lon_valid = -180 <= min_lon <= 180 and -180 <= max_lon <= 180
+            
+            if not lat_valid:
+                return False, f"Invalid latitude: min={min_lat}, max={max_lat}"
+            if not lon_valid:
+                return False, f"Invalid longitude: min={min_lon}, max={max_lon}"
+        except Exception as e:
+            return False, f"Error checking bounds: {e}"
         
-        return lat_valid and lon_valid
+        return True, "Valid"
     
-    # Add column indicating invalid coordinates
-    gdf['invalid_coordinates'] = ~gdf['geometry'].apply(check_geometry_bounds)
+    # Validate all geometries
+    gdf['geometry_validation'] = gdf['geometry'].apply(validate_geometry)
+    gdf['is_valid'] = gdf['geometry_validation'].apply(lambda x: x[0])
+    gdf['validation_reason'] = gdf['geometry_validation'].apply(lambda x: x[1])
     
-    # Check if there are any invalid geometries
-    invalid_rows = gdf[gdf['invalid_coordinates']]
+    # Filter out invalid geometries
+    invalid_rows = gdf[~gdf['is_valid']]
     
     if len(invalid_rows) > 0:
-        WranglerLogger.error(f"Found {len(invalid_rows)} rows with invalid latitude/longitude values.")
-        WranglerLogger.error("Latitude must be within [-90, 90] and longitude must be within [-180, 180].")
-        WranglerLogger.error(f"Invalid rows:\n{invalid_rows}")
+        WranglerLogger.warning(f"Found {len(invalid_rows)} rows with invalid geometries. These will be filtered out.")
+        WranglerLogger.warning("Invalid geometry reasons:")
+        reason_counts = invalid_rows['validation_reason'].value_counts()
+        for reason, count in reason_counts.items():
+            WranglerLogger.warning(f"  - {reason}: {count} rows")
         
-        raise ValueError(
-            f"Found {len(invalid_rows)} geometries with invalid latitude/longitude values. "
-            f"See logs above for details."
-        )
+        # Log sample of invalid rows (first 5)
+        WranglerLogger.debug(f"Invalid rows:\n{invalid_rows}")
+
+        # Filter to keep only valid rows
+        gdf = gdf[gdf['is_valid']].copy()
+        WranglerLogger.info(f"Keeping {len(gdf)} valid rows for Tableau export")
     
-    # Remove the temporary invalid_coordinates column
-    gdf = gdf.drop(columns=['invalid_coordinates'])
+    # Remove the temporary validation columns
+    gdf = gdf.drop(columns=['geometry_validation', 'is_valid', 'validation_reason'])
 
     import tableauhyperapi
 
