@@ -19,6 +19,7 @@ from typing import Any, Union
 
 import networkx
 import osmnx
+import numpy as np
 import pandas as pd
 import geopandas as gpd
 
@@ -34,17 +35,26 @@ if USERNAME=="lmz":
     INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-10")
     OUTPUT_DIR = pathlib.Path("../../output_from_OSM")
 
-BAY_AREA_COUNTIES = [
-    'Alameda', 
-    'Contra Costa', 
-    'Marin',
-    'Napa',
-    'San Francisco',
-    'San Mateo',
-    'Santa Clara',
-    'Solano',
-    'Sonoma'
-]
+# Map county names to county network node start based on
+# https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+COUNTY_NAME_TO_NODE_START_NUM = {
+    'San Francisco': 1_000_000,
+    'San Mateo'    : 1_500_000,
+    'Santa Clara'  : 2_000_000,
+    'Alameda'      : 2_500_000,
+    'Contra Costa' : 3_000_000,
+    'Solano'       : 3_500_000,
+    'Napa'         : 4_000_000,
+    'Sonoma'       : 4_500_000,
+    'Marin'        : 5_000_000,
+    'External'     : 900_001,
+ }
+BAY_AREA_COUNTIES = list(COUNTY_NAME_TO_NODE_START_NUM.keys())
+BAY_AREA_COUNTIES.remove("External")
+
+COUNTY_NAME_TO_NUM = dict(zip(BAY_AREA_COUNTIES, range(1,len(BAY_AREA_COUNTIES)+1)))
+
+FEET_PER_MILE = 5280.0
 
 # way (link) tags we want from OpenStreetMap (OSM)
 # osmnx defaults are viewable here: https://osmnx.readthedocs.io/en/stable/osmnx.html?highlight=util.config#osmnx.utils.config
@@ -120,7 +130,8 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
         3
     """
     if isinstance(lane, list):
-        lane = [int(s) for s in lane]
+        lane = [item for item in lane if item.isnumeric()]# keep only numeric 
+        lane = [int(float(s)) for s in lane] # float conversion first for values like 1.5 (yes really)
         if len(lane) == 2:
             return int(min(lane))
         else:
@@ -225,6 +236,7 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         'lanes:bus:forward','lanes:bus:backward'
     ]
     for lane_col in LANES_COLS:
+        if lane_col not in links_gdf.columns: links_gdf[lane_col] = np.nan
         WranglerLogger.debug(f"Before get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
         links_gdf[lane_col] = links_gdf[lane_col].apply(get_min_or_median_value)
         WranglerLogger.debug(f"After get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
@@ -362,6 +374,7 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                     links_gdf.loc[final_missing, 'lanes'] = 1
                     WranglerLogger.warning(f"Set {final_missing.sum()} remaining links with unknown highway type to 1 lane")
             
+            links_gdf['lanes'] = links_gdf['lanes'].astype(int)
             WranglerLogger.info(f"After filling: lanes value counts:\n{links_gdf['lanes'].value_counts(dropna=False)}")
     else:
         WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
@@ -528,14 +541,18 @@ def get_roadway_value(highway: Union[str, list[str]]) -> str:
 
 
 
-def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+def standardize_and_write(
+        g: networkx.MultiDiGraph,
+        county: str, 
+        suffix: str
+    ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     Standardize fields and write the given graph's links and nodes to Tableau Hyper format.
     
     Processes an OSMnx graph by:
     1. Projecting to WGS84 (EPSG:4326)
     2. Converting to GeoDataFrames
-    3. Removing duplicate edges (keeping shortest)
+    3. Removing duplicate edges (keeping shortest) and loop edges (A==B)
     4. Standardizing highway and lane values
     5. Writing to Tableau Hyper files
     
@@ -549,16 +566,15 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
             - nodes_gdf: GeoDataFrame of road network nodes
     
     Side Effects:
-        Writes two Tableau Hyper files to OUTPUT_DIR:
-            - {county}_links{suffix}.hyper
-            - {county}_nodes{suffix}.hyper
+        Writes two Tableau Hyper files to OUTPUT_DIR\county_OSM{suffix}:
+            - {county}_links.hyper
+            - {county}_nodes.hyper
     
     Notes:
         - Renames columns u,v to A,B for consistency
         - Drops duplicate edges between same nodes, keeping shortest
-        - Uses global args.county variable for output naming
     """
-    WranglerLogger.info(f"======= standardize_and_write(g, {suffix}) =======")
+    WranglerLogger.info(f"======= standardize_and_write(g, {county}, {suffix}) =======")
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs="EPSG:4326")
 
@@ -569,26 +585,62 @@ def standardize_and_write(g: networkx.MultiDiGraph, suffix: str) -> tuple[gpd.Ge
     # it would be fine to delete the longer one for the purposes of routing....so that's what we will do.
     links_gdf = edges_gdf.loc[edges_gdf.groupby(['u', 'v'])['length'].idxmin()].reset_index(drop=False)
     WranglerLogger.info(f"links_gdf has {len(links_gdf):,} links after dropping duplicates")
+    # Also drop edges where u==v
+    links_gdf = links_gdf.loc[links_gdf['u']!=links_gdf['v']].reset_index(drop=False)
+    WranglerLogger.info(f"links_gdf has {len(links_gdf):,} links after dropping loop links (with u==v)")
 
     # use A,B instead of u,v
     links_gdf.rename(columns={'u': 'A', 'v': 'B'}, inplace=True)
+    # nodes has osmid as index; move to be a real column
+    nodes_gdf.reset_index(names='osmid', inplace=True)
 
     standardize_highway_value(links_gdf)
     links_gdf = standardize_lanes_value(links_gdf)
 
-    WranglerLogger.debug(f"2 links_gdf:\n{links_gdf}")
-    WranglerLogger.debug(f"2 links_gdf.dtypes:\n{links_gdf.dtypes}")
+    # add county
+    links_gdf['county'] = county
+    nodes_gdf['county'] = county
+
+    # and distance
+    links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
+
+    # Renumber nodes starting at COUNTY_NAME_TO_NODE_START_NUM[county] for nodes_gdf
+    # and rename osmid -> model_node_id
+    assert(max(nodes_gdf['osmid']) >= 0)
+    assert(max(nodes_gdf['osmid'])  < 5_000_000)
+    nodes_gdf.rename(columns={'osmid':'model_node_id', 'x':'X', 'y':'Y'}, inplace=True)
+    nodes_gdf['model_node_id'] = nodes_gdf['model_node_id'] + COUNTY_NAME_TO_NODE_START_NUM[county]
+    # Renumber links A,B similarly
+    links_gdf['A'] = links_gdf['A'] + COUNTY_NAME_TO_NODE_START_NUM[county]
+    links_gdf['B'] = links_gdf['B'] + COUNTY_NAME_TO_NODE_START_NUM[county]
+
+    WranglerLogger.debug(f"nodes_gdf for {county}\n{nodes_gdf.head()}")
+    WranglerLogger.debug(f"{min(nodes_gdf['model_node_id'])=:,}-{max(nodes_gdf['model_node_id'])=:,}")
+
+    # create model_link_id based on COUNTY_NAME_TO_NUM, assuming 100,000
+    assert(len(links_gdf) < 100_000)
+    links_gdf.reset_index(drop=True, inplace=True)
+    links_gdf['model_link_id'] = links_gdf.index + (COUNTY_NAME_TO_NUM[county] * 100_000)
+    # create shape_id, a str version of model_link_id
+    links_gdf['shape_id'] = 'sh' + links_gdf['model_link_id'].astype(str)
+
+    WranglerLogger.debug(f"links_gdf for {county}\n{links_gdf.head()}")
+    WranglerLogger.debug(f"{min(links_gdf['A'])=:,}-{max(links_gdf['A'])=:,}")
+    WranglerLogger.debug(f"{min(links_gdf['B'])=:,}-{max(links_gdf['B'])=:,}")
+
+    county_osm_output_dir = (OUTPUT_DIR / f"1_county_OSM{suffix}").resolve()
+    county_osm_output_dir.mkdir(exist_ok = True)
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
-        (OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_links{suffix}.hyper").resolve(), 
-        f"{args.county.replace(' ','_').lower()}_links{suffix}"
+        (county_osm_output_dir/f"{county.replace(' ','_').lower()}_links.hyper").resolve(), 
+        f"{county.replace(' ','_').lower()}_links"
     )
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
-        (OUTPUT_DIR/f"{args.county.replace(' ','_').lower()}_nodes{suffix}.hyper").resolve(), 
-        f"{args.county}_nodes{suffix}"
+        (county_osm_output_dir/f"{county.replace(' ','_').lower()}_nodes.hyper").resolve(), 
+        f"{county}_nodes"
     )
     return (links_gdf, nodes_gdf)
 
@@ -596,7 +648,8 @@ if __name__ == "__main__":
 
     pd.options.display.max_columns = None
     pd.options.display.width = None
-
+    pd.set_option('display.float_format', '{:.2f}'.format)
+    
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     osmnx.settings.use_cache = True
@@ -626,6 +679,8 @@ if __name__ == "__main__":
     OSM_network_type = "drive"
 
     counties = [args.county] if args.county != 'Bay Area' else BAY_AREA_COUNTIES
+    links_gdf = None
+    nodes_gdf = None
     for county in counties:
         # use network_type='all_public' for all edges
         # Use OXMnx to pull the network graph for a place.
@@ -638,17 +693,20 @@ if __name__ == "__main__":
         g = osmnx.graph_from_place(f'{county}, California, USA', network_type=OSM_network_type)
         WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
-        standardize_and_write(g, "_unsimplified")
+        # standardize_and_write(g, county, "_unsimplified")
 
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs="EPSG:2227")
 
-        # TODO: If we do simplification, it should be access-based. Drive links shouldn't be simplified to pedestrian links and vice versa
-        # consolidate intersections
+        # If we do simplification, it must be access-based.
+        # Drive links shouldn't be simplified to pedestrian links and vice versa
+        #
+        # Simplify to consolidate intersections
         # https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.simplification.consolidate_intersections
+        TOLERANCE = 30 # feet
         g = osmnx.simplification.consolidate_intersections(
             g, 
-            tolerance=30, # feet
+            tolerance=TOLERANCE, # feet
             rebuild_graph=True,
             dead_ends=True, # keep dead-ends
             reconnect_edges=True,
@@ -656,19 +714,36 @@ if __name__ == "__main__":
         WranglerLogger.info(f"After consolidating, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
 
         # Save this version
-        (links_gdf, nodes_gdf) =  standardize_and_write(g, "_simplified30ft")
-        nodes_gdf.reset_index(names='osmid', inplace=True)
+        (county_links_gdf, county_nodes_gdf) = standardize_and_write(g, county, f"_simplified{TOLERANCE}ft")
 
-    # rename osmid to model_node_id; osmid is an int
-    nodes_gdf.rename(columns={'osmid':'model_node_id', 'x':'X', 'y':'Y'}, inplace=True)
-    WranglerLogger.debug(f"{len(nodes_gdf)=:,} nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
+        # renumbering has already been done
+        links_gdf = pd.concat([links_gdf, county_links_gdf])
+        nodes_gdf = pd.concat([nodes_gdf, county_nodes_gdf])
 
+    WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
+    WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
+
+    roadway_dir = (OUTPUT_DIR / f"2_bayarea_OSM").resolve()
+    roadway_dir.mkdir(exist_ok = True)
+
+    tableau_utils.write_geodataframe_as_tableau_hyper(
+        links_gdf, 
+        roadway_dir / "bayarea_links.hyper",
+        "bayarea_links"
+    )
+
+    tableau_utils.write_geodataframe_as_tableau_hyper(
+        nodes_gdf, 
+        roadway_dir / "bayarea_nodes.hyper",
+        "bayarea_nodes"
+    )
     # create roadway network
     roadway_network =  network_wrangler.load_roadway_from_dataframes(
         links_df=links_gdf,
         nodes_df=nodes_gdf,
         shapes_df=links_gdf
     )
+    WranglerLogger.info(f"Created RoadwayNetwork")
     WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
 
     # Read a GTFS network (not wrangler_flavored)
