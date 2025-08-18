@@ -597,8 +597,8 @@ def standardize_and_write(
     
     Side Effects:
         Writes two Tableau Hyper files to OUTPUT_DIR:
-            - 3_standardized_{county}_links.hyper
-            - 3_standardized_{county}_nodes.hyper
+            - 3_standardized_{county_no_spaces}_links.hyper
+            - 3_standardized_{county_no_spaces}_nodes.hyper
     
     Notes:
         - Renames columns u,v to A,B for consistency
@@ -606,6 +606,7 @@ def standardize_and_write(
         - For Bay Area, performs spatial join to assign counties
     """
     WranglerLogger.info(f"======= standardize_and_write(g, {county}, {suffix}) =======")
+    county_no_spaces = county.replace(" ","")
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
 
@@ -632,7 +633,7 @@ def standardize_and_write(
     links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
 
     # Handle county assignment
-    if county == "BayArea":
+    if county == "Bay Area":
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
         county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
@@ -788,8 +789,8 @@ def standardize_and_write(
         # and rename osmid -> model_node_id
         assert(max(nodes_gdf['osmid']) >= 0)
         assert(max(nodes_gdf['osmid'])  < 5_000_000)
-        nodes_gdf.rename(columns={'osmid':'model_node_id', 'x':'X', 'y':'Y'}, inplace=True)
-        nodes_gdf['model_node_id'] = nodes_gdf['model_node_id'] + COUNTY_NAME_TO_NODE_START_NUM[county]
+        nodes_gdf.rename(columns={'x':'X', 'y':'Y'}, inplace=True)
+        nodes_gdf['model_node_id'] = nodes_gdf['osmid'] + COUNTY_NAME_TO_NODE_START_NUM[county]
         # Renumber links A,B similarly
         links_gdf['A'] = links_gdf['A'] + COUNTY_NAME_TO_NODE_START_NUM[county]
         links_gdf['B'] = links_gdf['B'] + COUNTY_NAME_TO_NODE_START_NUM[county]
@@ -819,19 +820,19 @@ def standardize_and_write(
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
-        OUTPUT_DIR / f"3_standardized_{county}_links.hyper", 
-        f"{county}_links"
+        OUTPUT_DIR / f"3_standardized_{county_no_spaces}_links.hyper", 
+        f"{county_no_spaces}_links"
     )
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
-        OUTPUT_DIR / f"3_standardized_{county}_nodes.hyper", 
-        f"{county}_nodes"
+        OUTPUT_DIR / f"3_standardized_{county_no_spaces}_nodes.hyper", 
+        f"{county_no_spaces}_nodes"
     )
 
     # write to parquet
-    # links_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county}_links.parquet")
-    # nodes_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county}_nodes.parquet")
+    # links_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county_no_spaces}_links.parquet")
+    # nodes_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county_no_spaces}_nodes.parquet")
     return (links_gdf, nodes_gdf)
 
 if __name__ == "__main__":
@@ -910,7 +911,7 @@ if __name__ == "__main__":
         WranglerLogger.info(f"Wrote {initial_graph_file}")
         WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
         # Don't bother standardizing this version since we'll use the simplified version
-        # standardize_and_write(g, county, "_unsimplified")
+        # standardize_and_write(g, args.county, "_unsimplified")
 
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs="EPSG:2227")
@@ -931,7 +932,7 @@ if __name__ == "__main__":
         with open(simplified_graph_file, "wb") as f: pickle.dump(g, f)
 
     # Save this version
-    (links_gdf, nodes_gdf) = standardize_and_write(g, args.county_no_spaces, f"_simplified{NETWORK_SIMPLIFY_TOLERANCE}ft")
+    (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"_simplified{NETWORK_SIMPLIFY_TOLERANCE}ft")
 
     WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
     WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
