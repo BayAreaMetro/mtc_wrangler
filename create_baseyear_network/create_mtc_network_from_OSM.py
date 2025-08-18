@@ -610,7 +610,7 @@ def standardize_and_write(
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
 
     nodes_gdf, edges_gdf = osmnx.graph_to_gdfs(g)
-    WranglerLogger.info(f"After converting to gdfs, len(edges_gdf)={len(edges_gdf):,} and len(nodes_gdf=){len(nodes_gdf):,}")
+    WranglerLogger.info(f"After converting to gdfs, len(edges_gdf)={len(edges_gdf):,} and len(nodes_gdf)={len(nodes_gdf):,}")
 
     # When checking for uniqueness in uv, it looks like all of these are loops where
     # it would be fine to delete the longer one for the purposes of routing....so that's what we will do.
@@ -643,7 +643,20 @@ def standardize_and_write(
         county_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
         links_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
         nodes_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
+
+        # Dissolve counties to one region shape and create convex hull
+        region_shape = county_gdf.dissolve().convex_hull.iloc[0]
+        region_gdf = gpd.GeoDataFrame([{'geometry': region_shape, 'region': 'Bay Area'}], crs=county_gdf.crs)
         
+        # Filter to links that intersect with region
+        links_gdf = links_gdf[links_gdf.intersects(region_shape)].copy()
+        WranglerLogger.info(f"Filtered to {len(links_gdf):,} links intersecting Bay Area region")
+        
+        # Filter nodes to only those referenced in the filtered links
+        used_nodes = pd.concat([links_gdf['A'], links_gdf['B']]).unique()
+        nodes_gdf = nodes_gdf[nodes_gdf['osmid'].isin(used_nodes)]
+        WranglerLogger.info(f"Filtered to {len(nodes_gdf):,} nodes that are referenced in links")
+
         # Spatial join for nodes - use point geometry
         nodes_gdf = gpd.sjoin(
             nodes_gdf, 
@@ -665,9 +678,8 @@ def standardize_and_write(
         WranglerLogger.debug(f"{len(links_gdf)=:,}")
         WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
         
-        # drop links that are entirely external
-        links_gdf = links_gdf.loc[links_gdf['county'].notna()]
-        WranglerLogger.debug(f"After dropping links which didn't join to county, {len(links_gdf)=:,}")
+        # Use "External" for links outside counties
+        links_gdf['county'] = links_gdf['county'].fillna('External')
         WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
 
         # The only links to adjust are those that matched to multiple counties
@@ -708,20 +720,20 @@ def standardize_and_write(
             # drop temporary columns
             links_gdf.drop(columns=['index','index_right','intersection_length'], inplace=True)
             links_gdf.reset_index(drop=True, inplace=True)
-            WranglerLogger.debug(f"links_gdf with 1 county per link:\n{links_gdf}")
-
+            
         # Drop the extra columns from spatial join
         links_gdf = links_gdf.drop(columns=['index','index_right'], errors='ignore')
 
-        WranglerLogger.info(f"County assignment for nodes:\n{nodes_gdf['county'].value_counts()}")
-        WranglerLogger.info(f"County assignment for links:\n{links_gdf['county'].value_counts()}")
-        
-        # Renumber nodes based on their assigned county
-        nodes_gdf.rename(columns={'osmid':'osmid_orig', 'x':'X', 'y':'Y'}, inplace=True)
+        WranglerLogger.debug(f"links_gdf with one county per link:\n{links_gdf}")
+
+        # Renumber nodes based on their assigned county  
+        nodes_gdf.rename(columns={'x':'X', 'y':'Y'}, inplace=True)
         
         # Sort nodes by county for consistent numbering
         nodes_gdf = nodes_gdf.sort_values('county').reset_index(drop=True)
         
+        WranglerLogger.debug(f"nodes_gdf:\n{nodes_gdf}")
+
         # Vectorized approach to assign model_node_id based on county
         nodes_gdf['model_node_id'] = 0  # Initialize
         
@@ -738,7 +750,7 @@ def standardize_and_write(
             nodes_gdf.loc[county_indices, 'model_node_id'] = range(start_node_id, start_node_id + county_node_count)
         
         # Create mapping from original osmid to new model_node_id for updating links
-        osmid_to_model_id = dict(zip(nodes_gdf['osmid_orig'], nodes_gdf['model_node_id']))
+        osmid_to_model_id = dict(zip(nodes_gdf['osmid'], nodes_gdf['model_node_id']))
         
         # Update links A,B using the mapping
         links_gdf['A'] = links_gdf['A'].map(osmid_to_model_id)
@@ -762,7 +774,7 @@ def standardize_and_write(
             # Create sequential IDs for this county's links
             county_indices = links_gdf[county_mask].index
             links_gdf.loc[county_indices, 'model_link_id'] = range(start_id, start_id + county_links_count)
-            
+
         # revert to LAT_LON_CRS
         county_gdf.to_crs(LAT_LON_CRS, inplace=True)
         links_gdf.to_crs(LAT_LON_CRS, inplace=True)
