@@ -683,7 +683,7 @@ def standardize_and_write(
         WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
 
         # The only links to adjust are those that matched to multiple counties
-        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['index'], keep=False)]
+        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['index'], keep=False)].copy()
         WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
 
         if len(multicounty_links_gdf) > 0:
@@ -935,6 +935,18 @@ if __name__ == "__main__":
 
     WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
     WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
+
+    # Drop columns that we likely won't need anymore
+    LINK_COLS = [
+        'A', 'B', 'osmid', 'highway','name','ref','oneway','reversed','length','geometry',
+        'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_access',
+        'lanes', 'distance', 'county', 'model_link_id', 'shape_id'
+    ]
+    links_gdf = links_gdf[LINK_COLS]
+    NODE_COLS = [
+        'osmid', 'X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
+    ]
+    nodes_gdf = nodes_gdf[NODE_COLS]
 
     # create roadway network
     roadway_network =  network_wrangler.load_roadway_from_dataframes(
