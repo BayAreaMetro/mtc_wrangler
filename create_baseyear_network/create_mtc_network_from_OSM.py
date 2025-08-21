@@ -71,6 +71,20 @@ NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
 LOCAL_CRS_FEET = "EPSG:2227"
 """ NAD83 / California zone 3 (ftUS) https://epsg.io/2227 """
 
+COUNTY_NAME_TO_GTFS_AGENCIES = {
+    'San Francisco': [
+        'SF', # SF Muni
+        'BA', # BART
+        'GG', # Golden Gate Transit
+        'CT', # Caltrain
+    ],
+    'San Mateo': [
+        'SM', # SamTrans
+        'BA', # BART
+        'CT', # Caltrain
+    ]
+}
+
 
 # way (link) tags we want from OpenStreetMap (OSM)
 # osmnx defaults are viewable here: https://osmnx.readthedocs.io/en/stable/osmnx.html?highlight=util.config#osmnx.utils.config
@@ -308,19 +322,25 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     for col in links_gdf_reversed.columns.to_list():
         rev_col_rename[col] = f"{col}_rev"
     links_gdf_reversed.rename(columns=rev_col_rename, inplace=True)
+    WranglerLogger.debug(f"Created links_gdf_reversed:\n{links_gdf_reversed}")
 
+    # The column key differentiates parallel edges between the same u and v nodes. 
+    # If there are multiple distinct street segments connecting the same two nodes
+    # (e.g., a street with a median where traffic flows in both directions along
+    # separate physical paths), the key allows each of these parallel edges to be
+    # uniquely identified. For edges where no parallel edges exist, the key is typically 0.
     links_gdf_wide = pd.merge(
         left=links_gdf_notreversed,
         right=links_gdf_reversed,
-        how='outer',
-        left_on=['A','B'],
-        right_on=['B_rev','A_rev'],
+        how='left',
+        left_on=['A','B','key'],
+        right_on=['B_rev','A_rev','key_rev'],
         indicator=True,
         validate='one_to_one'
     )
     WranglerLogger.debug(f"links_gdf_wide['_merge'].value_counts():\n{links_gdf_wide['_merge'].value_counts()}")
-    LANES_COLS = ['A','B','drive_access','oneway','reversed','name','lanes','lanes_orig','lanes:backward','lanes:forward','lanes:both_ways','lanes:bus','lanes:bus:forward','lanes:bus:backward']
-    LANES_COLS += [f"{col}_rev" for col in LANES_COLS if col not in ['A','B']]
+    LANES_COLS = ['A','B','key','drive_access','oneway','reversed','name','lanes','lanes_orig','lanes:backward','lanes:forward','lanes:both_ways','lanes:bus','lanes:bus:forward','lanes:bus:backward']
+    LANES_COLS += [f"{col}_rev" for col in LANES_COLS]
 
     # set the lanes from lanes:forward or lanes:backward
     links_gdf_wide['lanes'    ] = -1 # initialize to -1
@@ -332,18 +352,24 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes'    ]==-1),     'lanes'    ] = links_gdf_wide['lanes:both_ways']
     links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes:both_ways']
 
-    # set the lanes from lanes_orig
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1), 'lanes'    ] = links_gdf_wide['lanes_orig']
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes_orig']
+    # since lanes is for both directions, divide by 2 if not one way
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    WranglerLogger.debug(f"links_gdf_wide for busway:\n{links_gdf_wide.loc[links_gdf_wide.highway=='busway', LANES_COLS]}")
 
     WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS]}")
     WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts(dropna=False)}")
-    
+
+    assert(links_gdf.duplicated(subset=['A','B','key']).sum() == 0)
+    assert(links_gdf_wide.duplicated(subset=['A','B','key']).sum() == 0)
+
     # merge links_gdf_wide values back to links_gdf
     links_gdf = links_gdf.merge(
-        right=links_gdf_wide[['A','B','lanes']],
+        right=links_gdf_wide[['A','B','key','lanes']],
         how='left',
-        on=['A','B'],
+        on=['A','B','key'],
         validate='one_to_one'
     )
     WranglerLogger.debug(f"After merging links_gdf_wide back to links_gdf:\n{links_gdf.head()}")
@@ -351,10 +377,10 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
     # and for the reverse
     links_gdf = links_gdf.merge(
-        right=links_gdf_wide[['A','B','lanes_rev']],
+        right=links_gdf_wide[['A','B','key','lanes_rev']],
         how='left',
-        left_on=['A','B'],
-        right_on=['B','A'],
+        left_on=['A','B','key'],
+        right_on=['B','A','key'],
         validate='one_to_one',
         suffixes=('','_rev')
     ).drop(columns=['A_rev','B_rev'])
@@ -546,6 +572,8 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # go from highest to lowest and choose highest
     for highway_type in HIGHWAY_HIERARCHY:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
+
+    WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
     return
 
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
@@ -592,7 +620,7 @@ def standardize_and_write(
     Args:
         g: NetworkX MultiDiGraph from OSMnx containing the road network.
         county: County name or "Bay Area" for multi-county processing
-        prefix: String prefix to append to output filenames (e.g., '2_').
+        prefix: String prefix to prefix to output filenames
     
     Returns:
         A tuple containing:
@@ -601,8 +629,8 @@ def standardize_and_write(
     
     Side Effects:
         Writes two Tableau Hyper files to OUTPUT_DIR:
-            - 3_standardized_{county_no_spaces}_links.hyper
-            - 3_standardized_{county_no_spaces}_nodes.hyper
+            - {prefix}{county_no_spaces}_links.hyper
+            - {prefix}{county_no_spaces}_nodes.hyper
     
     Notes:
         - Renames columns u,v to A,B for consistency
@@ -617,18 +645,43 @@ def standardize_and_write(
     nodes_gdf, edges_gdf = osmnx.graph_to_gdfs(g)
     WranglerLogger.info(f"After converting to gdfs, len(edges_gdf)={len(edges_gdf):,} and len(nodes_gdf)={len(nodes_gdf):,}")
 
-    # When checking for uniqueness in uv, it looks like all of these are loops where
-    # it would be fine to delete the longer one for the purposes of routing....so that's what we will do.
-    links_gdf = edges_gdf.loc[edges_gdf.groupby(['u', 'v'])['length'].idxmin()].reset_index(drop=False)
-    WranglerLogger.info(f"links_gdf has {len(links_gdf):,} links after dropping duplicates")
-    # Also drop edges where u==v
-    links_gdf = links_gdf.loc[links_gdf['u']!=links_gdf['v']].reset_index(drop=False)
+    # u,v,key are the index columns; Move them to real columns
+    links_gdf = edges_gdf.reset_index(drop=False)
+
+    # Note: u,v are not unique
+    # The column 'key' differentiates parallel edges between the same u and v nodes. 
+    # If there are multiple distinct street segments connecting the same two nodes
+    # (e.g., a street with a median where traffic flows in both directions along
+    # separate physical paths), the key allows each of these parallel edges to be
+    # uniquely identified. For edges where no parallel edges exist, the key is typically 0.
+    WranglerLogger.debug(f"Links with identical u,v:\n{links_gdf.loc[links_gdf.duplicated(subset=['u','v'], keep=False)]}")
+    # For now, leave them and tag
+    links_gdf['dupe_A_B'] = False
+    links_gdf.loc[links_gdf.duplicated(subset=['u','v'], keep=False), 'dupe_A_B'] = True
+    
+    # Drop edges where u==v
+    WranglerLogger.debug(f"Dropping edges where u==v:\n{links_gdf.loc[links_gdf['u']==links_gdf['v']]}")
+    links_gdf = links_gdf.loc[links_gdf['u']!=links_gdf['v']].reset_index(drop=True)
     WranglerLogger.info(f"links_gdf has {len(links_gdf):,} links after dropping loop links (with u==v)")
 
     # use A,B instead of u,v
     links_gdf.rename(columns={'u': 'A', 'v': 'B'}, inplace=True)
     # nodes has osmid as index; move to be a real column
     nodes_gdf.reset_index(names='osmid', inplace=True)
+
+    # keep original OSM node IDs
+    if 'osmid_original' in nodes_gdf.columns:
+        # If the graph is simplified, this may be a list of nodes/links rather than a single node/link
+        # Note: osmid will also be present, but we'll keep as int and use later
+        nodes_gdf.rename(columns={'osmid_original':'osm_node_id'}, inplace=True)
+    else:
+        # For unsimplified graph, let's just copy which we'll convert to string
+        nodes_gdf['osm_node_id'] = nodes_gdf['osmid']
+
+    links_gdf.rename(columns={'osmid':'osm_link_id'}, inplace=True)
+    # also convert to a string
+    nodes_gdf['osm_node_id'] = nodes_gdf['osm_node_id'].astype(str)
+    links_gdf['osm_link_id'] = links_gdf['osm_link_id'].astype(str)
 
     standardize_highway_value(links_gdf)
     links_gdf = standardize_lanes_value(links_gdf)
@@ -731,112 +784,135 @@ def standardize_and_write(
 
         WranglerLogger.debug(f"links_gdf with one county per link:\n{links_gdf}")
 
-        # Renumber nodes based on their assigned county  
-        nodes_gdf.rename(columns={'x':'X', 'y':'Y'}, inplace=True)
-        
         # Sort nodes by county for consistent numbering
         nodes_gdf = nodes_gdf.sort_values('county').reset_index(drop=True)
-        
         WranglerLogger.debug(f"nodes_gdf:\n{nodes_gdf}")
-
-        # Vectorized approach to assign model_node_id based on county
-        nodes_gdf['model_node_id'] = 0  # Initialize
-        
-        # For each county, assign sequential model node IDs starting from the county's base number
-        for county_name in sorted(nodes_gdf['county'].unique()):
-            county_mask = nodes_gdf['county'] == county_name
-            county_node_count = county_mask.sum()
-            
-            # Get the starting node ID for this county
-            start_node_id = COUNTY_NAME_TO_NODE_START_NUM.get(county_name, 900_001)
-            
-            # Assign sequential IDs to all nodes in this county
-            county_indices = nodes_gdf[county_mask].index
-            nodes_gdf.loc[county_indices, 'model_node_id'] = range(start_node_id, start_node_id + county_node_count)
-        
-        # Create mapping from original osmid to new model_node_id for updating links
-        osmid_to_model_id = dict(zip(nodes_gdf['osmid'], nodes_gdf['model_node_id']))
-        
-        # Update links A,B using the mapping
-        links_gdf['A'] = links_gdf['A'].map(osmid_to_model_id)
-        links_gdf['B'] = links_gdf['B'].map(osmid_to_model_id)
-
-        # create model_link_id based on COUNTY_NAME_TO_NUM, assuming 100,000
-        links_gdf = links_gdf.sort_values('county').reset_index(drop=True)
-        links_gdf['model_link_id'] = 0  # Initialize
-        
-        # Create link IDs based on assigned county
-        for link_county in sorted(links_gdf['county'].unique()):
-            county_mask = links_gdf['county'] == link_county
-            county_links_count = county_mask.sum()
-            
-            # Get the county number, use 0 for External or unknown counties
-            county_num = COUNTY_NAME_TO_NUM.get(link_county, 0)
-            
-            # Calculate start_id based on county number
-            start_id = county_num * 1_000_000
-            
-            # Create sequential IDs for this county's links
-            county_indices = links_gdf[county_mask].index
-            links_gdf.loc[county_indices, 'model_link_id'] = range(start_id, start_id + county_links_count)
 
         # revert to LAT_LON_CRS
         county_gdf.to_crs(LAT_LON_CRS, inplace=True)
         links_gdf.to_crs(LAT_LON_CRS, inplace=True)
-        nodes_gdf.to_crs(LAT_LON_CRS, inplace=True)
+        nodes_gdf.to_crs(LAT_LON_CRS, inplace=True)    
     else:
         # Original single-county logic
         links_gdf['county'] = county
         nodes_gdf['county'] = county
-        
-        # Renumber nodes starting at COUNTY_NAME_TO_NODE_START_NUM[county] for nodes_gdf
-        # and rename osmid -> model_node_id
-        assert(max(nodes_gdf['osmid']) >= 0)
-        assert(max(nodes_gdf['osmid'])  < 5_000_000)
-        nodes_gdf.rename(columns={'x':'X', 'y':'Y'}, inplace=True)
-        nodes_gdf['model_node_id'] = nodes_gdf['osmid'] + COUNTY_NAME_TO_NODE_START_NUM[county]
-        # Renumber links A,B similarly
-        links_gdf['A'] = links_gdf['A'] + COUNTY_NAME_TO_NODE_START_NUM[county]
-        links_gdf['B'] = links_gdf['B'] + COUNTY_NAME_TO_NODE_START_NUM[county]
 
-        assert(len(links_gdf) < 100_000)
-        links_gdf.reset_index(drop=True, inplace=True)
-        links_gdf['model_link_id'] = links_gdf.index + (COUNTY_NAME_TO_NUM[county] * 100_000)
-    
+    # Renumber nodes based on their assigned county  
+    nodes_gdf.rename(columns={'x':'X', 'y':'Y'}, inplace=True)
+        
+    # Vectorized approach to assign model_node_id based on county
+    nodes_gdf['model_node_id'] = 0  # Initialize
+        
+    # For each county, assign sequential model node IDs starting from the county's base number
+    for county_name in sorted(nodes_gdf['county'].unique()):
+        county_mask = nodes_gdf['county'] == county_name
+        county_node_count = county_mask.sum()
+            
+        # Get the starting node ID for this county
+        start_node_id = COUNTY_NAME_TO_NODE_START_NUM.get(county_name, 900_001)
+            
+        # Assign sequential IDs to all nodes in this county
+        county_indices = nodes_gdf[county_mask].index
+        nodes_gdf.loc[county_indices, 'model_node_id'] = range(start_node_id, start_node_id + county_node_count)
+        
+    # Create mapping from original osmid to new model_node_id for updating links
+    osmid_to_model_id = dict(zip(nodes_gdf['osmid'], nodes_gdf['model_node_id']))
+        
+    # Update links A,B using the mapping
+    links_gdf['A'] = links_gdf['A'].map(osmid_to_model_id)
+    links_gdf['B'] = links_gdf['B'].map(osmid_to_model_id)
+
+    # create model_link_id based on COUNTY_NAME_TO_NUM, assuming 100,000
+    links_gdf = links_gdf.sort_values('county').reset_index(drop=True)
+    links_gdf['model_link_id'] = 0  # Initialize
+        
+    # Create link IDs based on assigned county
+    for link_county in sorted(links_gdf['county'].unique()):
+        county_mask = links_gdf['county'] == link_county
+        county_links_count = county_mask.sum()
+            
+        # Get the county number, use 0 for External or unknown counties
+        county_num = COUNTY_NAME_TO_NUM.get(link_county, 0)
+            
+        # Calculate start_id based on county number
+        start_id = county_num * 1_000_000
+            
+        # Create sequential IDs for this county's links
+        county_indices = links_gdf[county_mask].index
+        links_gdf.loc[county_indices, 'model_link_id'] = range(start_id, start_id + county_links_count)
+
+    WranglerLogger.debug(f"links_gdf.dtypes\n{links_gdf.dtypes}")
+    WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
     # create shape_id, a str version of model_link_id
     links_gdf['shape_id'] = 'sh' + links_gdf['model_link_id'].astype(str)
 
-    # Log detailed county summaries using groupby aggregation
-    node_summary = nodes_gdf.groupby('county')['model_node_id'].agg([
-        ('count', 'count'),
-        ('min', 'min'),
-        ('max', 'max')
-    ]).sort_index()
-    WranglerLogger.info(f"\nCOUNTY SUMMARIES - NODES:\n{node_summary}")
+    if county=="Bay Area":
+        # Log detailed county summaries using groupby aggregation
+        node_summary = nodes_gdf.groupby('county')['model_node_id'].agg([
+            ('count', 'count'),
+            ('min', 'min'),
+            ('max', 'max')
+        ]).sort_index()
+        WranglerLogger.info(f"\nCOUNTY SUMMARIES - NODES:\n{node_summary}")
         
-    # Link summaries by county
-    link_summary = links_gdf.groupby('county').agg({
-        'model_link_id': ['count', 'min', 'max'],
-        'A': ['min', 'max'],
-        'B': ['min', 'max']
-    }).sort_index()
-    WranglerLogger.info(f"\nCOUNTY SUMMARIES - LINKS:\n{link_summary}")
+        # Link summaries by county
+        link_summary = links_gdf.groupby('county').agg({
+            'model_link_id': ['count', 'min', 'max'],
+            'A': ['min', 'max'],
+            'B': ['min', 'max']
+        }).sort_index()
+        WranglerLogger.info(f"\nCOUNTY SUMMARIES - LINKS:\n{link_summary}")
+    else:
+        WranglerLogger.debug(f"SUMMARY - NODES:\n{nodes_gdf.describe()}")
+        WranglerLogger.debug(f"SUMMARY - LINKS:\n{links_gdf.describe()}")
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
-        OUTPUT_DIR / f"{prefix}standardized_{county_no_spaces}_links.hyper", 
+        OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
         f"{county_no_spaces}_links"
     )
 
     tableau_utils.write_geodataframe_as_tableau_hyper(
         nodes_gdf, 
-        OUTPUT_DIR / f"{prefix}standardized_{county_no_spaces}_nodes.hyper", 
+        OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
         f"{county_no_spaces}_nodes"
     )
 
-    # write to parquet
-    # links_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county_no_spaces}_links.parquet")
-    # nodes_gdf.to_parquet(OUTPUT_DIR / f"3_standardized_{county_no_spaces}_nodes.parquet")
+    # write to parquet -- this requires simpler column types
+
+    # Subset the links columns and convert name, ref to strings
+    WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
+    links_non_list_cols = [
+        'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
+        'drive_access','bike_access','walk_access','truck_access','bus_access',
+        'lanes','length','distance','county','model_link_id','shape_id'
+    ]
+    parquet_links_gdf = links_gdf[links_non_list_cols].copy()
+    parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
+    parquet_links_gdf['ref'] = parquet_links_gdf['ref'].astype(str)
+
+    links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
+    parquet_links_gdf.to_parquet(links_parquet_file)
+    WranglerLogger.info(f"Wrote {links_parquet_file}")
+    links_gpkg_file = pathlib.Path(str(links_parquet_file).replace("parquet","gpkg"))
+    parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
+    WranglerLogger.info(f"Wrote {links_gpkg_file}")
+
+    # Subset the nodes columns
+    WranglerLogger.debug(f"nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
+    nodes_non_list_cols = [
+        'osmid','X','Y','street_count','ref','geometry','county','model_node_id'
+    ]
+    parquet_nodes_gdf = nodes_gdf[nodes_non_list_cols].copy()
+    parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
+
+    nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
+    parquet_nodes_gdf.to_parquet(nodes_parquet_file)
+    WranglerLogger.info(f"Wrote {nodes_parquet_file}")
+    nodes_gpkg_file = pathlib.Path(str(nodes_parquet_file).replace("parquet","gpkg"))
+    parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
+    WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
+
     return (links_gdf, nodes_gdf)
 
 if __name__ == "__main__":
@@ -908,19 +984,21 @@ if __name__ == "__main__":
             #
             # g is a [networkx.MultiDiGraph](https://networkx.org/documentation/stable/reference/classes/multidigraph.html#), 
             # a directed graph with self loops and parallel edges (muliple edges can exist between two nodes)
-            WranglerLogger.info(f"Creating network for {args.county}...")
+            WranglerLogger.info(f"Calling osmnx.graph_from_place('{args.county}, California, USA', {OSM_network_type})")
             g = osmnx.graph_from_place(f'{args.county}, California, USA', network_type=OSM_network_type)
 
         initial_graph_file = OUTPUT_DIR / f"0_graph_OSM_{args.county_no_spaces}.pkl"
         with open(initial_graph_file, "wb") as f: pickle.dump(g, f)
         WranglerLogger.info(f"Wrote {initial_graph_file}")
         WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
-        # Don't bother standardizing this version since we'll use the simplified version
-        # standardize_and_write(g, args.county, "2_")
+        if args.county != "Bay Area":
+            # For counties, write stadardized version of this too so we can check against simplified
+            standardize_and_write(g, args.county, "2_original_")
 
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
 
+        WranglerLogger.info("Calling smnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
         # If we do simplification, it must be access-based.
         # Drive links shouldn't be simplified to pedestrian links and vice versa
         #
@@ -935,10 +1013,11 @@ if __name__ == "__main__":
         )
         WranglerLogger.info(f"After simplifying, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
         with open(simplified_graph_file, "wb") as f: pickle.dump(g, f)
+        WranglerLogger.info(f"Wrote {simplified_graph_file}")
 
     # Skip steps if files are present: Read the roadway network 
     roadway_network = None
-    roadway_net_parquet_file = f"3_roadway_network_{args.county_no_spaces}"
+    roadway_net_parquet_file = f"4_roadway_network_{args.county_no_spaces}"
     try:
         nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_parquet_file}_node.parquet")
         links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_parquet_file}_link.parquet")
@@ -955,7 +1034,7 @@ if __name__ == "__main__":
     if roadway_network == None:
 
         # Standardize network graph and create roadway network dataframes
-        (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"2_")
+        (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"3_simplified_")
 
         WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
         WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
@@ -1028,8 +1107,17 @@ if __name__ == "__main__":
         # drop some columns that are not required or useful
         gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
 
-        # drop SFO Airport rail/bus for now
-        drop_transit_agency(gtfs_model, agency_id='SI')
+        if args.county == "Bay Area":
+            # Bay Area: drop SFO Airport rail/bus for now
+            drop_transit_agency(gtfs_model, agency_id='SI')
+        elif args.county in COUNTY_NAME_TO_GTFS_AGENCIES:
+            keep_agencies = COUNTY_NAME_TO_GTFS_AGENCIES[args.county]
+            WranglerLogger.debug(f"For {args.county}, keeping agencies {keep_agencies}")
+            # if this is configured, drop transit agencies not included in this list
+            for agency_id in gtfs_model.agency['agency_id'].tolist():
+                if agency_id not in keep_agencies:
+                    drop_transit_agency(gtfs_model, agency_id=agency_id)
+   
 
         county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
         if (args.county != "Bay Area"):
