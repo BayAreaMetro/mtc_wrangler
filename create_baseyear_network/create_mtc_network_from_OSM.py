@@ -17,7 +17,7 @@ import pathlib
 import pickle
 import pprint
 import statistics
-from typing import Any, Union
+from typing import Any, Optional, Tuple, Union
 
 import networkx
 import osmnx
@@ -133,6 +133,25 @@ OSM_WAY_TAGS = {
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
 }
 
+# from biggest to smallest
+HIGHWAY_HIERARCHY = [
+    'motorway',       # freeways or express-ways
+    'motorway_link',  # on- and off-ramps
+    'trunk',          # highway, not quite motorway
+    'trunk_link',     # highway ramps
+    'primary',        # major arterial
+    'primary_link',   # connects primary to other
+    'secondary',      # smaller highways or country roads
+    'secondary_link', # connects secondary to tertiary
+    'tertiary',       # connects minor streets to major roads
+    'tertiary_link',  # typically at-grade turning lane
+    'unclassified',   # minor public roads
+    'residential',    # residential street
+    'living_street',  # pedestrian-focused residential
+    'service',        # vehicle access to building, parking lot, etc.
+    'track',          # minor land-access roads
+]
+
 def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float, float]:
     """
     Read county shapefile and return bounding box in WGS84 coordinates.
@@ -205,7 +224,10 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
         return int(lane)
     return lane
 
-def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def standardize_lanes_value(
+        links_gdf: gpd.GeoDataFrame,
+        trace_tuple: Optional[tuple[int, int]] = None
+    ) -> gpd.GeoDataFrame:
     """
     Standardize the lanes value in the links GeoDataFrame.
     
@@ -225,7 +247,8 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     
     Returns:
         Modified links_gdf with standardized lane values.
-        The 'lanes' column will have integer values (no -1 placeholders).
+        The 'lanes' column will have integer values (no -1 placeholders). This *does not include* buslanes.
+        The 'buslanes' column will have integer values (no -1 placeholders).
     
     Side Effects:
         Modifies the input GeoDataFrame in place.
@@ -237,7 +260,11 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         - Uses sensible defaults for highway types without samples
     """
     WranglerLogger.debug(f"standardize_lanes_value() for {len(links_gdf):,} links")
-    
+
+    # move reversed to be right after oneway
+    reversed_series = links_gdf.pop('reversed')
+    links_gdf.insert(links_gdf.columns.get_loc('oneway') + 1, 'reversed', reversed_series)
+
     # Handle cases where oneway is a list (set to True if any value is True)
     oneway_is_list = links_gdf['oneway'].apply(lambda x: isinstance(x, list))
     if oneway_is_list.any():
@@ -291,116 +318,170 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                 links_gdf.at[idx, 'reversed'] = False
                 WranglerLogger.debug(f"No pair found for link {idx} (A={row['A']}, B={row['B']}), setting reversed=False")
 
-        # after looping to fix
-        links_gdf['reversed_type'] = links_gdf['reversed'].apply(type).astype(str)
-        WranglerLogger.debug(f"links_gdf[['oneway_type','reversed_type']].value_counts():\n{links_gdf[['oneway_type','reversed_type']].value_counts()}")
-        WranglerLogger.debug(f"links_gdf[['oneway','reversed']].value_counts():\n{links_gdf[['oneway','reversed']].value_counts()}")
+    # after looping to fix
+    links_gdf['reversed_type'] = links_gdf['reversed'].apply(type).astype(str)
+    assert (links_gdf['reversed_type']=="<class 'bool'>").all()
+    assert (links_gdf['oneway_type'] =="<class 'bool'>").all()
+    links_gdf.drop(columns=['reversed_type','oneway_type'], inplace=True)
+
+    WranglerLogger.debug(f"links_gdf len={len(links_gdf):,}")
+    WranglerLogger.debug(f"links_gdf[['oneway','reversed']].value_counts()\n{links_gdf[['oneway','reversed']].value_counts()}")
 
     # rename lanes to lanes_orig since it may not be what we want for two-way links
     links_gdf.rename(columns={'lanes': 'lanes_orig'}, inplace=True)
     # lanes columns are sometimes a list of lanes, e.g. [2,3,4]. For lists with two items, use min. For lists with more, use median.
     LANES_COLS = [
         'lanes_orig',
-        'lanes:backward',
-        'lanes:forward',
+        'lanes:forward', 'lanes:backward',
         'lanes:both_ways',
         'lanes:bus',
         'lanes:bus:forward','lanes:bus:backward'
     ]
+    LANES_COLS_REV = [f"{col}_rev" for col in LANES_COLS]
     for lane_col in LANES_COLS:
         if lane_col not in links_gdf.columns: links_gdf[lane_col] = np.nan
         WranglerLogger.debug(f"Before get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
         links_gdf[lane_col] = links_gdf[lane_col].apply(get_min_or_median_value)
         WranglerLogger.debug(f"After get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
 
-    # split links_gdf into reversed and not reversed and make a wide dataframe with both
-    links_gdf_notreversed = links_gdf[links_gdf['reversed'] == False].copy()  # this should be longer
-    links_gdf_reversed    = links_gdf[links_gdf['reversed'] == True].copy()
+    # split links_gdf into A<B and A>B to join links with their reverse
+    links_gdf_AltB = links_gdf.loc[ links_gdf.A < links_gdf.B]
+    links_gdf_BltA = links_gdf.loc[ links_gdf.B < links_gdf.A]
+
+    if trace_tuple:
+        WranglerLogger.debug(
+            f"trace links_gdf:\n{links_gdf.loc[ ((links_gdf.A==trace_tuple[0]) & (links_gdf.B==trace_tuple[1])) | ((links_gdf.A==trace_tuple[1]) & (links_gdf.B==trace_tuple[0]))]}"
+        )
+        if (trace_tuple[0] < trace_tuple[1]):
+            WranglerLogger.debug(f"trace link in links_gdf_AltB:\n{links_gdf_AltB.loc[ (links_gdf_AltB.A==trace_tuple[0]) & (links_gdf_AltB.B==trace_tuple[1]) ]}")
+        else:
+            WranglerLogger.debug(f"trace link in links_gdf_BltA:\n{links_gdf_BltA.loc[ (links_gdf_BltA.A==trace_tuple[0]) & (links_gdf_BltA.B==trace_tuple[1]) ]}")
 
     # for the links in links_gdf_reversed, make all columns have suffix '_rev'
     rev_col_rename = {}
-    for col in links_gdf_reversed.columns.to_list():
+    for col in links_gdf_BltA.columns.to_list():
         rev_col_rename[col] = f"{col}_rev"
-    links_gdf_reversed.rename(columns=rev_col_rename, inplace=True)
-    WranglerLogger.debug(f"Created links_gdf_reversed:\n{links_gdf_reversed}")
+    links_gdf_BltA.rename(columns=rev_col_rename, inplace=True)
 
-    # The column key differentiates parallel edges between the same u and v nodes. 
-    # If there are multiple distinct street segments connecting the same two nodes
-    # (e.g., a street with a median where traffic flows in both directions along
-    # separate physical paths), the key allows each of these parallel edges to be
-    # uniquely identified. For edges where no parallel edges exist, the key is typically 0.
+    # join with reversed version of this link to pick up lanes:backward, lanes:bus:backward
     links_gdf_wide = pd.merge(
-        left=links_gdf_notreversed,
-        right=links_gdf_reversed,
-        how='left',
+        left=links_gdf_AltB,
+        right=links_gdf_BltA,
+        how='outer',
         left_on=['A','B','key'],
         right_on=['B_rev','A_rev','key_rev'],
         indicator=True,
         validate='one_to_one'
     )
+    # every link is present in the left_only or both or right_only next to the reverse
     WranglerLogger.debug(f"links_gdf_wide['_merge'].value_counts():\n{links_gdf_wide['_merge'].value_counts()}")
-    LANES_COLS = ['A','B','key','drive_access','oneway','reversed','name','lanes','lanes_orig','lanes:backward','lanes:forward','lanes:both_ways','lanes:bus','lanes:bus:forward','lanes:bus:backward']
-    LANES_COLS += [f"{col}_rev" for col in LANES_COLS]
+    if trace_tuple:
+        if trace_tuple[0] < trace_tuple[1]:
+            WranglerLogger.debug(f"trace links_gdf_wide:\n{links_gdf_wide.loc[ (links_gdf_wide.A==trace_tuple[0]) & (links_gdf_wide.B==trace_tuple[1]) ]}")
+        else:
+            WranglerLogger.debug(f"trace links_gdf_wide:\n{links_gdf_wide.loc[ (links_gdf_wide.B_rev==trace_tuple[1]) & (links_gdf_wide.A_rev==trace_tuple[0]) ]}")
+
+    ALL_COLS = links_gdf.columns.tolist()
+    ALL_COLS_REV = [f"{col}_rev" for col in ALL_COLS]
 
     # set the lanes from lanes:forward or lanes:backward
     links_gdf_wide['lanes'    ] = -1 # initialize to -1
     links_gdf_wide['lanes_rev'] = -1
+
     links_gdf_wide.loc[ links_gdf_wide['lanes:forward' ].notna() & (links_gdf_wide.reversed == False), 'lanes'    ] = links_gdf_wide['lanes:forward']
-    links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() & (links_gdf_wide.reversed == False), 'lanes_rev'] = links_gdf_wide['lanes:backward']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:backward'].notna() & (links_gdf_wide.reversed == True ), 'lanes_rev'] = links_gdf_wide['lanes:backward']
 
     # set the lanes from lanes:both_ways
-    links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes'    ]==-1),     'lanes'    ] = links_gdf_wide['lanes:both_ways']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes'    ]==-1), 'lanes'    ] = links_gdf_wide['lanes:both_ways']
     links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes:both_ways']
 
-    # since lanes is for both directions, divide by 2 if not one way
+    # since lanes is for both directions, divide by 2 if not one way (hmm... what about when it goes to zero?)
     links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = links_gdf_wide['lanes_orig']
     links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
     links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = links_gdf_wide['lanes_orig']
     links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+
+    # if it got set to 0, make it 1
+    links_gdf_wide.loc[ (links_gdf_wide['lanes_orig']==1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = 1
+    links_gdf_wide.loc[ (links_gdf_wide['lanes_orig']==1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = 1
+
+    WranglerLogger.debug(f"links_gdf_wide.lanes       .value_counts():\n{links_gdf_wide[   'lanes'    ].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf_wide.lanes_rev   .value_counts():\n{links_gdf_wide[   'lanes_rev'].value_counts(dropna=False)}")
+
+    # set the buslanes
+    links_gdf_wide['buslanes'    ] = -1
+    links_gdf_wide['buslanes_rev'] = -1
+
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus:forward' ].notna() & (links_gdf_wide.reversed == False), 'buslanes'    ] = links_gdf_wide['lanes:bus:forward']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus:backward'].notna() & (links_gdf_wide.reversed == True ), 'buslanes_rev'] = links_gdf_wide['lanes:bus:backward']
+    
+    WranglerLogger.debug(f"lanes:bus:forward rows:\n{links_gdf_wide.loc[ links_gdf_wide['lanes:bus:forward'].notna()]}")
+    WranglerLogger.debug(f"lanes:bus:backward rows:\n{links_gdf_wide.loc[ links_gdf_wide['lanes:bus:backward'].notna()]}")
+
+    WranglerLogger.debug(f"links_gdf_wide.buslanes    .value_counts():\n{links_gdf_wide['buslanes'    ].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf_wide.buslanes_rev.value_counts():\n{links_gdf_wide['buslanes_rev'].value_counts(dropna=False)}")
+
+    # since lanes is for both directions, divide by 2 if not one way (hmm... what about when it goes to zero?)
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'buslanes'    ] = links_gdf_wide['lanes:bus']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'buslanes'    ] = np.floor(0.5*links_gdf_wide['lanes:bus'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'buslanes_rev'] = links_gdf_wide['lanes:bus']
+    links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'buslanes_rev'] = np.floor(0.5*links_gdf_wide['lanes:bus'])
+
+    # if highway=='busway' set buslanes to 1, lanes to 0
+    links_gdf_wide.loc[ links_gdf_wide['highway']     == 'busway', 'buslanes'] = 1
+    links_gdf_wide.loc[ links_gdf_wide['highway']     == 'busway', 'lanes'   ] = 0
+    links_gdf_wide.loc[ links_gdf_wide['highway_rev'] == 'busway', 'buslanes_rev'] = 1
+    links_gdf_wide.loc[ links_gdf_wide['highway_rev'] == 'busway', 'lanes_rev'   ] = 0
+
+    WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS + LANES_COLS_REV]}")
     WranglerLogger.debug(f"links_gdf_wide for busway:\n{links_gdf_wide.loc[links_gdf_wide.highway=='busway', LANES_COLS]}")
 
-    WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS]}")
-    WranglerLogger.debug(f"links_gdf_wide.lanes.value_counts():\n{links_gdf_wide['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf_wide.buslanes    .value_counts():\n{links_gdf_wide['buslanes'    ].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf_wide.buslanes_rev.value_counts():\n{links_gdf_wide['buslanes_rev'].value_counts(dropna=False)}")
 
-    assert(links_gdf.duplicated(subset=['A','B','key']).sum() == 0)
-    assert(links_gdf_wide.duplicated(subset=['A','B','key']).sum() == 0)
+    if trace_tuple:
+        if (trace_tuple[0] < trace_tuple[1]):
+            # it comes in through AltB
+            WranglerLogger.debug(f"trace link in links_gdf_wide:\n{links_gdf_wide.loc[ (links_gdf_wide.A==trace_tuple[0]) & (links_gdf_wide.B==trace_tuple[1]) ]}")
+        else:
+            # it comes in through BltA
+            WranglerLogger.debug(f"trace link in links_gdf_wide:\n{links_gdf_wide.loc[ (links_gdf_wide.B_rev==trace_tuple[0]) & (links_gdf_wide.A_rev==trace_tuple[1]) ]}")
 
-    # merge links_gdf_wide values back to links_gdf
-    links_gdf = links_gdf.merge(
-        right=links_gdf_wide[['A','B','key','lanes']],
-        how='left',
-        on=['A','B','key'],
-        validate='one_to_one'
-    )
-    WranglerLogger.debug(f"After merging links_gdf_wide back to links_gdf:\n{links_gdf.head()}")
-    links_gdf.fillna({'lanes':-1}, inplace=True)
+
+    WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide}")
+    ALL_COLS = ALL_COLS + ['lanes','buslanes']
+    ALL_COLS_REV = [f"{col}_rev" for col in ALL_COLS]
+    rev_to_nonrev = dict(zip(ALL_COLS_REV, ALL_COLS))
+    WranglerLogger.debug(f"rev_to_nonrev:\n{rev_to_nonrev}")
+    # put it back together
+    links_gdf = pd.concat([
+        links_gdf_wide.loc[ links_gdf_wide.A.notna(), ALL_COLS],
+        links_gdf_wide.loc[ links_gdf_wide.A_rev.notna(), ALL_COLS_REV ].rename(columns=rev_to_nonrev)
+    ])
+
+    WranglerLogger.debug(f"After reassmbly, links_gdf len={len(links_gdf):,}")
+    WranglerLogger.debug(f"After reassmbly, links_gdf[['oneway','reversed']].value_counts()\n{links_gdf[['oneway','reversed']].value_counts()}")
+    WranglerLogger.debug(f"After reassmbly, links_gdf:\n{links_gdf}")
+
+    links_gdf.fillna({'lanes':-1, 'buslanes':-1}, inplace=True)
     WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
-    # and for the reverse
-    links_gdf = links_gdf.merge(
-        right=links_gdf_wide[['A','B','key','lanes_rev']],
-        how='left',
-        left_on=['A','B','key'],
-        right_on=['B','A','key'],
-        validate='one_to_one',
-        suffixes=('','_rev')
-    ).drop(columns=['A_rev','B_rev'])
-    WranglerLogger.debug(f"After merging links_gdf_wide back to links_gdf in reverse:\n{links_gdf.head()}")
-    # transfer lanes_rev to lanes if applicable
-    WranglerLogger.debug(f"lanes_rev.notna(): {links_gdf['lanes_rev'].notna().sum()}:,")
-    links_gdf.loc[ links_gdf['lanes_rev'].notna() & links_gdf['lanes'].isna(), 'lanes'] = links_gdf['lanes_rev']
-    links_gdf.fillna({'lanes':-1}, inplace=True)
-    WranglerLogger.debug(f"links_gdf.lanes.value_counts():\n{links_gdf['lanes'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"{len(links_gdf)=:,}")
+    WranglerLogger.debug(f"links_gdf.buslanes.value_counts():\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     
-    # Clean up the dataframe - drop the temporary columns from merge
-    if 'lanes_rev' in links_gdf.columns:
-        links_gdf.drop(columns=['lanes_rev'], inplace=True)
+    # for buslanes, default to zero
+    links_gdf.loc[ links_gdf['buslanes'] == -1, 'buslanes'] = 0
+    links_gdf['buslanes'] = links_gdf['buslanes'].astype(int)
+
+    if trace_tuple:
+        WranglerLogger.debug(
+            f"trace: links_gdf:\n"
+            f"{links_gdf.loc[ ((links_gdf.A==trace_tuple[0]) & (links_gdf.B==trace_tuple[1])) | ((links_gdf.A==trace_tuple[1]) & (links_gdf.B==trace_tuple[0]))]}"
+        )
 
     # Create a mapping from highway value -> most common number of lanes for that value
     # and use that to assign the remaining unset lanes
     
     # First, get links that have valid lane counts (not -1)
-    links_with_lanes = links_gdf[links_gdf['lanes'] > 0].copy()
+    links_with_lanes = links_gdf[links_gdf['lanes'] >= 0].copy()
     
     if len(links_with_lanes) > 0:
         # Calculate the most common (mode) number of lanes for each highway type
@@ -437,7 +518,9 @@ def standardize_lanes_value(links_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
         highway_to_lanes = {}
 
-    WranglerLogger.info(f"After standardize_lanes_values:\n{links_gdf['lanes'].value_counts(dropna=False)}")
+
+    WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     return links_gdf
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
@@ -551,24 +634,6 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
 
     ################ auto ################
 
-    # from biggest to smallest
-    HIGHWAY_HIERARCHY = [
-        'motorway',       # freeways or express-ways
-        'motorway_link',  # on- and off-ramps
-        'trunk',          # highway, not quite motorway
-        'trunk_link',     # highway ramps
-        'primary',        # major arterial
-        'primary_link',   # connects primary to other
-        'secondary',      # smaller highways or country roads
-        'secondary_link', # connects secondary to tertiary
-        'tertiary',       # connects minor streets to major roads
-        'tertiary_link',  # typically at-grade turning lane
-        'unclassified',   # minor public roads
-        'residential',    # residential street
-        'living_street',  # pedestrian-focused residential
-        'service',        # vehicle access to building, parking lot, etc.
-        'track',          # minor land-access roads
-    ]
     # go from highest to lowest and choose highest
     for highway_type in HIGHWAY_HIERARCHY:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
@@ -599,6 +664,66 @@ def get_roadway_value(highway: Union[str, list[str]]) -> str:
         return highway[0]
     return highway
 
+def handle_links_with_duplicate_A_B(
+        links_gdf: gpd.GeoDataFrame
+    ) -> gpd.GeoDataFrame:
+    """Handle links with duplicate u,v by merging or dropping
+    """
+    WranglerLogger.info("Handling links with duplicate (A,B)")
+    WranglerLogger.debug(f"\n{links_gdf}")
+
+    debug_cols = ['A','B','key','highway','oneway','reversed','name','ref','length','lanes','buslanes']
+    WranglerLogger.debug(f"links to fix:\n{links_gdf.loc[ links_gdf.dupe_A_B, debug_cols]}")
+
+    grouped_links_gdf = links_gdf.loc[links_gdf.dupe_A_B].groupby(by=['A','B'])
+    unduped_df = pd.DataFrame()
+    # Iterate through the groups
+    for group_name, group_links_df in grouped_links_gdf:
+        group_links_df['highway_level'] = group_links_df['highway'].apply(lambda x: HIGHWAY_HIERARCHY.index(x) if x in HIGHWAY_HIERARCHY else 100)
+        group_links_df.sort_values(by='highway_level', inplace=True)
+        # WranglerLogger.debug(f"Group for {group_name} type={type(group_links_df)}:\n{group_links_df[debug_cols + ['highway_level']]}")
+
+        # if the last one is a busway, then just add the buslane to the GP link
+        first_row = group_links_df.iloc[0]
+        last_row = group_links_df.iloc[-1]
+        if last_row['highway'] == 'busway':
+            # add buslanes to first row and delete
+            group_links_df.loc[group_links_df.index[0], 'buslanes'] = last_row['buslanes']
+            group_links_df.drop(group_links_df.index[-1], inplace=True)
+
+        if len(group_links_df) == 1:
+            unduped_df = pd.concat([unduped_df, group_links_df])
+            continue
+
+        # if the last row has the same name or no name then assume it's a variant of the same and add lanes
+        if (last_row['name'] == first_row['name']) or (not last_row['name']):
+            group_links_df.loc[group_links_df.index[0], 'lanes'] = first_row['lanes'] + last_row['lanes']
+            group_links_df.drop(group_links_df.index[-1], inplace=True)
+
+        if len(group_links_df) == 1:
+            unduped_df = pd.concat([unduped_df, group_links_df])
+            continue
+
+        # otherwise, just drop the other links
+        while len(group_links_df) > 1:
+            group_links_df.drop(group_links_df.index[-1], inplace=True)
+
+        unduped_df = pd.concat([unduped_df, group_links_df])
+        continue
+
+    # put it back together
+    WranglerLogger.debug(f"unduped_df:\n{unduped_df}")
+    unduped_df['dupe_A_B'] = False
+
+    full_gdf = pd.concat([
+        links_gdf.loc[links_gdf.dupe_A_B == False],
+        unduped_df
+    ])
+    # verify it worked
+    full_gdf['dupe_A_B'] = full_gdf.duplicated(subset=['A','B'], keep=False)
+    assert( (full_gdf['dupe_A_B']==False).all() )
+    WranglerLogger.info(f"{full_gdf['dupe_A_B'].sum()=:,}")
+    return full_gdf
 
 
 def standardize_and_write(
@@ -682,12 +807,6 @@ def standardize_and_write(
     # also convert to a string
     nodes_gdf['osm_node_id'] = nodes_gdf['osm_node_id'].astype(str)
     links_gdf['osm_link_id'] = links_gdf['osm_link_id'].astype(str)
-
-    standardize_highway_value(links_gdf)
-    links_gdf = standardize_lanes_value(links_gdf)
-
-    # and distance
-    links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
 
     # Handle county assignment
     if county == "Bay Area":
@@ -817,6 +936,8 @@ def standardize_and_write(
         
     # Create mapping from original osmid to new model_node_id for updating links
     osmid_to_model_id = dict(zip(nodes_gdf['osmid'], nodes_gdf['model_node_id']))
+    WranglerLogger.debug(f"TRACE nodes_gdf.loc[nodes_gdf.model_node_id==1000017]:\n{nodes_gdf.loc[nodes_gdf.model_node_id==1000017]}")
+    WranglerLogger.debug(f"TRACE nodes_gdf.loc[nodes_gdf.model_node_id==1000014]:\n{nodes_gdf.loc[nodes_gdf.model_node_id==1000014]}")
         
     # Update links A,B using the mapping
     links_gdf['A'] = links_gdf['A'].map(osmid_to_model_id)
@@ -866,6 +987,12 @@ def standardize_and_write(
         WranglerLogger.debug(f"SUMMARY - NODES:\n{nodes_gdf.describe()}")
         WranglerLogger.debug(f"SUMMARY - LINKS:\n{links_gdf.describe()}")
 
+    standardize_highway_value(links_gdf)
+    links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1000017,1000014))
+    links_gdf = handle_links_with_duplicate_A_B(links_gdf)
+    # and distance
+    links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
+
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
         OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
@@ -885,7 +1012,7 @@ def standardize_and_write(
     links_non_list_cols = [
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_access',
-        'lanes','length','distance','county','model_link_id','shape_id'
+        'lanes','buslanes','length','distance','county','model_link_id','shape_id'
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
@@ -998,7 +1125,7 @@ if __name__ == "__main__":
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
 
-        WranglerLogger.info("Calling smnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
+        WranglerLogger.info(f"Calling smnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
         # If we do simplification, it must be access-based.
         # Drive links shouldn't be simplified to pedestrian links and vice versa
         #
