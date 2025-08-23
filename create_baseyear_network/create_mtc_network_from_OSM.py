@@ -882,24 +882,24 @@ def standardize_and_write(
                 inplace=True)
             WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
             # drop duplicates now, keeping first
-            multicounty_links_gdf.drop_duplicates(subset=['index'], keep='first', inplace=True)
+            multicounty_links_gdf.drop_duplicates(subset=['A','B','key'], keep='first', inplace=True)
             WranglerLogger.debug(f"After dropping duplicates: multicounty_links_gdf:\n{multicounty_links_gdf}")
             
             # put them back together
             links_gdf = pd.concat([
-                links_gdf.drop_duplicates(subset=['index'], keep=False), # single-county links
+                links_gdf.drop_duplicates(subset=['A','B','key'], keep=False), # single-county links
                 multicounty_links_gdf
             ])
             # verify that each link is only represented once
-            multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['index'], keep=False)]
+            multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)]
             assert(len(multicounty_links_gdf)==0)
 
             # drop temporary columns
-            links_gdf.drop(columns=['index','index_right','intersection_length'], inplace=True)
+            links_gdf.drop(columns=['index_right','intersection_length'], inplace=True)
             links_gdf.reset_index(drop=True, inplace=True)
             
         # Drop the extra columns from spatial join
-        links_gdf = links_gdf.drop(columns=['index','index_right'], errors='ignore')
+        links_gdf = links_gdf.drop(columns=['index_right'], errors='ignore')
 
         WranglerLogger.debug(f"links_gdf with one county per link:\n{links_gdf}")
 
