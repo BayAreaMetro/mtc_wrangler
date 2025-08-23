@@ -75,7 +75,7 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
     'San Francisco': [
         'SF', # SF Muni
         'BA', # BART
-        'GG', # Golden Gate Transit
+        # 'GG', # Golden Gate Transit
         'CT', # Caltrain
     ],
     'San Mateo': [
@@ -860,7 +860,7 @@ def standardize_and_write(
         WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
 
         # The only links to adjust are those that matched to multiple counties
-        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['index'], keep=False)].copy()
+        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)].copy()
         WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
 
         if len(multicounty_links_gdf) > 0:
@@ -877,8 +877,8 @@ def standardize_and_write(
             
             # Sorting by index (ascending), intersection_length (descending)
             multicounty_links_gdf.sort_values(
-                by=['index','intersection_length'],
-                ascending=[True, False],
+                by=['A','B','key','intersection_length'],
+                ascending=[True, True, True, False],
                 inplace=True)
             WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
             # drop duplicates now, keeping first
@@ -1290,11 +1290,32 @@ if __name__ == "__main__":
             frequency_method='median_headway',
             default_frequency_for_onetime_route=180*60, # 180 minutes
             add_stations_and_links=True,
-            skip_stop_agencies = 'CT'
+            skip_stop_agencies = 'CT',
+            trace_shape_ids=['SF:2751:20230930'] # trace 27 bus
         )
         WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
     except Exception as e:
         WranglerLogger.error(e)
+
+        WranglerLogger.error(vars(e).keys())
+
+        if hasattr(e,'non_station_stop_links_gdf'):
+            WranglerLogger.debug(f"non_station_stop_links_gdf type={type(e.non_station_stop_links_gdf)}")
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                e.non_station_stop_links_gdf,
+                OUTPUT_DIR / f"non_station_stop_links.hyper",
+                "non_station_stop_links_gdf"
+            )
+            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'non_station_stop_links.hyper'}")
+        
+        if hasattr(e, "bus_stops_gdf"):
+            WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                e.bus_stops_gdf,
+                OUTPUT_DIR / f"bus_stops.hyper",
+                "bus_stops_gdf"
+            )
+            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
         raise(e)
 
     # create a transit network
