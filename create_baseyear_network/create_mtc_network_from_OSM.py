@@ -1047,7 +1047,9 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.set_option('display.float_format', '{:.2f}'.format)
-    
+    # Elevate SettingWithCopyWarning to error
+    pd.options.mode.chained_assignment = 'raise'
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     osmnx.settings.use_cache = True
@@ -1299,14 +1301,14 @@ if __name__ == "__main__":
 
         WranglerLogger.error(vars(e).keys())
 
-        if hasattr(e,'non_station_stop_links_gdf'):
-            WranglerLogger.debug(f"non_station_stop_links_gdf type={type(e.non_station_stop_links_gdf)}")
+        if hasattr(e,'bus_stop_links_gdf'):
+            WranglerLogger.debug(f"bus_stop_links_gdf type={type(e.bus_stop_links_gdf)}")
             tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.non_station_stop_links_gdf,
-                OUTPUT_DIR / f"non_station_stop_links.hyper",
-                "non_station_stop_links_gdf"
+                e.bus_stop_links_gdf,
+                OUTPUT_DIR / f"bus_stop_links.hyper",
+                "bus_stop_links_gdf"
             )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'non_station_stop_links.hyper'}")
+            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
         
         if hasattr(e, "bus_stops_gdf"):
             WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
