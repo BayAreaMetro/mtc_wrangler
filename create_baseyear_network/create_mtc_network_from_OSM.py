@@ -223,7 +223,7 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
         else:
             return int(statistics.median(lane))
     elif isinstance(lane, str):
-        return int(lane)
+        return int(float(lane)) # float conversion first for values like 1.5 
     return lane
 
 def standardize_lanes_value(
@@ -460,6 +460,9 @@ def standardize_lanes_value(
         links_gdf_wide.loc[ links_gdf_wide.A.notna(), ALL_COLS],
         links_gdf_wide.loc[ links_gdf_wide.A_rev.notna(), ALL_COLS_REV ].rename(columns=rev_to_nonrev)
     ])
+    links_gdf['A']   = links_gdf['A'].astype(int)
+    links_gdf['B']   = links_gdf['B'].astype(int)
+    links_gdf['key'] = links_gdf['key'].astype(int)
 
     WranglerLogger.debug(f"After reassmbly, links_gdf len={len(links_gdf):,}")
     WranglerLogger.debug(f"After reassmbly, links_gdf[['oneway','reversed']].value_counts()\n{links_gdf[['oneway','reversed']].value_counts()}")
@@ -672,46 +675,94 @@ def handle_links_with_duplicate_A_B(
     """Handle links with duplicate u,v by merging or dropping
     """
     WranglerLogger.info("Handling links with duplicate (A,B)")
-    WranglerLogger.debug(f"\n{links_gdf}")
 
     debug_cols = ['A','B','key','highway','oneway','reversed','name','ref','length','lanes','buslanes']
     WranglerLogger.debug(f"links to fix:\n{links_gdf.loc[ links_gdf.dupe_A_B, debug_cols]}")
 
-    grouped_links_gdf = links_gdf.loc[links_gdf.dupe_A_B].groupby(by=['A','B'])
-    unduped_df = pd.DataFrame()
-    # Iterate through the groups
-    for group_name, group_links_df in grouped_links_gdf:
-        group_links_df['highway_level'] = group_links_df['highway'].apply(lambda x: HIGHWAY_HIERARCHY.index(x) if x in HIGHWAY_HIERARCHY else 100)
-        group_links_df.sort_values(by='highway_level', inplace=True)
-        # WranglerLogger.debug(f"Group for {group_name} type={type(group_links_df)}:\n{group_links_df[debug_cols + ['highway_level']]}")
-
-        # if the last one is a busway, then just add the buslane to the GP link
-        first_row = group_links_df.iloc[0]
-        last_row = group_links_df.iloc[-1]
-        if last_row['highway'] == 'busway':
-            # add buslanes to first row and delete
-            group_links_df.loc[group_links_df.index[0], 'buslanes'] = last_row['buslanes']
-            group_links_df.drop(group_links_df.index[-1], inplace=True)
-
-        if len(group_links_df) == 1:
-            unduped_df = pd.concat([unduped_df, group_links_df])
-            continue
-
-        # if the last row has the same name or no name then assume it's a variant of the same and add lanes
-        if (last_row['name'] == first_row['name']) or (not last_row['name']):
-            group_links_df.loc[group_links_df.index[0], 'lanes'] = first_row['lanes'] + last_row['lanes']
-            group_links_df.drop(group_links_df.index[-1], inplace=True)
-
-        if len(group_links_df) == 1:
-            unduped_df = pd.concat([unduped_df, group_links_df])
-            continue
-
-        # otherwise, just drop the other links
-        while len(group_links_df) > 1:
-            group_links_df.drop(group_links_df.index[-1], inplace=True)
-
-        unduped_df = pd.concat([unduped_df, group_links_df])
-        continue
+    # Vectorized processing of duplicate links
+    dupe_links = links_gdf.loc[links_gdf.dupe_A_B].copy()
+    WranglerLogger.debug(f"Processing {len(dupe_links)} duplicate links")
+    
+    # Create highway hierarchy mapping
+    highway_level_map = {hw: i for i, hw in enumerate(HIGHWAY_HIERARCHY)}
+    dupe_links['highway_level'] = dupe_links['highway'].map(highway_level_map).fillna(100)
+    dupe_links['highway_level'] = dupe_links['highway_level'].astype(int)
+    debug_cols.insert( debug_cols.index('oneway'), 'highway_level')
+    WranglerLogger.debug(f"Highway level mapping applied:\n{dupe_links[debug_cols]}")
+    
+    # Sort by A, B, and highway_level to get highest priority first
+    dupe_links = dupe_links.sort_values(['A', 'B', 'highway_level'])
+    WranglerLogger.debug(
+        f"Sorted duplicate links by A, B, highway_level:\n"
+        f"{dupe_links[debug_cols]}"
+    )
+    
+    # For each group, identify the first (highest priority) and other rows
+    dupe_links['group_rank'] = dupe_links.groupby(['A', 'B']).cumcount()
+    debug_cols.insert( debug_cols.index('oneway'), 'group_rank')
+    WranglerLogger.debug(f"Group ranks assigned:\n{dupe_links[debug_cols]}")
+    
+    # Aggregate busway buslanes to first row in each group
+    busway_links = dupe_links[dupe_links['highway'] == 'busway']
+    WranglerLogger.debug(f"Found {len(busway_links)} busway links")
+    busway_buslanes = busway_links.groupby(['A', 'B'])['buslanes'].first()
+    if not busway_buslanes.empty:
+        WranglerLogger.debug(f"Busway buslanes to aggregate:\n{busway_buslanes}")
+    
+    # Aggregate lanes from rows with matching or empty names
+    # Get first row's name for each group
+    first_rows = dupe_links[dupe_links['group_rank'] == 0]
+    first_names = first_rows.set_index(['A', 'B'])['name']
+    WranglerLogger.debug(f"First row names for {len(first_names)} groups")
+    
+    # Find rows that match first row's name or have no name (treating NaN as empty)
+    dupe_links_indexed = dupe_links.set_index(['A', 'B'])
+    matching_name_mask = (
+        (dupe_links_indexed['name'] == dupe_links_indexed.index.map(first_names.to_dict())) |
+        (dupe_links_indexed['name'].isna()) |
+        (dupe_links_indexed['name'] == '')
+    )
+    WranglerLogger.debug(f"Rows matching name criteria: {matching_name_mask.sum()}")
+    matching_lanes = dupe_links_indexed[matching_name_mask].groupby(['A', 'B'])['lanes'].sum()
+    if not matching_lanes.empty:
+        WranglerLogger.debug(f"Aggregated lanes for matching names:\n{matching_lanes.head(10)}")
+    
+    # Keep only the first row from each group
+    unduped_df = dupe_links[dupe_links['group_rank'] == 0].copy()
+    WranglerLogger.debug(f"Keeping {len(unduped_df)} first rows from duplicate groups")
+    
+    # Vectorized application of aggregated values
+    # Apply busway buslanes using merge
+    if not busway_buslanes.empty:
+        WranglerLogger.debug(f"Applying {len(busway_buslanes)} busway buslane aggregations")
+        busway_df = busway_buslanes.reset_index()
+        busway_df.columns = ['A', 'B', 'buslanes_new']
+        unduped_df = unduped_df.merge(busway_df, on=['A', 'B'], how='left')
+        mask = unduped_df['buslanes_new'].notna()
+        if mask.any():
+            WranglerLogger.debug(f"Updated buslanes for {mask.sum()} links")
+            unduped_df.loc[mask, 'buslanes'] = unduped_df.loc[mask, 'buslanes_new']
+        unduped_df = unduped_df.drop(columns=['buslanes_new'])
+    
+    # Apply aggregated lanes using merge
+    if not matching_lanes.empty:
+        WranglerLogger.debug(f"Applying {len(matching_lanes)} lane aggregations")
+        lanes_df = matching_lanes.reset_index()
+        lanes_df.columns = ['A', 'B', 'lanes_new']
+        # Log original lanes for debugging
+        orig_lanes_series = unduped_df.set_index(['A', 'B'])['lanes']
+        unduped_df = unduped_df.merge(lanes_df, on=['A', 'B'], how='left')
+        mask = unduped_df['lanes_new'].notna()
+        if mask.any():
+            # Log changes for debugging
+            changes = unduped_df[mask][['A', 'B', 'lanes', 'lanes_new']]
+            WranglerLogger.debug(f"Updated lanes for {mask.sum()} links:\n{changes}")
+            unduped_df.loc[mask, 'lanes'] = unduped_df.loc[mask, 'lanes_new']
+        unduped_df = unduped_df.drop(columns=['lanes_new'])
+    
+    # Drop temporary columns
+    unduped_df = unduped_df.drop(columns=['highway_level', 'group_rank'])
+    WranglerLogger.debug(f"Final unduped_df has {len(unduped_df)} links")
 
     # put it back together
     WranglerLogger.debug(f"unduped_df:\n{unduped_df}")
@@ -724,7 +775,7 @@ def handle_links_with_duplicate_A_B(
     # verify it worked
     full_gdf['dupe_A_B'] = full_gdf.duplicated(subset=['A','B'], keep=False)
     assert( (full_gdf['dupe_A_B']==False).all() )
-    WranglerLogger.info(f"{full_gdf['dupe_A_B'].sum()=:,}")
+
     return full_gdf
 
 
@@ -1061,6 +1112,7 @@ if __name__ == "__main__":
 
     pd.options.display.max_columns = None
     pd.options.display.width = None
+    pd.options.display.min_rows = 20 # number of rows to show in truncated view
     pd.set_option('display.float_format', '{:.2f}'.format)
     # Elevate SettingWithCopyWarning to error
     pd.options.mode.chained_assignment = 'raise'
