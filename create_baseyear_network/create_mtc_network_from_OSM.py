@@ -30,7 +30,7 @@ import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
-from network_wrangler.transit.io import load_feed_from_path, write_transit
+from network_wrangler.transit.io import load_feed_from_path, write_transit, load_transit
 from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
@@ -44,6 +44,8 @@ if USERNAME=="lmz":
     COUNTY_SHAPEFILE = pathlib.Path("../../tl_2010_06_county10/tl_2010_06_county10_9CountyBayArea.shp").resolve()
     INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-09").resolve()
     OUTPUT_DIR = pathlib.Path("../../output_from_OSM").resolve()
+
+ROADWAY_OUTPUT_FORMATS = ['parquet','geojson']
 
 # Map county names to county network node start based on
 # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
@@ -1160,13 +1162,13 @@ if __name__ == "__main__":
 
     # Skip steps if files are present: Read the roadway network 
     roadway_network = None
-    roadway_net_parquet_file = f"4_roadway_network_{args.county_no_spaces}"
+    roadway_net_file = f"4_roadway_network_{args.county_no_spaces}"
     try:
-        nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_parquet_file}_node.parquet")
-        links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_parquet_file}_link.parquet")
+        nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_node.parquet")
+        links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_link.parquet")
         shapes_gdf = links_gdf.copy()
         roadway_network = load_roadway_from_dataframes(links_gdf, nodes_gdf, shapes_gdf)
-        WranglerLogger.info(f"Read roadway network from {roadway_net_parquet_file}_[node,link].parquet")
+        WranglerLogger.info(f"Read roadway network from {roadway_net_file}_[node,link].parquet")
         WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
     except Exception as e:
         # that's ok
@@ -1203,21 +1205,22 @@ if __name__ == "__main__":
         WranglerLogger.info(f"Created RoadwayNetwork")
         WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
 
-        # Write the 2023 roadway network to parquet files
-        WranglerLogger.info("Writing 2023 roadway network to parquet files...")
-        try:
-            write_roadway(
-                roadway_network, 
-                out_dir=OUTPUT_DIR,
-                prefix=roadway_net_parquet_file,
-                file_format="parquet",
-                overwrite=True,
-                true_shape=True
-            )
-            WranglerLogger.info(f"Roadway network saved to {OUTPUT_DIR}")
-        except Exception as e:
-            WranglerLogger.error(f"Error writing roadway network: {e}")
-            raise(e)
+        # Write the 2023 roadway network to ROADWAY_OUTPUT_FORMATS files
+        for roadway_format in ROADWAY_OUTPUT_FORMATS:
+            WranglerLogger.info("Writing 2023 roadway network to {roadway_format} files...")
+            try:
+                write_roadway(
+                    roadway_network, 
+                    out_dir=OUTPUT_DIR,
+                    prefix=roadway_net_file,
+                    file_format=roadway_format,
+                    overwrite=True,
+                    true_shape=True
+                )
+                WranglerLogger.info(f"Roadway network saved to {OUTPUT_DIR} in {roadway_format}")
+            except Exception as e:
+                WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
+                raise(e)
 
     # Skip steps if files are present: Read the GtfsModel object
     gtfs_model = None
@@ -1296,6 +1299,9 @@ if __name__ == "__main__":
         'PM':['15:00','19:00'],  # 3p-7p
         'EV':['19:00','03:00'],  # 7p-3a (crosses midnight)
     }
+    # If max_rows is exceeded, switch to truncate view
+    pd.options.display.max_rows = 500
+
     try:
         feed = create_feed_from_gtfs_model(
             gtfs_model,
@@ -1307,7 +1313,10 @@ if __name__ == "__main__":
             default_frequency_for_onetime_route=180*60, # 180 minutes
             add_stations_and_links=True,
             skip_stop_agencies = 'CT',
-            trace_shape_ids=['SF:2751:20230930'] # trace 27 bus
+            trace_shape_ids=[
+                'SF:140:20230930', # powell-hyde cable car
+                'SF:2751:20230930' # 27 bus
+            ]
         )
         WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
     except Exception as e:
@@ -1343,8 +1352,38 @@ if __name__ == "__main__":
             WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
         raise(e)
 
+    # write roadway network again because now it has the transit
+    roadway_net_file = f"5_roadway_network_inc_transit_{args.county_no_spaces}"
+    for roadway_format in ROADWAY_OUTPUT_FORMATS:
+        WranglerLogger.info("Writing roadway network with transit links to {roadway_format} files...")
+        try:
+            write_roadway(
+                roadway_network, 
+                out_dir=OUTPUT_DIR,
+                prefix=roadway_net_file,
+                file_format=roadway_format,
+                overwrite=True,
+                true_shape=True
+            )
+        except Exception as e:
+            # that's ok
+            WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
+            WranglerLogger.debug(e)
+            pass
+
+    # write feed object
+    feed_dir = OUTPUT_DIR / f"6_feed_{args.county_no_spaces}"
+    feed_dir.mkdir(exist_ok=True)
+    write_transit(
+        feed,
+        feed_dir,
+        prefix=f"feed_{args.county_no_spaces}",
+        overwrite=True
+    )
+
     # create a transit network
-    # transit_network = network_wrangler.transit.io.load_transit("M:\\Data\\Transit\\511\\2023-10")
+    transit_network = load_transit(feed=feed)
+    WranglerLogger.info(f"Created transit_network:\n{transit_network}")
 
     # finally, create a scenario
     # my_scenario = network_wrangler.scenario.create_scenario(
