@@ -345,8 +345,8 @@ def standardize_lanes_value(
         WranglerLogger.debug(f"After get_min_or_median_value: links_gdf['{lane_col}'].value_counts():\n{links_gdf[lane_col].value_counts(dropna=False)}")
 
     # split links_gdf into A<B and A>B to join links with their reverse
-    links_gdf_AltB = links_gdf.loc[ links_gdf.A < links_gdf.B]
-    links_gdf_BltA = links_gdf.loc[ links_gdf.B < links_gdf.A]
+    links_gdf_AltB = links_gdf.loc[ links_gdf.A < links_gdf.B].copy()
+    links_gdf_BltA = links_gdf.loc[ links_gdf.B < links_gdf.A].copy()
 
     if trace_tuple:
         WranglerLogger.debug(
@@ -993,6 +993,19 @@ def standardize_and_write(
     # and distance
     links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
 
+    # additional simplifications
+    # Delete links with highway=='service' and no name
+    nameless_service_links_gdf = links_gdf.loc[ 
+        (links_gdf['highway']=='service') & 
+        (links_gdf['name'].isna() |
+         (links_gdf['name']=='')) ]
+    WranglerLogger.info(f"Removing {len(nameless_service_links_gdf):,} nameless service links")
+    WranglerLogger.debug(f"nameless_service_links_gdf:\n{nameless_service_links_gdf}")
+    links_gdf = links_gdf.loc[
+        (links_gdf['highway']!='service') |
+        (links_gdf['name'].notna() &
+         (links_gdf['name']!=''))]
+
     tableau_utils.write_geodataframe_as_tableau_hyper(
         links_gdf, 
         OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
@@ -1076,7 +1089,8 @@ if __name__ == "__main__":
     )
     WranglerLogger.info(f"Created by {__file__}")
     # For now, doing drive as we'll add handle transit and walk/bike separately
-    OSM_network_type = "drive"
+    # Aug 24: switch to all because Market Street bus-only links are missing
+    OSM_network_type = "all"
 
     # Skip steps if files are present: Read the simplified network graph rather than creating it from OSM
     g = None
@@ -1318,6 +1332,15 @@ if __name__ == "__main__":
                 "bus_stops_gdf"
             )
             WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
+        
+        if hasattr(e, "no_bus_path_gdf"):
+            WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                e.no_bus_path_gdf,
+                OUTPUT_DIR / f"no_bus_path.hyper",
+                "no_bus_path"
+            )
+            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
         raise(e)
 
     # create a transit network
