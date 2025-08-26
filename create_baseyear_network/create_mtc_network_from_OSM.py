@@ -1,15 +1,51 @@
-USAGE = """
+"""Create MTC base year networks (2023) from OpenStreetMap (OSM) data.
 
-Create MTC base year networks (2023) from OSM.
+This script creates transportation network models from OpenStreetMap data for the 
+San Francisco Bay Area region. It can process either individual counties or the entire 
+Bay Area as a unified network.
+
+Main Features:
+- Fetches road network data from OpenStreetMap using OSMnx
+- Standardizes network attributes (highway types, lanes, access permissions)
+- Integrates GTFS transit data from 511 Bay Area feed
+- Creates compatible networks for travel demand models
+- Outputs in multiple formats (Parquet, GeoJSON, Tableau Hyper)
+
+The script performs the following workflow:
+1. Downloads OSM network data for specified geography
+2. Simplifies network topology while preserving connectivity
+3. Standardizes attributes (highway types, lanes, access modes)
+4. Assigns county-specific node/link numbering schemes
+5. Integrates GTFS transit data
+6. Creates transit stops and links on the roadway network
+7. Outputs final network files
 
 Tested in July 2025 with:
-  * network_wrangler, https://github.com/network-wrangler/network_wrangler/tree/main
+  * network_wrangler v1.0-beta.3
+  * OSMnx v1.9+
+  * GTFS feed from 511 Bay Area (September 2023)
 
 References:
-  * Asana: GMNS+ / NetworkWrangler2 > Build 2023 network using existing tools (https://app.asana.com/1/11860278793487/project/15119358130897/task/1210468893117122?focus=true)
-  * MTC Year 2023 Network Creation Steps Google Doc (https://docs.google.com/document/d/1TU0nsUHmyKfYZDbwjeCFiW09w53fyWu7X3XcRlNyf2o/edit?tab=t.0#heading=h.kjbu68swdkst)
+  * Asana: GMNS+ / NetworkWrangler2 > Build 2023 network using existing tools 
+    https://app.asana.com/1/11860278793487/project/15119358130897/task/1210468893117122
+  * MTC Year 2023 Network Creation Steps Google Doc
+    https://docs.google.com/document/d/1TU0nsUHmyKfYZDbwjeCFiW09w53fyWu7X3XcRlNyf2o/edit
   * network_wrangler\\notebook\\Create Network from OSM.ipynb
+
+Usage:
+    python create_mtc_network_from_OSM.py <county>
+    
+    where <county> is one of:
+    - 'Bay Area' (entire 9-county region)
+    - Individual county names: 'San Francisco', 'San Mateo', 'Santa Clara',
+      'Alameda', 'Contra Costa', 'Solano', 'Napa', 'Sonoma', 'Marin'
+
+Example:
+    python create_mtc_network_from_OSM.py "San Francisco"
+    python create_mtc_network_from_OSM.py "Bay Area"
 """
+
+USAGE = __doc__
 import argparse
 import datetime
 import getpass
@@ -158,12 +194,21 @@ def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float
     """
     Read county shapefile and return bounding box in WGS84 coordinates.
     
+    This function reads the Bay Area county boundaries from a shapefile and
+    calculates the total bounding box encompassing all counties. The coordinates
+    are converted to WGS84 (EPSG:4326) if needed for OSM data retrieval.
+    
     Args:
-        county_shapefile: Path to the county shapefile
+        county_shapefile: Path to the county shapefile containing Bay Area counties.
+                         Expected to have geometry in any valid CRS.
         
     Returns:
-        tuple: Bounding box as (north, south, east, west) for OSMnx
-               Note: OSMnx expects (north, south, east, west) not (minx, miny, maxx, maxy)
+        tuple: Bounding box as (west, south, east, north) in decimal degrees.
+               These are longitude/latitude coordinates in WGS84 projection.
+               
+    Note:
+        The returned tuple order (west, south, east, north) matches the format
+        expected by osmnx.graph_from_bbox() function.
     """
     WranglerLogger.info(f"Reading county shapefile from {county_shapefile}")
     county_gdf = gpd.read_file(county_shapefile)
@@ -191,25 +236,32 @@ def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float
 
 def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int:
     """
-    Convert lane value to integer, handling various input formats.
+    Convert lane value to integer, handling various OSM input formats.
     
-    For lists with two items, returns the minimum value.
-    For lists with more than two items, returns the median value.
+    OSM lane data can be inconsistent, appearing as integers, strings, or lists
+    when multiple values have been tagged over time. This function normalizes
+    these various formats into a single integer value.
+    
+    For lists with two items, returns the minimum value (conservative approach).
+    For lists with more than two items, returns the median value (typical case).
     
     Args:
-        lane: Lane value that can be:
-            - An integer
-            - A string representation of an integer  
-            - A list of integers or string representations of integers
+        lane: Lane value from OSM that can be:
+            - An integer (e.g., 2)
+            - A string representation of an integer (e.g., '2' or '1.5')
+            - A list of integers or string representations (e.g., [2, 4] or ['2', '3', '4'])
     
     Returns:
-        The processed lane count as an integer.
+        The processed lane count as an integer. Fractional values are converted
+        to integers via float conversion first.
     
     Examples:
         >>> get_min_or_median_value(3)
         3
         >>> get_min_or_median_value('2')
         2
+        >>> get_min_or_median_value('1.5')  # Handles fractional strings
+        1
         >>> get_min_or_median_value([2, 4])  # Returns min for 2-item list
         2
         >>> get_min_or_median_value([1, 2, 3, 4, 5])  # Returns median for longer list
@@ -233,33 +285,51 @@ def standardize_lanes_value(
     """
     Standardize the lanes value in the links GeoDataFrame.
     
-    Processes lane-related columns in the GeoDataFrame to ensure consistent
-    lane count representation. Handles various OSM lane tagging formats including
-    forward/backward lanes, handles reversed links, and fills missing lane values
-    based on highway type.
+    This function processes complex OSM lane tagging to produce consistent lane counts
+    for network modeling. It handles:
+    - Directional lane tagging (lanes:forward, lanes:backward)
+    - Bus-only lanes (lanes:bus, lanes:bus:forward, lanes:bus:backward)
+    - Bidirectional links represented as forward/reverse pairs
+    - Missing lane values filled based on highway type statistics
+    
+    The function performs several key operations:
+    1. Resolves list-valued attributes from OSM (using min/median logic)
+    2. Matches forward/reverse link pairs to combine directional attributes
+    3. Calculates directional lanes from total lanes for two-way streets
+    4. Extracts bus lanes separately from general traffic lanes
+    5. Fills missing values using highway type statistics
     
     Args:
         links_gdf: GeoDataFrame containing OSM link data with columns:
+            - A, B: Node IDs defining the link
+            - key: Distinguishes parallel edges
             - oneway: Boolean or list indicating if link is one-way
             - reversed: Boolean or list indicating if link direction is reversed  
-            - lanes: Total number of lanes
+            - lanes: Total number of lanes (may be for both directions)
             - lanes:forward: Number of forward lanes (optional)
             - lanes:backward: Number of backward lanes (optional)
-            - highway: OSM highway type
+            - lanes:both_ways: Lanes shared by both directions (optional)
+            - lanes:bus*: Various bus lane attributes (optional)
+            - highway: OSM highway type classification
+        trace_tuple: Optional tuple of (A,B) node IDs to trace for debugging
     
     Returns:
-        Modified links_gdf with standardized lane values.
-        The 'lanes' column will have integer values (no -1 placeholders). This *does not include* buslanes.
-        The 'buslanes' column will have integer values (no -1 placeholders).
+        Modified links_gdf with standardized lane values:
+        - 'lanes': Integer count of general traffic lanes (excludes bus lanes)
+        - 'buslanes': Integer count of bus-only lanes (default 0)
+        All -1 placeholders are replaced with appropriate values.
     
     Side Effects:
-        Modifies the input GeoDataFrame in place.
+        Modifies the input GeoDataFrame in place. Adds/modifies columns:
+        - lanes: Standardized general traffic lane count
+        - buslanes: Standardized bus lane count
+        - lanes_orig: Original lanes value before processing
     
     Notes:
-        - Handles OSM bidirectional links that are represented as lists
-        - Merges forward/backward lane counts when appropriate
-        - Creates highway-to-lanes mapping for filling missing values
-        - Uses sensible defaults for highway types without samples
+        - Two-way streets have lanes divided equally between directions
+        - Bus-only facilities (highway='busway') get lanes=0, buslanes=1
+        - Missing values filled using mode of lanes by highway type
+        - Default assumption is 1 lane if no information available
     """
     WranglerLogger.debug(f"standardize_lanes_value() for {len(links_gdf):,} links")
 
@@ -529,7 +599,7 @@ def standardize_lanes_value(
     return links_gdf
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
-    """Standardize the highway value in the links GeoDataFrame.
+    """Standardize the highway value in the links GeoDataFrame and set access permissions.
 
     Standardized values - drive:
     - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
@@ -648,21 +718,30 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
 
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
     """
-    Extract a single highway value from potentially multiple values.
+    Extract a single highway value from potentially multiple OSM values.
+    
+    OSM ways can have multiple highway tags when they serve multiple purposes
+    or have been tagged inconsistently. This function resolves to a single value.
     
     When multiple values are present (as a list), returns the first one.
+    This is typically the most important/primary classification.
     
     Args:
-        highway: Either a single highway type string or a list of highway types.
+        highway: Either a single highway type string or a list of highway types
+                from OSM tags.
     
     Returns:
-        A single highway type string.
+        A single highway type string representing the primary classification.
     
     Examples:
         >>> get_roadway_value('primary')
         'primary'
         >>> get_roadway_value(['primary', 'secondary'])
         'primary'
+        
+    Note:
+        This simple selection strategy works because standardize_highway_value()
+        later applies a hierarchy-based selection for lists.
     """
     if isinstance(highway,list):
         WranglerLogger.debug(f"list: {highway}")
@@ -672,7 +751,32 @@ def get_roadway_value(highway: Union[str, list[str]]) -> str:
 def handle_links_with_duplicate_A_B(
         links_gdf: gpd.GeoDataFrame
     ) -> gpd.GeoDataFrame:
-    """Handle links with duplicate u,v by merging or dropping
+    """
+    Handle links with duplicate A,B node pairs by merging or prioritizing.
+    
+    Multiple OSM ways can connect the same two nodes (parallel edges), representing
+    different types of infrastructure (e.g., a freeway and a parallel frontage road).
+    This function resolves these duplicates by:
+    1. Prioritizing based on highway hierarchy (motorway > primary > residential)
+    2. Aggregating lanes from matching infrastructure (same name or unnamed)
+    3. Preserving bus lanes from bus-only facilities
+    
+    The function ensures each A-B pair appears only once in the final network,
+    selecting the most important link while preserving capacity information.
+    
+    Args:
+        links_gdf: GeoDataFrame with a 'dupe_A_B' column marking duplicate links.
+                  Must contain columns: A, B, key, highway, name, lanes, buslanes
+    
+    Returns:
+        GeoDataFrame with duplicates resolved. Each A-B pair appears exactly once.
+        The 'dupe_A_B' column is set to False for all remaining links.
+    
+    Algorithm:
+        1. Sort duplicates by highway hierarchy (highest priority first)
+        2. Keep the highest priority link for each A-B pair
+        3. Aggregate lanes from links with matching/empty names to the kept link
+        4. Aggregate bus lanes from busway facilities to the kept link
     """
     WranglerLogger.info("Handling links with duplicate (A,B)")
 
@@ -785,35 +889,73 @@ def standardize_and_write(
         prefix: str
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
-    Standardize fields and write the given graph's links and nodes to Tableau Hyper format.
+    Standardize OSM network data and write to multiple output formats.
     
-    Processes an OSMnx graph by:
-    1. Projecting to WGS84 (EPSG:4326)
-    2. Converting to GeoDataFrames
-    3. Removing duplicate edges (keeping shortest) and loop edges (A==B)
-    4. Standardizing highway and lane values
-    5. For Bay Area: assigning counties via spatial join
-    6. Writing to Tableau Hyper files
+    This is a key processing function that transforms raw OSM network data into
+    a standardized format suitable for travel demand modeling. It handles the
+    complexity of OSM tagging, assigns model-specific IDs, and performs spatial
+    operations for multi-county networks.
+    
+    Processing steps:
+    1. Projects graph to WGS84 (EPSG:4326) for geographic consistency
+    2. Converts NetworkX graph to GeoDataFrames (nodes and links)
+    3. Removes self-loop edges (where A==B) and tags duplicate A-B pairs
+    4. Standardizes highway classifications and access permissions
+    5. Standardizes lane counts and separates bus lanes
+    6. For Bay Area: performs spatial join to assign county to each link/node
+    7. Assigns model-specific node and link IDs based on county numbering system
+    8. Removes unnamed service roads to simplify network
+    9. Writes outputs in multiple formats for different use cases
+    
+    County numbering system:
+    - San Francisco: nodes 1,000,000+, links 1,000,000+
+    - San Mateo: nodes 1,500,000+, links 2,000,000+
+    - Santa Clara: nodes 2,000,000+, links 3,000,000+
+    - Alameda: nodes 2,500,000+, links 4,000,000+
+    - Contra Costa: nodes 3,000,000+, links 5,000,000+
+    - Solano: nodes 3,500,000+, links 6,000,000+
+    - Napa: nodes 4,000,000+, links 7,000,000+
+    - Sonoma: nodes 4,500,000+, links 8,000,000+
+    - Marin: nodes 5,000,000+, links 9,000,000+
+    - External: nodes 900,001+, links 0+
     
     Args:
         g: NetworkX MultiDiGraph from OSMnx containing the road network.
-        county: County name or "Bay Area" for multi-county processing
-        prefix: String prefix to prefix to output filenames
+           Nodes have 'osmid', 'x', 'y' attributes.
+           Edges have highway, lanes, name, etc. from OSM tags.
+        county: County name (e.g., "San Francisco") or "Bay Area" for 
+               multi-county processing
+        prefix: String prefix for output filenames (e.g., "3_simplified_")
     
     Returns:
-        A tuple containing:
-            - links_gdf: GeoDataFrame of standardized road links/edges
-            - nodes_gdf: GeoDataFrame of road network nodes
+        Tuple of (links_gdf, nodes_gdf) containing:
+            - links_gdf: GeoDataFrame of standardized road links with columns:
+                A, B: Model node IDs
+                highway: Standardized road type
+                lanes: Number of general traffic lanes
+                buslanes: Number of bus-only lanes  
+                drive/bike/walk/truck/bus_access: Boolean access flags
+                model_link_id: Unique link identifier
+                shape_id: Link geometry identifier
+                county: Assigned county name
+            - nodes_gdf: GeoDataFrame of network nodes with columns:
+                model_node_id: Unique node identifier
+                X, Y: Longitude, latitude coordinates
+                county: Assigned county name
     
     Side Effects:
-        Writes two Tableau Hyper files to OUTPUT_DIR:
-            - {prefix}{county_no_spaces}_links.hyper
-            - {prefix}{county_no_spaces}_nodes.hyper
+        Writes multiple files to OUTPUT_DIR:
+            - {prefix}{county}_links.hyper: Tableau Hyper format for visualization
+            - {prefix}{county}_nodes.hyper: Tableau Hyper format for visualization
+            - {prefix}{county}_links.parquet: Parquet format for analysis
+            - {prefix}{county}_nodes.parquet: Parquet format for analysis
+            - {prefix}{county}_links.gpkg: GeoPackage format for GIS
+            - {prefix}{county}_nodes.gpkg: GeoPackage format for GIS
     
     Notes:
-        - Renames columns u,v to A,B for consistency
-        - Drops duplicate edges between same nodes, keeping shortest
-        - For Bay Area, performs spatial join to assign counties
+        - Multi-county links assigned to county with longest intersection
+        - Unnamed service roads removed to reduce complexity
+        - Original OSM IDs preserved in osm_node_id and osm_link_id columns
     """
     WranglerLogger.info(f"======= standardize_and_write(g, {county=}, {prefix=}) =======")
     county_no_spaces = county.replace(" ","")
@@ -1109,6 +1251,39 @@ def standardize_and_write(
     return (links_gdf, nodes_gdf)
 
 if __name__ == "__main__":
+    """
+    Main execution block for creating MTC networks from OpenStreetMap.
+    
+    This script follows a multi-step workflow with caching for efficiency:
+    
+    1. OSM Network Extraction:
+       - Downloads road network from OSM via OSMnx
+       - Caches raw graph for faster re-runs
+       
+    2. Network Simplification:
+       - Consolidates intersections within tolerance (20 feet)
+       - Preserves connectivity and attributes
+       - Caches simplified graph
+       
+    3. Standardization:
+       - Processes highway types and lane counts
+       - Assigns access permissions by mode
+       - Creates model-specific IDs
+       
+    4. GTFS Integration:
+       - Loads 511 Bay Area GTFS feed
+       - Filters to specified geography
+       - Creates transit stops and links on road network
+       
+    5. Output Generation:
+       - Writes road network with transit
+       - Creates feed object for transit
+       - Outputs in multiple formats
+       
+    The script uses caching extensively - if intermediate files exist,
+    they are loaded instead of regenerating, significantly speeding up
+    iterative development and debugging.
+    """
 
     pd.options.display.max_columns = None
     pd.options.display.width = None
