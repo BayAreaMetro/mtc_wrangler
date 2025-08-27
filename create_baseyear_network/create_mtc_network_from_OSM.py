@@ -1539,7 +1539,6 @@ if __name__ == "__main__":
             frequency_method='median_headway',
             default_frequency_for_onetime_route=180*60, # 180 minutes
             add_stations_and_links=True,
-            skip_stop_agencies = 'CT',
             trace_shape_ids=[
                 'SF:140:20230930', # powell-hyde cable car
                 'SF:2751:20230930' # 27 bus
