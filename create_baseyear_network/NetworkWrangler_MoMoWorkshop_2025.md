@@ -42,7 +42,7 @@ cd network_wrangler
 pip install -e .
 
 # Install additional dependencies
-pip install scikit-learn
+pip install scikit-learn tableauhyperapi
 
 # Clone mtc_wrangler with script to run
 cd ..
