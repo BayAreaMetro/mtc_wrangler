@@ -36,13 +36,14 @@ conda activate network_wrangler
 
 # Install network-wrangler with visualization support
 # pip install network-wrangler[viz]
+# Ensure your current working directory is where you want the cloned directory
 git clone https://github.com/BayAreaMetro/network_wrangler.git network_wrangler
 # Install network_wrangler in editable mode
 cd network_wrangler
 pip install -e .
 
 # Install additional dependencies
-pip install scikit-learn tableauhyperapi
+pip install scikit-learn tableauhyperapi pygris
 
 # Clone mtc_wrangler with script to run
 cd ..
