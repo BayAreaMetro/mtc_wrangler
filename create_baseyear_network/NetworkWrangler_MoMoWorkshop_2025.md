@@ -1,4 +1,5 @@
-# Network Wrangler: Creating Transportation Networks from OpenStreetMap
+# Network Wrangler: Creating Transportation Networks from OpenStreetMap & GTFS
+
 ## MoMo Workshop 2025
 
 ### Overview
@@ -8,8 +9,8 @@ This guide demonstrates how to create travel demand model networks from OpenStre
 ### Table of Contents
 1. [Prerequisites](#prerequisites)
 2. [Architecture](#architecture)
-3. [Step-by-Step Process](#step-by-step-process)
-4. [Key Functions](#key-functions)
+3. [Run the Script](#run-the-script)
+4. [What does the script do?](#what-does-the-script-do)
 5. [Output Files](#output-files)
 6. [Troubleshooting](#troubleshooting)
 
@@ -26,21 +27,33 @@ This guide demonstrates how to create travel demand model networks from OpenStre
 ### Installation
 ```bash
 # Create and activate conda environment
-conda create -n network_wrangler python=3.9
+conda create -n network_wrangler python=3.10
 conda activate network_wrangler
 
+# TODO: For now, we need to use BayAreaMetro version of network_wrangler
+# pending PR merge/release: 
+# https://github.com/network-wrangler/network_wrangler/pull/408
+
 # Install network-wrangler with visualization support
-pip install network-wrangler[viz]
+# pip install network-wrangler[viz]
+git clone https://github.com/BayAreaMetro/network_wrangler.git network_wrangler
+# Install network_wrangler in editable mode
+cd network_wrangler
+pip install -e .
 
 # Install additional dependencies
-pip install osmnx geopandas pandas numpy
+pip install scikit-learn
+
+# Clone mtc_wrangler with script to run
+cd ..
+git clone https://github.com/BayAreaMetro/mtc_wrangler.git mtc_wrangler
 ```
 
 ### Required Data Files
 1. **County Shapefile**: Boundary definitions for your region
    - Example: `tl_2010_06_county10_9CountyBayArea.shp`
 2. **GTFS Transit Feed**: Public transit schedules and routes
-   - Example: `511gtfs_2023-09/` directory
+   - Example: `511gtfs_2023-09/` directory, download and unzip from [BayArea_511gtfs_2023-09.zip](https://drive.google.com/file/d/1wu-echoNNi5NzQh3BT4RwfnHYlUg8ZK5/view?usp=sharing)
 3. **Output Directory**: Location for generated network files
    - Example: `output_from_OSM/`
 
@@ -67,9 +80,7 @@ OpenStreetMap → OSMnx → NetworkX Graph → Standardization → Network Wrang
 
 ---
 
-## Step-by-Step Process
-
-### Step 1: Run the Script
+## Run the Script
 
 ```bash
 # Navigate to the script directory
@@ -78,11 +89,11 @@ cd mtc_wrangler/create_baseyear_network/
 # Run for a single county
 python create_mtc_network_from_OSM.py "San Francisco"
 
-# Run for entire Bay Area
-python create_mtc_network_from_OSM.py "Bay Area"
 ```
 
-### Step 2: OSM Network Extraction
+## What does the script do?
+
+### Step 1: OSM Network Extraction
 
 The script first downloads road network data from OpenStreetMap:
 
@@ -103,7 +114,7 @@ g = osmnx.graph_from_bbox(bbox, network_type='all')
 
 **Output:** `0_graph_OSM_{county}.pkl` (cached raw network)
 
-### Step 3: Network Simplification
+### Step 2: Network Simplification
 
 The network is simplified to reduce complexity while preserving connectivity:
 
@@ -125,7 +136,7 @@ g = osmnx.simplification.consolidate_intersections(
 
 **Output:** `1_graph_OSM_{county}_simplified20.pkl`
 
-### Step 4: Attribute Standardization
+### Step 3: Attribute Standardization
 
 The script standardizes OSM attributes for consistency:
 
@@ -146,7 +157,7 @@ links_gdf = standardize_lanes_value(links_gdf)
 - Fills missing values using highway type statistics
 - Handles bidirectional streets
 
-### Step 5: County Assignment (Bay Area only)
+### Step 4: County Assignment (Bay Area only)
 
 For multi-county networks, performs spatial join:
 
@@ -156,7 +167,7 @@ nodes_gdf = gpd.sjoin(nodes_gdf, county_gdf, how='left', predicate='within')
 links_gdf = gpd.sjoin(links_gdf, county_gdf, how='left', predicate='intersects')
 ```
 
-### Step 6: ID Assignment
+### Step 5: ID Assignment
 
 Creates model-specific identifiers based on county:
 
@@ -173,7 +184,7 @@ Creates model-specific identifiers based on county:
 | Marin | 5,000,000+ | 9,000,000+ |
 | External | 900,001+ | 0+ |
 
-### Step 7: GTFS Integration
+### Step 6: GTFS Integration
 
 Loads and processes transit data:
 
@@ -200,7 +211,7 @@ feed = create_feed_from_gtfs_model(
 - Adds access/egress links between stops and roads
 - Calculates service frequencies by time period
 
-### Step 8: Output Generation
+### Step 7: Output Generation
 
 Creates final network files in multiple formats:
 
@@ -212,38 +223,6 @@ write_roadway(roadway_network, out_dir=OUTPUT_DIR,
 # Write transit feed
 write_transit(feed, feed_dir, overwrite=True)
 ```
-
----
-
-## Key Functions
-
-### `get_county_bbox()`
-Calculates bounding box for OSM data retrieval from county shapefile.
-
-### `standardize_highway_value()`
-Maps OSM highway types to standard categories and sets modal access permissions.
-
-### `standardize_lanes_value()`
-Processes complex lane tagging to produce consistent lane counts, handling:
-- Directional lanes (forward/backward)
-- Bus lanes
-- Missing values
-- Bidirectional streets
-
-### `handle_links_with_duplicate_A_B()`
-Resolves parallel edges between same nodes by:
-- Prioritizing by highway hierarchy
-- Aggregating lanes from similar infrastructure
-- Preserving bus lane capacity
-
-### `standardize_and_write()`
-Main processing function that:
-- Converts graph to GeoDataFrames
-- Standardizes all attributes
-- Assigns model IDs
-- Writes output files
-
----
 
 ## Output Files
 
@@ -341,45 +320,6 @@ No path found between stops
    ```
 
 4. **Parallel Processing**: Process multiple counties in parallel using separate terminal sessions.
-
----
-
-## Advanced Usage
-
-### Customizing OSM Tags
-
-Modify `OSM_WAY_TAGS` dictionary to extract additional attributes:
-
-```python
-OSM_WAY_TAGS = {
-    'highway': TAG_STRING,
-    'maxspeed': TAG_STRING,  # Speed limits
-    'surface': TAG_STRING,   # Road surface type
-    'lit': TAG_STRING,       # Street lighting
-    # Add more tags as needed
-}
-```
-
-### Adjusting Simplification
-
-Change tolerance for intersection consolidation:
-
-```python
-NETWORK_SIMPLIFY_TOLERANCE = 50  # feet (default: 20)
-```
-
-Larger values create simpler networks but may lose detail.
-
-### Filtering Transit Agencies
-
-Specify agencies to include by county:
-
-```python
-COUNTY_NAME_TO_GTFS_AGENCIES = {
-    'San Francisco': ['SF', 'BA', 'CT'],  # Muni, BART, Caltrain
-    'San Mateo': ['SM', 'BA', 'CT'],      # SamTrans, BART, Caltrain
-}
-```
 
 ---
 
