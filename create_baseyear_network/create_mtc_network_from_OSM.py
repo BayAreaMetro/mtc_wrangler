@@ -60,6 +60,7 @@ import osmnx
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import pygris
 
 import tableau_utils
 import network_wrangler
@@ -71,9 +72,6 @@ from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
 
-COUNTY_SHAPEFILE = pathlib.Path("M:\\Data\\Census\\Geography\\tl_2010_06_county10\\tl_2010_06_county10_9CountyBayArea.shp")
-INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-09")
-OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM")
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 USERNAME = getpass.getuser()
 if USERNAME=="lmz":
@@ -190,9 +188,9 @@ HIGHWAY_HIERARCHY = [
     'track',          # minor land-access roads
 ]
 
-def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float, float]:
+def get_county_bbox(counties) -> tuple[float, float, float, float]:
     """
-    Read county shapefile and return bounding box in WGS84 coordinates.
+    Read in list of counties and return bounding box in WGS84 coordinates.
     
     This function reads the Bay Area county boundaries from a shapefile and
     calculates the total bounding box encompassing all counties. The coordinates
@@ -210,9 +208,10 @@ def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    WranglerLogger.info(f"Reading county shapefile from {county_shapefile}")
-    county_gdf = gpd.read_file(county_shapefile)
-    
+    WranglerLogger.info(f"Reading county shapefile for Bay Area")
+    county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+    county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
+
     # Get the total bounds (bounding box) of all counties
     # Returns (minx, miny, maxx, maxy)
     bbox = county_gdf.total_bounds
@@ -1007,7 +1006,8 @@ def standardize_and_write(
     if county == "Bay Area":
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
-        county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
+        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
         WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
                 
@@ -1292,18 +1292,21 @@ if __name__ == "__main__":
     # Elevate SettingWithCopyWarning to error
     pd.options.mode.chained_assignment = 'raise'
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
+    parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
+    parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
+    parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
+    args = parser.parse_args()
+    args.county_no_spaces = args.county.replace(" ","") # remove spaces
+    OUTPUT_DIR = args.output_dir
+    INPUT_2023GTFS = args.input_gtfs
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     osmnx.settings.use_cache = True
     osmnx.settings.cache_folder = OUTPUT_DIR / "osmnx_cache"
     osmnx.settings.log_file = True
     osmnx.settings.logs_folder = OUTPUT_DIR / "osmnx_logs"
     osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
-
-    parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
-    parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
-    args = parser.parse_args()
-    args.county_no_spaces = args.county.replace(" ","") # remove spaces
 
     # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.info.log"
     # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.debug.log"
@@ -1341,7 +1344,7 @@ if __name__ == "__main__":
         
             # Get bounding box from shapefile
             # If this is cached, it takes about 3 minutes
-            bbox = get_county_bbox(COUNTY_SHAPEFILE)
+            bbox = get_county_bbox(BAY_AREA_COUNTIES)
             WranglerLogger.info(f"Using bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         
             # Use OSMnx to pull the network graph for the bounding box
@@ -1492,7 +1495,9 @@ if __name__ == "__main__":
                     drop_transit_agency(gtfs_model, agency_id=agency_id)
    
 
-        county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
+        
+        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         if (args.county != "Bay Area"):
             # filter to the given county
             county_gdf = county_gdf.loc[county_gdf['NAME10'] == args.county]
