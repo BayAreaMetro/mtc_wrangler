@@ -53,6 +53,7 @@ import pathlib
 import pickle
 import pprint
 import statistics
+import sys
 from typing import Any, Optional, Tuple, Union
 
 import networkx
@@ -62,7 +63,6 @@ import pandas as pd
 import geopandas as gpd
 import pygris
 
-import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
@@ -79,7 +79,6 @@ if USERNAME=="lmz":
     INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-09").resolve()
     OUTPUT_DIR = pathlib.Path("../../output_from_OSM").resolve()
 
-ROADWAY_OUTPUT_FORMATS = ['parquet','geojson']
 
 # Map county names to county network node start based on
 # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
@@ -943,13 +942,15 @@ def standardize_and_write(
                 county: Assigned county name
     
     Side Effects:
-        Writes multiple files to OUTPUT_DIR:
+        Writes multiple files to OUTPUT_DIR (depending on output formats):
             - {prefix}{county}_links.hyper: Tableau Hyper format for visualization
             - {prefix}{county}_nodes.hyper: Tableau Hyper format for visualization
             - {prefix}{county}_links.parquet: Parquet format for analysis
             - {prefix}{county}_nodes.parquet: Parquet format for analysis
             - {prefix}{county}_links.gpkg: GeoPackage format for GIS
             - {prefix}{county}_nodes.gpkg: GeoPackage format for GIS
+            - {prefix}{county}_links.geojson: GEOJSON format for GIS
+            - {prefix}{county}_nodes.geojson: GEOJSON format for GIS
     
     Notes:
         - Multi-county links assigned to county with longest intersection
@@ -1201,20 +1202,23 @@ def standardize_and_write(
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        links_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
-        f"{county_no_spaces}_links"
-    )
+    # If hyper format is specified, write to tableau hyper file
+    if 'hyper' in OUTPUT_FORMAT:
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            links_gdf, 
+            OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
+            f"{county_no_spaces}_links"
+        )
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        nodes_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
-        f"{county_no_spaces}_nodes"
-    )
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            nodes_gdf, 
+            OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
+            f"{county_no_spaces}_nodes"
+        )
 
     # write to parquet -- this requires simpler column types
-
+    # Outputs depending on specified OUTPUT_FORMAT
+    
     # Subset the links columns and convert name, ref to strings
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
@@ -1225,13 +1229,19 @@ def standardize_and_write(
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
     parquet_links_gdf['ref'] = parquet_links_gdf['ref'].astype(str)
-
-    links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
-    parquet_links_gdf.to_parquet(links_parquet_file)
-    WranglerLogger.info(f"Wrote {links_parquet_file}")
-    links_gpkg_file = pathlib.Path(str(links_parquet_file).replace("parquet","gpkg"))
-    parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
-    WranglerLogger.info(f"Wrote {links_gpkg_file}")
+    
+    if 'parquet' in OUTPUT_FORMAT:
+        links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
+        parquet_links_gdf.to_parquet(links_parquet_file)
+        WranglerLogger.info(f"Wrote {links_parquet_file}")
+    if 'gpkg' in OUTPUT_FORMAT:
+        links_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.gpkg"
+        parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
+        WranglerLogger.info(f"Wrote {links_gpkg_file}")
+    if 'geojson' in OUTPUT_FORMAT:
+        links_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.geojson"
+        parquet_links_gdf.to_file(links_geojson_file, driver='GeoJSON')
+        WranglerLogger.info(f"Wrote {links_geojson_file}")
 
     # Subset the nodes columns
     WranglerLogger.debug(f"nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
@@ -1241,12 +1251,18 @@ def standardize_and_write(
     parquet_nodes_gdf = nodes_gdf[nodes_non_list_cols].copy()
     parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
 
-    nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
-    parquet_nodes_gdf.to_parquet(nodes_parquet_file)
-    WranglerLogger.info(f"Wrote {nodes_parquet_file}")
-    nodes_gpkg_file = pathlib.Path(str(nodes_parquet_file).replace("parquet","gpkg"))
-    parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
-    WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
+    if 'parquet' in OUTPUT_FORMAT:
+        nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
+        parquet_nodes_gdf.to_parquet(nodes_parquet_file)
+        WranglerLogger.info(f"Wrote {nodes_parquet_file}")
+    if 'gpkg' in OUTPUT_FORMAT:
+        nodes_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.gpkg"
+        parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
+        WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
+    if 'geojson' in OUTPUT_FORMAT:
+        nodes_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.geojson"
+        parquet_nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
+        WranglerLogger.info(f"Wrote {nodes_geojson_file}")
 
     return (links_gdf, nodes_gdf)
 
@@ -1296,6 +1312,7 @@ if __name__ == "__main__":
     parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
     parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
     parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
+    parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
     OUTPUT_DIR = args.output_dir
@@ -1323,6 +1340,19 @@ if __name__ == "__main__":
     # For now, doing drive as we'll add handle transit and walk/bike separately
     # Aug 24: switch to all because Market Street bus-only links are missing
     OSM_network_type = "all"
+    
+    # Formatting output and ensuring if hyper is selected, there is another format
+    OUTPUT_FORMAT = args.output_format
+    ROADWAY_OUTPUT_FORMATS = args.output_format
+    if 'hyper' in OUTPUT_FORMAT: 
+        import tableau_utils                   # only import if needed
+        ROADWAY_OUTPUT_FORMATS.remove('hyper') # hyper is only for tableau viz
+    
+    if len(ROADWAY_OUTPUT_FORMATS)==0: 
+        WranglerLogger.info("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'. ")
+        sys.exit()
+
+
 
     # Skip steps if files are present: Read the simplified network graph rather than creating it from OSM
     g = None
@@ -1557,30 +1587,62 @@ if __name__ == "__main__":
 
         if hasattr(e,'bus_stop_links_gdf'):
             WranglerLogger.debug(f"bus_stop_links_gdf type={type(e.bus_stop_links_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stop_links_gdf,
-                OUTPUT_DIR / f"bus_stop_links.hyper",
-                "bus_stop_links_gdf"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
-        
+            if 'hyper' in OUTPUT_FORMAT:
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.bus_stop_links_gdf,
+                    OUTPUT_DIR / f"bus_stop_links.hyper",
+                    "bus_stop_links_gdf"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_parquet(OUTPUT_DIR / f'bus_stop_links.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.geojson'}")
+
         if hasattr(e, "bus_stops_gdf"):
-            WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stops_gdf,
-                OUTPUT_DIR / f"bus_stops.hyper",
-                "bus_stops_gdf"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
+            if 'hyper' in OUTPUT_FORMAT:
+                WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.bus_stops_gdf,
+                    OUTPUT_DIR / f"bus_stops.hyper",
+                    "bus_stops_gdf"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_parquet(OUTPUT_DIR / f'bus_stop.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.geojson'}")
+
         
         if hasattr(e, "no_bus_path_gdf"):
-            WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.no_bus_path_gdf,
-                OUTPUT_DIR / f"no_bus_path.hyper",
-                "no_bus_path"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
+            if 'hyper' in OUTPUT_FORMAT:
+                WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.no_bus_path_gdf,
+                    OUTPUT_DIR / f"no_bus_path.hyper",
+                    "no_bus_path"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_parquet(OUTPUT_DIR / f'no_bus_path.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.geojson'}")
+
         raise(e)
 
     # write roadway network again because now it has the transit
