@@ -48,7 +48,6 @@ Example:
 USAGE = __doc__
 import argparse
 import datetime
-import getpass
 import pathlib
 import pickle
 import pprint
@@ -73,11 +72,6 @@ from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-USERNAME = getpass.getuser()
-if USERNAME=="lmz":
-    COUNTY_SHAPEFILE = pathlib.Path("../../tl_2010_06_county10/tl_2010_06_county10_9CountyBayArea.shp").resolve()
-    INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-09").resolve()
-    OUTPUT_DIR = pathlib.Path("../../output_from_OSM").resolve()
 
 
 # Map county names to county network node start based on
@@ -1315,7 +1309,7 @@ if __name__ == "__main__":
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
-    OUTPUT_DIR = args.output_dir
+    OUTPUT_DIR = args.output_dir.resolve()
     INPUT_2023GTFS = args.input_gtfs
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1460,7 +1454,8 @@ if __name__ == "__main__":
         roadway_network = network_wrangler.load_roadway_from_dataframes(
             links_df=links_gdf,
             nodes_df=nodes_gdf,
-            shapes_df=links_gdf
+            shapes_df=links_gdf,
+            filter_to_nodes=True,
         )
         WranglerLogger.info(f"Created RoadwayNetwork")
         WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
@@ -1504,7 +1499,9 @@ if __name__ == "__main__":
         WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
         # make service_id a string
         calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-        service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+        service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+        # Convert DataFrame to list for the updated load_feed_from_path function
+        service_ids = service_ids_df['service_id'].tolist()
         WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
 
         # Read a GTFS network (not wrangler_flavored)
@@ -1648,7 +1645,7 @@ if __name__ == "__main__":
     # write roadway network again because now it has the transit
     roadway_net_file = f"5_roadway_network_inc_transit_{args.county_no_spaces}"
     for roadway_format in ROADWAY_OUTPUT_FORMATS:
-        WranglerLogger.info("Writing roadway network with transit links to {roadway_format} files...")
+        WranglerLogger.info(f"Writing roadway network with transit links to {roadway_format} files...")
         try:
             write_roadway(
                 roadway_network, 

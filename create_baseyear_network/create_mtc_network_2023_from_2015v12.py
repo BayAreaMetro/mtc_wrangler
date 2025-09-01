@@ -692,7 +692,9 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
     # make service_id a string
     calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-    service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+    service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+    # Convert DataFrame to list for the updated load_feed_from_path function
+    service_ids = service_ids_df['service_id'].tolist()
     WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
 
     # Read a GTFS network (not wrangler_flavored)
@@ -708,7 +710,7 @@ if __name__ == "__main__":
     filter_transit_by_boundary(
       gtfs_model,
       COUNTY_SHAPEFILE, 
-      partially_include_route_type_action={2:'truncate'})
+      partially_include_route_type_action={RouteType.RAIL:'truncate'})
     WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
     # New stations which opened between 2015 and 2023
