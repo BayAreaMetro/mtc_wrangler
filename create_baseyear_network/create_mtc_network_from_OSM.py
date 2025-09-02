@@ -61,6 +61,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import pygris
+import shapely.geometry
 
 import network_wrangler
 from network_wrangler import WranglerLogger
@@ -69,7 +70,8 @@ from network_wrangler.roadway.io import load_roadway_from_dataframes, write_road
 from network_wrangler.transit.io import load_feed_from_path, write_transit, load_transit
 from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
-  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
+  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
+from network_wrangler.transit.validate import shape_links_without_road_links
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -174,6 +176,7 @@ HIGHWAY_HIERARCHY = [
     'secondary_link', # connects secondary to tertiary
     'tertiary',       # connects minor streets to major roads
     'tertiary_link',  # typically at-grade turning lane
+    'busway',         # bus-only link
     'unclassified',   # minor public roads
     'residential',    # residential street
     'living_street',  # pedestrian-focused residential
@@ -555,6 +558,9 @@ def standardize_lanes_value(
         highway_lanes_mode = links_with_lanes.groupby('highway')['lanes'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.median())
         highway_lanes_mode = highway_lanes_mode.astype(int)
         highway_to_lanes = highway_lanes_mode.to_dict()
+        # override these since lanes are vehicle lanes
+        highway_to_lanes['cycleway'] = 0
+        highway_to_lanes['footway'] = 0
         
         WranglerLogger.debug(f"Highway to lanes mapping based on mode:\n{pprint.pformat(highway_to_lanes)}")
 
@@ -584,7 +590,6 @@ def standardize_lanes_value(
     else:
         WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
         highway_to_lanes = {}
-
 
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['lanes'].value_counts(dropna=False)}")
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
@@ -634,7 +639,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
             - bike_access: Boolean for bicycle access
             - walk_access: Boolean for pedestrian access
             - truck_access: Boolean for truck access
-            - bus_access: Boolean for bus access
+            - bus_only: Boolean for bus access
     
     Notes:
         - Processes highway values according to a hierarchy
@@ -649,7 +654,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     links_gdf['bike_access']  = True
     links_gdf['walk_access']  = True
     links_gdf['truck_access'] = True
-    links_gdf['bus_access']   = True
+    links_gdf['bus_only']     = True
 
     ################ non-auto ################
     # make steps an attribute
@@ -682,10 +687,10 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # includes cycleway => cycleway
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
 
-    # remove drive_access, truck_access, bus_access from non-auto links
+    # remove drive_access, truck_access, bus_only from non-auto links
     links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'drive_access'] = False
     links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'truck_access'] = False
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_access'] = False
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_only'] = False
     # restrict ped from bikes and vice versa
     links_gdf.loc[links_gdf.highway == 'footway',  'bike_access'] = False
     links_gdf.loc[links_gdf.highway == 'cycleway', 'walk_access'] = False
@@ -855,7 +860,7 @@ def handle_links_with_duplicate_A_B(
             WranglerLogger.debug(f"Updated lanes for {mask.sum()} links:\n{changes}")
             unduped_df.loc[mask, 'lanes'] = unduped_df.loc[mask, 'lanes_new']
         unduped_df = unduped_df.drop(columns=['lanes_new'])
-    
+
     # Drop temporary columns
     unduped_df = unduped_df.drop(columns=['highway_level', 'group_rank'])
     WranglerLogger.debug(f"Final unduped_df has {len(unduped_df)} links")
@@ -926,7 +931,8 @@ def standardize_and_write(
                 highway: Standardized road type
                 lanes: Number of general traffic lanes
                 buslanes: Number of bus-only lanes  
-                drive/bike/walk/truck/bus_access: Boolean access flags
+                bus_only: Boolean if the link is bus-only
+                drive/bike/walk/truck_access: Boolean access flags
                 model_link_id: Unique link identifier
                 shape_id: Link geometry identifier
                 county: Assigned county name
@@ -1178,7 +1184,7 @@ def standardize_and_write(
         WranglerLogger.debug(f"SUMMARY - LINKS:\n{links_gdf.describe()}")
 
     standardize_highway_value(links_gdf)
-    links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1000017,1000014))
+    links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
     links_gdf = handle_links_with_duplicate_A_B(links_gdf)
     # and distance
     links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
@@ -1217,7 +1223,7 @@ def standardize_and_write(
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
-        'drive_access','bike_access','walk_access','truck_access','bus_access',
+        'drive_access','bike_access','walk_access','truck_access','bus_only',
         'lanes','buslanes','length','distance','county','model_link_id','shape_id'
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
@@ -1337,10 +1343,12 @@ if __name__ == "__main__":
     
     # Formatting output and ensuring if hyper is selected, there is another format
     OUTPUT_FORMAT = args.output_format
-    ROADWAY_OUTPUT_FORMATS = args.output_format
+    ROADWAY_OUTPUT_FORMATS = OUTPUT_FORMAT.copy()
     if 'hyper' in OUTPUT_FORMAT: 
         import tableau_utils                   # only import if needed
         ROADWAY_OUTPUT_FORMATS.remove('hyper') # hyper is only for tableau viz
+    WranglerLogger.debug(f"OUTPUT_FORMAT={OUTPUT_FORMAT}")
+    WranglerLogger.debug(f"ROADWAY_OUTPUT_FORMATS={ROADWAY_OUTPUT_FORMATS}")
     
     if len(ROADWAY_OUTPUT_FORMATS)==0: 
         WranglerLogger.info("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'. ")
@@ -1397,7 +1405,7 @@ if __name__ == "__main__":
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
 
-        WranglerLogger.info(f"Calling smnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
+        WranglerLogger.info(f"Calling osmnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
         # If we do simplification, it must be access-based.
         # Drive links shouldn't be simplified to pedestrian links and vice versa
         #
@@ -1441,7 +1449,7 @@ if __name__ == "__main__":
         # Drop columns that we likely won't need anymore
         LINK_COLS = [
             'A', 'B', 'highway','name','ref','oneway','reversed','length','geometry',
-            'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_access',
+            'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
             'lanes', 'distance', 'county', 'model_link_id', 'shape_id'
         ]
         links_gdf = links_gdf[LINK_COLS]
@@ -1462,7 +1470,7 @@ if __name__ == "__main__":
 
         # Write the 2023 roadway network to ROADWAY_OUTPUT_FORMATS files
         for roadway_format in ROADWAY_OUTPUT_FORMATS:
-            WranglerLogger.info("Writing 2023 roadway network to {roadway_format} files...")
+            WranglerLogger.info(f"Writing 2023 roadway network to {roadway_format} files...")
             try:
                 write_roadway(
                     roadway_network, 
@@ -1482,7 +1490,7 @@ if __name__ == "__main__":
     gtfs_model_dir = OUTPUT_DIR / f"4_gtfs_model_{args.county_no_spaces}"
     if gtfs_model_dir.exists():
         try:
-            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False)
+            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
             WranglerLogger.info(f"Read gtfs_model from {gtfs_model_dir}")
         except Exception as e:
             WranglerLogger.debug(f"Failed to read gtfs_model from {gtfs_model_dir}")
@@ -1502,10 +1510,10 @@ if __name__ == "__main__":
         service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
         # Convert DataFrame to list for the updated load_feed_from_path function
         service_ids = service_ids_df['service_id'].tolist()
-        WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
+        WranglerLogger.debug(f"Filtering to {len(service_ids):,} service_ids")
 
         # Read a GTFS network (not wrangler_flavored)
-        gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
+        gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
         WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
         # drop some columns that are not required or useful
         gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
@@ -1572,8 +1580,10 @@ if __name__ == "__main__":
             default_frequency_for_onetime_route=180*60, # 180 minutes
             add_stations_and_links=True,
             trace_shape_ids=[
-                'SF:140:20230930', # powell-hyde cable car
-                'SF:2751:20230930' # 27 bus
+                # 'SF:140:20230930',  # powell-hyde cable car
+                # 'SF:2751:20230930', # 27 bus
+                'SF:60:20230930',    # LOWL bus line
+                'SF:19800:20230930', # F line LRT
             ]
         )
         WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
