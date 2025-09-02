@@ -273,6 +273,124 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
         return int(float(lane)) # float conversion first for values like 1.5 
     return lane
 
+def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
+    """Standardize the highway value in the links GeoDataFrame and set access permissions.
+
+    Standardized values - drive:
+    - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
+    - service          vehicle access to building, parking lot, etc. (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice)
+    - tertiary         connects minor streets to major roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary)
+    - tertiary_link    typically at-grade turning lane (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary_link)
+    - secondary        smaller highways, e.g. country roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary)
+    - secondary_link   connects secondary to tertiary, unclassified or other minor highway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary_link)
+    - primary          major arterial (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary)
+    - primary_link     connects primary to others (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary_link)
+    - motorway         freeways or expressways (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway)
+    - motorway_link    on- and off-ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway_link)
+    - trunk            highway, not quite motorway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk)
+    - trunk_link       highway ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk_link)
+    - unclassified     minor public roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dunclassified)
+    - track            minor land-access roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack)
+    - living_street    more pedestrian focused than residential, e.g. woonerf (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dliving_street)
+
+    Standardized values - non-auto (drive_access=False):
+    - path             typically non-auto (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpath)
+    - cycleway         separate way for cycling (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcycleway)
+    - pedestrian       designated for pedestrians (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpedestrian)
+                       -> converted to footway or path (if cycleway too)
+    - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
+    - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
+
+    Args:
+        links_gdf: Links GeoDataFrame from OSMnx with columns:
+            - highway: OSM highway type (str or list of str)
+            - Other OSM tags as columns
+    
+    Returns:
+        None (modifies links_gdf in place)
+    
+    Side Effects:
+        Adds the following columns to links_gdf:
+            - highway_orig: Original highway value prefixed with 'highway:'
+            - steps: Boolean indicating if there are stairs
+            - drive_access: Boolean for auto access
+            - bike_access: Boolean for bicycle access
+            - walk_access: Boolean for pedestrian access
+            - truck_access: Boolean for truck access
+            - bus_only: Boolean for bus access
+    
+    Notes:
+        - Processes highway values according to a hierarchy
+        - Converts lists to single values based on priority
+        - Sets appropriate access permissions for each facility type
+    """
+    # make a copy of highway: highway_orig
+    links_gdf['highway_orig'] = 'highway:' + links_gdf['highway'].astype(str)
+
+    # default all access to true
+    links_gdf['drive_access'] = True
+    links_gdf['bike_access']  = True
+    links_gdf['walk_access']  = True
+    links_gdf['truck_access'] = True
+    links_gdf['bus_only']     = True
+
+    ################ non-auto ################
+    # make steps an attribute
+    links_gdf['steps'] = False
+
+    # steps -> footway, steps=True
+    links_gdf.loc[links_gdf.highway == 'steps', 'steps'] = True
+    links_gdf.loc[links_gdf.highway == 'steps', 'highway'] = 'footway'
+
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'steps'  ] = True
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'highway'] = 'footway'
+
+    # includes path => path
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'path' in x), 'highway'] = 'path'
+
+    # includes footway or pedestrian *and* cycleway => path
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 
+                                          (('footway' in x) or ('pedestrian' in x)) and 
+                                          ('cycleway' in x)), 'highway'] = 'path'
+
+    # includes footway => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('footway' in x)), 'highway'] = 'footway'
+
+    # convert pedestrian to footway
+    links_gdf.loc[links_gdf.highway == 'pedestrian', 'highway'] = 'footway'
+
+    # includes pedestrian => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
+
+    # includes cycleway => cycleway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
+
+    # remove drive_access, truck_access, bus_only from non-auto links
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'drive_access'] = False
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'truck_access'] = False
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_only'] = False
+    # restrict ped from bikes and vice versa
+    links_gdf.loc[links_gdf.highway == 'footway',  'bike_access'] = False
+    links_gdf.loc[links_gdf.highway == 'cycleway', 'walk_access'] = False
+
+    ################ bus ################
+    # includes busway => busway
+    links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and ('busway' in x)), 'highway'] = 'busway'
+    # remove access for anything but buses
+    links_gdf.loc[links_gdf.highway == 'busway', 'drive_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'bike_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'walk_access'] = False
+
+    ################ auto ################
+
+    # go from highest to lowest and choose highest
+    for highway_type in HIGHWAY_HIERARCHY:
+        links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
+
+    WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
+    return
+
 def standardize_lanes_value(
         links_gdf: gpd.GeoDataFrame,
         trace_tuple: Optional[tuple[int, int]] = None
@@ -595,123 +713,42 @@ def standardize_lanes_value(
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     return links_gdf
 
-def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
-    """Standardize the highway value in the links GeoDataFrame and set access permissions.
-
-    Standardized values - drive:
-    - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
-    - service          vehicle access to building, parking lot, etc. (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice)
-    - tertiary         connects minor streets to major roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary)
-    - tertiary_link    typically at-grade turning lane (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary_link)
-    - secondary        smaller highways, e.g. country roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary)
-    - secondary_link   connects secondary to tertiary, unclassified or other minor highway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary_link)
-    - primary          major arterial (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary)
-    - primary_link     connects primary to others (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary_link)
-    - motorway         freeways or expressways (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway)
-    - motorway_link    on- and off-ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway_link)
-    - trunk            highway, not quite motorway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk)
-    - trunk_link       highway ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk_link)
-    - unclassified     minor public roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dunclassified)
-    - track            minor land-access roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack)
-    - living_street    more pedestrian focused than residential, e.g. woonerf (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dliving_street)
-
-    Standardized values - non-auto (drive_access=False):
-    - path             typically non-auto (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpath)
-    - cycleway         separate way for cycling (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcycleway)
-    - pedestrian       designated for pedestrians (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpedestrian)
-                       -> converted to footway or path (if cycleway too)
-    - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
-    - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
+def create_managed_lanes_fields(
+    links_gdf: gpd.GeoDataFrame
+):
+    """Converts buslanes to managed lanes per Wrangler format.
 
     Args:
-        links_gdf: Links GeoDataFrame from OSMnx with columns:
-            - highway: OSM highway type (str or list of str)
-            - Other OSM tags as columns
+        links_gdf: The links to be used to create a RoadwayNetwork
     
     Returns:
-        None (modifies links_gdf in place)
-    
-    Side Effects:
-        Adds the following columns to links_gdf:
-            - highway_orig: Original highway value prefixed with 'highway:'
-            - steps: Boolean indicating if there are stairs
-            - drive_access: Boolean for auto access
-            - bike_access: Boolean for bicycle access
-            - walk_access: Boolean for pedestrian access
-            - truck_access: Boolean for truck access
-            - bus_only: Boolean for bus access
-    
-    Notes:
-        - Processes highway values according to a hierarchy
-        - Converts lists to single values based on priority
-        - Sets appropriate access permissions for each facility type
+        Nothing; links_gdf is modified in place
     """
-    # make a copy of highway: highway_orig
-    links_gdf['highway_orig'] = 'highway:' + links_gdf['highway'].astype(str)
+    WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_gdf[['lanes','buslanes']].value_counts()}")
+    
+    # default - all access
+    links_gdf['access'] = 'any'
+    # this one is a bit odd, but I think parquet doesn't like the mixed types
+    links_gdf['ML_access'] = 'any'
+    links_gdf['ML_lanes'] = 0
 
-    # default all access to true
-    links_gdf['drive_access'] = True
-    links_gdf['bike_access']  = True
-    links_gdf['walk_access']  = True
-    links_gdf['truck_access'] = True
-    links_gdf['bus_only']     = True
+    # for buslanes & GP lanes both:
+    mask_both = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] > 0)
+    links_gdf.loc[mask_both, 'ML_access'] = 'bus'
+    links_gdf.loc[mask_both, 'ML_lanes'] = links_gdf.loc[mask_both, "buslanes"].values
 
-    ################ non-auto ################
-    # make steps an attribute
-    links_gdf['steps'] = False
+    # for buslanes only: 
+    mask_bus_only = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] == 0)
+    links_gdf.loc[mask_bus_only, 'access'] = 'bus'
+    links_gdf.loc[mask_bus_only, 'lanes'] = links_gdf.loc[mask_bus_only, "buslanes"].values
 
-    # steps -> footway, steps=True
-    links_gdf.loc[links_gdf.highway == 'steps', 'steps'] = True
-    links_gdf.loc[links_gdf.highway == 'steps', 'highway'] = 'footway'
+    WranglerLogger.debug(f"links_gdf['access'].value_counts(dropna=False):\n{links_gdf['access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_access'].value_counts(dropna=False):\n{links_gdf['ML_access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['lanes'].value_counts(dropna=False):\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_lanes'].value_counts(dropna=False):\n{links_gdf['ML_lanes'].value_counts(dropna=False)}")
 
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'steps'  ] = True
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'highway'] = 'footway'
-
-    # includes path => path
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'path' in x), 'highway'] = 'path'
-
-    # includes footway or pedestrian *and* cycleway => path
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 
-                                          (('footway' in x) or ('pedestrian' in x)) and 
-                                          ('cycleway' in x)), 'highway'] = 'path'
-
-    # includes footway => footway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('footway' in x)), 'highway'] = 'footway'
-
-    # convert pedestrian to footway
-    links_gdf.loc[links_gdf.highway == 'pedestrian', 'highway'] = 'footway'
-
-    # includes pedestrian => footway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
-
-    # includes cycleway => cycleway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
-
-    # remove drive_access, truck_access, bus_only from non-auto links
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'drive_access'] = False
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'truck_access'] = False
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_only'] = False
-    # restrict ped from bikes and vice versa
-    links_gdf.loc[links_gdf.highway == 'footway',  'bike_access'] = False
-    links_gdf.loc[links_gdf.highway == 'cycleway', 'walk_access'] = False
-
-    ################ bus ################
-    # includes busway => busway
-    links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and ('busway' in x)), 'highway'] = 'busway'
-    # remove access for anything but buses
-    links_gdf.loc[links_gdf.highway == 'busway', 'drive_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'bike_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'walk_access'] = False
-
-    ################ auto ################
-
-    # go from highest to lowest and choose highest
-    for highway_type in HIGHWAY_HIERARCHY:
-        links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
-
-    WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
-    return
+    # drop buslanes column
+    links_gdf.drop(columns=['buslanes'], inplace=True)
 
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
     """
@@ -1443,14 +1480,19 @@ if __name__ == "__main__":
         # Standardize network graph and create roadway network dataframes
         (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"3_simplified_")
 
+        # Create managed lanes fields: access, ML_access, ML_lanes, etc
+        # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
+        create_managed_lanes_fields(links_gdf)
+
         WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
         WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
 
         # Drop columns that we likely won't need anymore
+        # Keep Wrangler columns: 
         LINK_COLS = [
             'A', 'B', 'highway','name','ref','oneway','reversed','length','geometry',
-            'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-            'lanes', 'distance', 'county', 'model_link_id', 'shape_id'
+            'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
+            'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id'
         ]
         links_gdf = links_gdf[LINK_COLS]
         NODE_COLS = [
@@ -1685,17 +1727,34 @@ if __name__ == "__main__":
     transit_network = load_transit(feed=feed)
     WranglerLogger.info(f"Created transit_network:\n{transit_network}")
 
+    shape_link_wo_road_df = shape_links_without_road_links(feed.shapes, roadway_network.links_df)
+    WranglerLogger.debug(f"shape_link_wo_road_df len={len(shape_link_wo_road_df)} type={type(shape_link_wo_road_df)}")
+    WranglerLogger.debug(f"shape_link_wo_road_df:\n{shape_link_wo_road_df}")
+
+    shape_link_wo_road_df['geometry'] = shape_link_wo_road_df.apply(
+        lambda row: shapely.geometry.LineString([row["geometry_A"], row["geometry_B"]]),
+        axis=1
+    )
+    shape_link_wo_road_gdf = gpd.GeoDataFrame(shape_link_wo_road_df, crs=LAT_LON_CRS)
+    tableau_utils.write_geodataframe_as_tableau_hyper(
+        shape_link_wo_road_gdf, 
+        OUTPUT_DIR / "shape_link_wo_road.hyper",
+        "shape_link_wo_road"
+    )
+
+    raise
+
     # finally, create a scenario
-    # my_scenario = network_wrangler.scenario.create_scenario(
-    #     base_year_scenario = {
-    #         "road_net": roadway_network,
-    #         "transit_net": transit_network,
-    #         "applied_projects": [],
-    #         "conflicts": {}
-    #     },
-    # )
+    my_scenario = network_wrangler.scenario.create_scenario(
+        base_scenario = {
+            "road_net": roadway_network,
+            "transit_net": transit_network,
+            "applied_projects": [],
+            "conflicts": {}
+        },
+    )
     # write it to disk
-    # scenario_dir = OUTPUT_DIR / "wrangler_scenario"
-    # scenario_dir.mkdir(exist_ok=True)
-    # my_scenario.write(path=scenario_dir )
-    # WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
+    scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
+    scenario_dir.mkdir(exist_ok=True)
+    my_scenario.write(path=scenario_dir )
+    WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
