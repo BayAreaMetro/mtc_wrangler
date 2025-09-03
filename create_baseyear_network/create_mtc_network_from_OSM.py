@@ -581,10 +581,10 @@ def standardize_lanes_value(
     links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes:both_ways']
 
     # since lanes is for both directions, divide by 2 if not one way (hmm... what about when it goes to zero?)
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = links_gdf_wide['lanes_orig']
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = links_gdf_wide['lanes_orig']
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
 
     # if it got set to 0, make it 1
     links_gdf_wide.loc[ (links_gdf_wide['lanes_orig']==1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = 1
