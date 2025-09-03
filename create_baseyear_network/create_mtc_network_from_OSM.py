@@ -1500,6 +1500,25 @@ if __name__ == "__main__":
         ]
         nodes_gdf = nodes_gdf[NODE_COLS]
 
+        # hack: drop these links because they're footway links that prevent the rail link from being created
+        # in add_stations_and_links_to_roadway_network()
+        LINKS_TO_DELETE = [
+            { 'A': 1005021, 'B': 1005347 },
+            { 'A': 1008236, 'B': 1008230 }
+        ]
+        links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
+        links_gdf = links_gdf.merge(
+            right=links_to_delete_df,
+            how='left',
+            validate='one_to_one',
+            indicator=True
+        )
+        WranglerLogger.debug(f"Hack: Deleting the following links:\n{links_gdf.loc[ links_gdf._merge == 'both']}")
+        len_links_gdf = len(links_gdf)
+        links_gdf = links_gdf.loc[ links_gdf._merge == 'left_only' ]
+        links_gdf.drop(columns=['_merge'], inplace=True)
+        assert len(links_gdf) == len_links_gdf - len(LINKS_TO_DELETE)
+
         # create roadway network
         roadway_network = network_wrangler.load_roadway_from_dataframes(
             links_df=links_gdf,
@@ -1727,23 +1746,6 @@ if __name__ == "__main__":
     transit_network = load_transit(feed=feed)
     WranglerLogger.info(f"Created transit_network:\n{transit_network}")
 
-    shape_link_wo_road_df = shape_links_without_road_links(feed.shapes, roadway_network.links_df)
-    WranglerLogger.debug(f"shape_link_wo_road_df len={len(shape_link_wo_road_df)} type={type(shape_link_wo_road_df)}")
-    WranglerLogger.debug(f"shape_link_wo_road_df:\n{shape_link_wo_road_df}")
-
-    shape_link_wo_road_df['geometry'] = shape_link_wo_road_df.apply(
-        lambda row: shapely.geometry.LineString([row["geometry_A"], row["geometry_B"]]),
-        axis=1
-    )
-    shape_link_wo_road_gdf = gpd.GeoDataFrame(shape_link_wo_road_df, crs=LAT_LON_CRS)
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        shape_link_wo_road_gdf, 
-        OUTPUT_DIR / "shape_link_wo_road.hyper",
-        "shape_link_wo_road"
-    )
-
-    raise
-
     # finally, create a scenario
     my_scenario = network_wrangler.scenario.create_scenario(
         base_scenario = {
@@ -1756,5 +1758,5 @@ if __name__ == "__main__":
     # write it to disk
     scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
     scenario_dir.mkdir(exist_ok=True)
-    my_scenario.write(path=scenario_dir )
+    my_scenario.write(path=scenario_dir, name="mtc_2023")
     WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
