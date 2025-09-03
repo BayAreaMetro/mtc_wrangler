@@ -1490,27 +1490,26 @@ if __name__ == "__main__":
         # Drop columns that we likely won't need anymore
         # Keep Wrangler columns: 
         LINK_COLS = [
-            'A', 'B', 'highway','name','ref','oneway','reversed','length','geometry',
+            'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
             'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
             'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id'
         ]
         links_gdf = links_gdf[LINK_COLS]
         NODE_COLS = [
-            'osmid', 'X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
+            'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
         ]
         nodes_gdf = nodes_gdf[NODE_COLS]
 
         # hack: drop these links because they're footway links that prevent the rail link from being created
         # in add_stations_and_links_to_roadway_network()
         LINKS_TO_DELETE = [
-            { 'A': 1005021, 'B': 1005347 },
-            { 'A': 1008236, 'B': 1008230 }
+            { 'osm_link_id':'676691686', 'reversed':True },
+            { 'osm_link_id':'678238660', 'reversed':True }
         ]
         links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
         links_gdf = links_gdf.merge(
             right=links_to_delete_df,
             how='left',
-            validate='one_to_one',
             indicator=True
         )
         WranglerLogger.debug(f"Hack: Deleting the following links:\n{links_gdf.loc[ links_gdf._merge == 'both']}")
