@@ -727,9 +727,9 @@ def create_managed_lanes_fields(
     WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_gdf[['lanes','buslanes']].value_counts()}")
     
     # default - all access
-    links_gdf['access'] = 'any'
+    links_gdf['access'] = None
     # this one is a bit odd, but I think parquet doesn't like the mixed types
-    links_gdf['ML_access'] = 'any'
+    links_gdf['ML_access'] = None
     links_gdf['ML_lanes'] = 0
 
     # for buslanes & GP lanes both:
@@ -1755,6 +1755,7 @@ if __name__ == "__main__":
             "conflicts": {}
         },
     )
+    
     # write it to disk
     scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
     scenario_dir.mkdir(exist_ok=True)
