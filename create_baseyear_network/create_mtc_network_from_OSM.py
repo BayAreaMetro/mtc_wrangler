@@ -20,8 +20,9 @@ The script performs the following workflow:
 6. Creates transit stops and links on the roadway network
 7. Outputs final network files
 
-Tested in July 2025 with:
-  * network_wrangler v1.0-beta.3
+Tested in July-September 2025 with:
+  * BayArea network_wrangler fork: https://github.com/BayAreaMetro/network_wrangler
+    (pull request pending: https://github.com/network-wrangler/network_wrangler/pull/408)
   * OSMnx v1.9+
   * GTFS feed from 511 Bay Area (September 2023)
 
