@@ -20,8 +20,9 @@ The script performs the following workflow:
 6. Creates transit stops and links on the roadway network
 7. Outputs final network files
 
-Tested in July 2025 with:
-  * network_wrangler v1.0-beta.3
+Tested in July-September 2025 with:
+  * BayArea network_wrangler fork: https://github.com/BayAreaMetro/network_wrangler
+    (pull request pending: https://github.com/network-wrangler/network_wrangler/pull/408)
   * OSMnx v1.9+
   * GTFS feed from 511 Bay Area (September 2023)
 
@@ -48,11 +49,11 @@ Example:
 USAGE = __doc__
 import argparse
 import datetime
-import getpass
 import pathlib
 import pickle
 import pprint
 import statistics
+import sys
 from typing import Any, Optional, Tuple, Union
 
 import networkx
@@ -60,8 +61,9 @@ import osmnx
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import pygris
+import shapely.geometry
 
-import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
@@ -69,19 +71,11 @@ from network_wrangler.roadway.io import load_roadway_from_dataframes, write_road
 from network_wrangler.transit.io import load_feed_from_path, write_transit, load_transit
 from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
-  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
+  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
+from network_wrangler.transit.validate import shape_links_without_road_links
 
-COUNTY_SHAPEFILE = pathlib.Path("M:\\Data\\Census\\Geography\\tl_2010_06_county10\\tl_2010_06_county10_9CountyBayArea.shp")
-INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-09")
-OUTPUT_DIR = pathlib.Path("M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM")
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-USERNAME = getpass.getuser()
-if USERNAME=="lmz":
-    COUNTY_SHAPEFILE = pathlib.Path("../../tl_2010_06_county10/tl_2010_06_county10_9CountyBayArea.shp").resolve()
-    INPUT_2023GTFS = pathlib.Path("../../511gtfs_2023-09").resolve()
-    OUTPUT_DIR = pathlib.Path("../../output_from_OSM").resolve()
 
-ROADWAY_OUTPUT_FORMATS = ['parquet','geojson']
 
 # Map county names to county network node start based on
 # https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
@@ -183,6 +177,7 @@ HIGHWAY_HIERARCHY = [
     'secondary_link', # connects secondary to tertiary
     'tertiary',       # connects minor streets to major roads
     'tertiary_link',  # typically at-grade turning lane
+    'busway',         # bus-only link
     'unclassified',   # minor public roads
     'residential',    # residential street
     'living_street',  # pedestrian-focused residential
@@ -190,9 +185,9 @@ HIGHWAY_HIERARCHY = [
     'track',          # minor land-access roads
 ]
 
-def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float, float]:
+def get_county_bbox(counties) -> tuple[float, float, float, float]:
     """
-    Read county shapefile and return bounding box in WGS84 coordinates.
+    Read in list of counties and return bounding box in WGS84 coordinates.
     
     This function reads the Bay Area county boundaries from a shapefile and
     calculates the total bounding box encompassing all counties. The coordinates
@@ -210,9 +205,10 @@ def get_county_bbox(county_shapefile: pathlib.Path) -> tuple[float, float, float
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    WranglerLogger.info(f"Reading county shapefile from {county_shapefile}")
-    county_gdf = gpd.read_file(county_shapefile)
-    
+    WranglerLogger.info(f"Reading county shapefile for Bay Area")
+    county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+    county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
+
     # Get the total bounds (bounding box) of all counties
     # Returns (minx, miny, maxx, maxy)
     bbox = county_gdf.total_bounds
@@ -277,6 +273,124 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
     elif isinstance(lane, str):
         return int(float(lane)) # float conversion first for values like 1.5 
     return lane
+
+def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
+    """Standardize the highway value in the links GeoDataFrame and set access permissions.
+
+    Standardized values - drive:
+    - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
+    - service          vehicle access to building, parking lot, etc. (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice)
+    - tertiary         connects minor streets to major roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary)
+    - tertiary_link    typically at-grade turning lane (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary_link)
+    - secondary        smaller highways, e.g. country roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary)
+    - secondary_link   connects secondary to tertiary, unclassified or other minor highway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary_link)
+    - primary          major arterial (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary)
+    - primary_link     connects primary to others (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary_link)
+    - motorway         freeways or expressways (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway)
+    - motorway_link    on- and off-ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway_link)
+    - trunk            highway, not quite motorway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk)
+    - trunk_link       highway ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk_link)
+    - unclassified     minor public roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dunclassified)
+    - track            minor land-access roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack)
+    - living_street    more pedestrian focused than residential, e.g. woonerf (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dliving_street)
+
+    Standardized values - non-auto (drive_access=False):
+    - path             typically non-auto (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpath)
+    - cycleway         separate way for cycling (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcycleway)
+    - pedestrian       designated for pedestrians (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpedestrian)
+                       -> converted to footway or path (if cycleway too)
+    - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
+    - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
+
+    Args:
+        links_gdf: Links GeoDataFrame from OSMnx with columns:
+            - highway: OSM highway type (str or list of str)
+            - Other OSM tags as columns
+    
+    Returns:
+        None (modifies links_gdf in place)
+    
+    Side Effects:
+        Adds the following columns to links_gdf:
+            - highway_orig: Original highway value prefixed with 'highway:'
+            - steps: Boolean indicating if there are stairs
+            - drive_access: Boolean for auto access
+            - bike_access: Boolean for bicycle access
+            - walk_access: Boolean for pedestrian access
+            - truck_access: Boolean for truck access
+            - bus_only: Boolean for bus access
+    
+    Notes:
+        - Processes highway values according to a hierarchy
+        - Converts lists to single values based on priority
+        - Sets appropriate access permissions for each facility type
+    """
+    # make a copy of highway: highway_orig
+    links_gdf['highway_orig'] = 'highway:' + links_gdf['highway'].astype(str)
+
+    # default all access to true
+    links_gdf['drive_access'] = True
+    links_gdf['bike_access']  = True
+    links_gdf['walk_access']  = True
+    links_gdf['truck_access'] = True
+    links_gdf['bus_only']     = True
+
+    ################ non-auto ################
+    # make steps an attribute
+    links_gdf['steps'] = False
+
+    # steps -> footway, steps=True
+    links_gdf.loc[links_gdf.highway == 'steps', 'steps'] = True
+    links_gdf.loc[links_gdf.highway == 'steps', 'highway'] = 'footway'
+
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'steps'  ] = True
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'highway'] = 'footway'
+
+    # includes path => path
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'path' in x), 'highway'] = 'path'
+
+    # includes footway or pedestrian *and* cycleway => path
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 
+                                          (('footway' in x) or ('pedestrian' in x)) and 
+                                          ('cycleway' in x)), 'highway'] = 'path'
+
+    # includes footway => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('footway' in x)), 'highway'] = 'footway'
+
+    # convert pedestrian to footway
+    links_gdf.loc[links_gdf.highway == 'pedestrian', 'highway'] = 'footway'
+
+    # includes pedestrian => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
+
+    # includes cycleway => cycleway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
+
+    # remove drive_access, truck_access, bus_only from non-auto links
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'drive_access'] = False
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'truck_access'] = False
+    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_only'] = False
+    # restrict ped from bikes and vice versa
+    links_gdf.loc[links_gdf.highway == 'footway',  'bike_access'] = False
+    links_gdf.loc[links_gdf.highway == 'cycleway', 'walk_access'] = False
+
+    ################ bus ################
+    # includes busway => busway
+    links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and ('busway' in x)), 'highway'] = 'busway'
+    # remove access for anything but buses
+    links_gdf.loc[links_gdf.highway == 'busway', 'drive_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'bike_access'] = False
+    links_gdf.loc[links_gdf.highway == 'busway', 'walk_access'] = False
+
+    ################ auto ################
+
+    # go from highest to lowest and choose highest
+    for highway_type in HIGHWAY_HIERARCHY:
+        links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
+
+    WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
+    return
 
 def standardize_lanes_value(
         links_gdf: gpd.GeoDataFrame,
@@ -468,10 +582,10 @@ def standardize_lanes_value(
     links_gdf_wide.loc[ links_gdf_wide['lanes:both_ways' ].notna() & (links_gdf_wide['lanes_rev']==-1), 'lanes_rev'] = links_gdf_wide['lanes:both_ways']
 
     # since lanes is for both directions, divide by 2 if not one way (hmm... what about when it goes to zero?)
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = links_gdf_wide['lanes_orig']
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = links_gdf_wide['lanes_orig']
-    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes'    ]==-1) & (links_gdf_wide['oneway']==False), 'lanes'    ] = np.floor(0.5*links_gdf_wide['lanes_orig'])
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'lanes_rev'] = links_gdf_wide['lanes_orig']
+    links_gdf_wide.loc[ links_gdf_wide['lanes_orig'].notna() & (links_gdf_wide['lanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'lanes_rev'] = np.floor(0.5*links_gdf_wide['lanes_orig'])
 
     # if it got set to 0, make it 1
     links_gdf_wide.loc[ (links_gdf_wide['lanes_orig']==1) & (links_gdf_wide['oneway']==True ), 'lanes'    ] = 1
@@ -563,6 +677,9 @@ def standardize_lanes_value(
         highway_lanes_mode = links_with_lanes.groupby('highway')['lanes'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.median())
         highway_lanes_mode = highway_lanes_mode.astype(int)
         highway_to_lanes = highway_lanes_mode.to_dict()
+        # override these since lanes are vehicle lanes
+        highway_to_lanes['cycleway'] = 0
+        highway_to_lanes['footway'] = 0
         
         WranglerLogger.debug(f"Highway to lanes mapping based on mode:\n{pprint.pformat(highway_to_lanes)}")
 
@@ -593,128 +710,46 @@ def standardize_lanes_value(
         WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
         highway_to_lanes = {}
 
-
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['lanes'].value_counts(dropna=False)}")
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     return links_gdf
 
-def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
-    """Standardize the highway value in the links GeoDataFrame and set access permissions.
-
-    Standardized values - drive:
-    - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
-    - service          vehicle access to building, parking lot, etc. (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dservice)
-    - tertiary         connects minor streets to major roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary)
-    - tertiary_link    typically at-grade turning lane (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtertiary_link)
-    - secondary        smaller highways, e.g. country roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary)
-    - secondary_link   connects secondary to tertiary, unclassified or other minor highway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dsecondary_link)
-    - primary          major arterial (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary)
-    - primary_link     connects primary to others (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dprimary_link)
-    - motorway         freeways or expressways (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway)
-    - motorway_link    on- and off-ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dmotorway_link)
-    - trunk            highway, not quite motorway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk)
-    - trunk_link       highway ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk_link)
-    - unclassified     minor public roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dunclassified)
-    - track            minor land-access roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack)
-    - living_street    more pedestrian focused than residential, e.g. woonerf (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dliving_street)
-
-    Standardized values - non-auto (drive_access=False):
-    - path             typically non-auto (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpath)
-    - cycleway         separate way for cycling (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcycleway)
-    - pedestrian       designated for pedestrians (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpedestrian)
-                       -> converted to footway or path (if cycleway too)
-    - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
-    - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
+def create_managed_lanes_fields(
+    links_gdf: gpd.GeoDataFrame
+):
+    """Converts buslanes to managed lanes per Wrangler format.
 
     Args:
-        links_gdf: Links GeoDataFrame from OSMnx with columns:
-            - highway: OSM highway type (str or list of str)
-            - Other OSM tags as columns
+        links_gdf: The links to be used to create a RoadwayNetwork
     
     Returns:
-        None (modifies links_gdf in place)
-    
-    Side Effects:
-        Adds the following columns to links_gdf:
-            - highway_orig: Original highway value prefixed with 'highway:'
-            - steps: Boolean indicating if there are stairs
-            - drive_access: Boolean for auto access
-            - bike_access: Boolean for bicycle access
-            - walk_access: Boolean for pedestrian access
-            - truck_access: Boolean for truck access
-            - bus_access: Boolean for bus access
-    
-    Notes:
-        - Processes highway values according to a hierarchy
-        - Converts lists to single values based on priority
-        - Sets appropriate access permissions for each facility type
+        Nothing; links_gdf is modified in place
     """
-    # make a copy of highway: highway_orig
-    links_gdf['highway_orig'] = 'highway:' + links_gdf['highway'].astype(str)
+    WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_gdf[['lanes','buslanes']].value_counts()}")
+    
+    # default - all access
+    links_gdf['access'] = None
+    # this one is a bit odd, but I think parquet doesn't like the mixed types
+    links_gdf['ML_access'] = None
+    links_gdf['ML_lanes'] = 0
 
-    # default all access to true
-    links_gdf['drive_access'] = True
-    links_gdf['bike_access']  = True
-    links_gdf['walk_access']  = True
-    links_gdf['truck_access'] = True
-    links_gdf['bus_access']   = True
+    # for buslanes & GP lanes both:
+    mask_both = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] > 0)
+    links_gdf.loc[mask_both, 'ML_access'] = 'bus'
+    links_gdf.loc[mask_both, 'ML_lanes'] = links_gdf.loc[mask_both, "buslanes"].values
 
-    ################ non-auto ################
-    # make steps an attribute
-    links_gdf['steps'] = False
+    # for buslanes only: 
+    mask_bus_only = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] == 0)
+    links_gdf.loc[mask_bus_only, 'access'] = 'bus'
+    links_gdf.loc[mask_bus_only, 'lanes'] = links_gdf.loc[mask_bus_only, "buslanes"].values
 
-    # steps -> footway, steps=True
-    links_gdf.loc[links_gdf.highway == 'steps', 'steps'] = True
-    links_gdf.loc[links_gdf.highway == 'steps', 'highway'] = 'footway'
+    WranglerLogger.debug(f"links_gdf['access'].value_counts(dropna=False):\n{links_gdf['access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_access'].value_counts(dropna=False):\n{links_gdf['ML_access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['lanes'].value_counts(dropna=False):\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_lanes'].value_counts(dropna=False):\n{links_gdf['ML_lanes'].value_counts(dropna=False)}")
 
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'steps'  ] = True
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'highway'] = 'footway'
-
-    # includes path => path
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'path' in x), 'highway'] = 'path'
-
-    # includes footway or pedestrian *and* cycleway => path
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 
-                                          (('footway' in x) or ('pedestrian' in x)) and 
-                                          ('cycleway' in x)), 'highway'] = 'path'
-
-    # includes footway => footway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('footway' in x)), 'highway'] = 'footway'
-
-    # convert pedestrian to footway
-    links_gdf.loc[links_gdf.highway == 'pedestrian', 'highway'] = 'footway'
-
-    # includes pedestrian => footway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
-
-    # includes cycleway => cycleway
-    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
-
-    # remove drive_access, truck_access, bus_access from non-auto links
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'drive_access'] = False
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'truck_access'] = False
-    links_gdf.loc[links_gdf.highway.isin(['path','footway','cycleway']), 'bus_access'] = False
-    # restrict ped from bikes and vice versa
-    links_gdf.loc[links_gdf.highway == 'footway',  'bike_access'] = False
-    links_gdf.loc[links_gdf.highway == 'cycleway', 'walk_access'] = False
-
-    ################ bus ################
-    # includes busway => busway
-    links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and ('busway' in x)), 'highway'] = 'busway'
-    # remove access for anything but buses
-    links_gdf.loc[links_gdf.highway == 'busway', 'drive_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'bike_access'] = False
-    links_gdf.loc[links_gdf.highway == 'busway', 'walk_access'] = False
-
-    ################ auto ################
-
-    # go from highest to lowest and choose highest
-    for highway_type in HIGHWAY_HIERARCHY:
-        links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
-
-    WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
-    return
+    # drop buslanes column
+    links_gdf.drop(columns=['buslanes'], inplace=True)
 
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
     """
@@ -863,7 +898,7 @@ def handle_links_with_duplicate_A_B(
             WranglerLogger.debug(f"Updated lanes for {mask.sum()} links:\n{changes}")
             unduped_df.loc[mask, 'lanes'] = unduped_df.loc[mask, 'lanes_new']
         unduped_df = unduped_df.drop(columns=['lanes_new'])
-    
+
     # Drop temporary columns
     unduped_df = unduped_df.drop(columns=['highway_level', 'group_rank'])
     WranglerLogger.debug(f"Final unduped_df has {len(unduped_df)} links")
@@ -934,7 +969,8 @@ def standardize_and_write(
                 highway: Standardized road type
                 lanes: Number of general traffic lanes
                 buslanes: Number of bus-only lanes  
-                drive/bike/walk/truck/bus_access: Boolean access flags
+                bus_only: Boolean if the link is bus-only
+                drive/bike/walk/truck_access: Boolean access flags
                 model_link_id: Unique link identifier
                 shape_id: Link geometry identifier
                 county: Assigned county name
@@ -944,13 +980,15 @@ def standardize_and_write(
                 county: Assigned county name
     
     Side Effects:
-        Writes multiple files to OUTPUT_DIR:
+        Writes multiple files to OUTPUT_DIR (depending on output formats):
             - {prefix}{county}_links.hyper: Tableau Hyper format for visualization
             - {prefix}{county}_nodes.hyper: Tableau Hyper format for visualization
             - {prefix}{county}_links.parquet: Parquet format for analysis
             - {prefix}{county}_nodes.parquet: Parquet format for analysis
             - {prefix}{county}_links.gpkg: GeoPackage format for GIS
             - {prefix}{county}_nodes.gpkg: GeoPackage format for GIS
+            - {prefix}{county}_links.geojson: GEOJSON format for GIS
+            - {prefix}{county}_nodes.geojson: GEOJSON format for GIS
     
     Notes:
         - Multi-county links assigned to county with longest intersection
@@ -1007,7 +1045,8 @@ def standardize_and_write(
     if county == "Bay Area":
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
-        county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
+        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
         WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
                 
@@ -1183,7 +1222,7 @@ def standardize_and_write(
         WranglerLogger.debug(f"SUMMARY - LINKS:\n{links_gdf.describe()}")
 
     standardize_highway_value(links_gdf)
-    links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1000017,1000014))
+    links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
     links_gdf = handle_links_with_duplicate_A_B(links_gdf)
     # and distance
     links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
@@ -1201,37 +1240,46 @@ def standardize_and_write(
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        links_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
-        f"{county_no_spaces}_links"
-    )
+    # If hyper format is specified, write to tableau hyper file
+    if 'hyper' in OUTPUT_FORMAT:
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            links_gdf, 
+            OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
+            f"{county_no_spaces}_links"
+        )
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        nodes_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
-        f"{county_no_spaces}_nodes"
-    )
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            nodes_gdf, 
+            OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
+            f"{county_no_spaces}_nodes"
+        )
 
     # write to parquet -- this requires simpler column types
-
+    # Outputs depending on specified OUTPUT_FORMAT
+    
     # Subset the links columns and convert name, ref to strings
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
-        'drive_access','bike_access','walk_access','truck_access','bus_access',
+        'drive_access','bike_access','walk_access','truck_access','bus_only',
         'lanes','buslanes','length','distance','county','model_link_id','shape_id'
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
     parquet_links_gdf['ref'] = parquet_links_gdf['ref'].astype(str)
-
-    links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
-    parquet_links_gdf.to_parquet(links_parquet_file)
-    WranglerLogger.info(f"Wrote {links_parquet_file}")
-    links_gpkg_file = pathlib.Path(str(links_parquet_file).replace("parquet","gpkg"))
-    parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
-    WranglerLogger.info(f"Wrote {links_gpkg_file}")
+    
+    if 'parquet' in OUTPUT_FORMAT:
+        links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
+        parquet_links_gdf.to_parquet(links_parquet_file)
+        WranglerLogger.info(f"Wrote {links_parquet_file}")
+    if 'gpkg' in OUTPUT_FORMAT:
+        links_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.gpkg"
+        parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
+        WranglerLogger.info(f"Wrote {links_gpkg_file}")
+    if 'geojson' in OUTPUT_FORMAT:
+        links_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.geojson"
+        parquet_links_gdf.to_file(links_geojson_file, driver='GeoJSON')
+        WranglerLogger.info(f"Wrote {links_geojson_file}")
 
     # Subset the nodes columns
     WranglerLogger.debug(f"nodes_gdf.dtypes:\n{nodes_gdf.dtypes}")
@@ -1241,12 +1289,18 @@ def standardize_and_write(
     parquet_nodes_gdf = nodes_gdf[nodes_non_list_cols].copy()
     parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
 
-    nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
-    parquet_nodes_gdf.to_parquet(nodes_parquet_file)
-    WranglerLogger.info(f"Wrote {nodes_parquet_file}")
-    nodes_gpkg_file = pathlib.Path(str(nodes_parquet_file).replace("parquet","gpkg"))
-    parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
-    WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
+    if 'parquet' in OUTPUT_FORMAT:
+        nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
+        parquet_nodes_gdf.to_parquet(nodes_parquet_file)
+        WranglerLogger.info(f"Wrote {nodes_parquet_file}")
+    if 'gpkg' in OUTPUT_FORMAT:
+        nodes_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.gpkg"
+        parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
+        WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
+    if 'geojson' in OUTPUT_FORMAT:
+        nodes_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.geojson"
+        parquet_nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
+        WranglerLogger.info(f"Wrote {nodes_geojson_file}")
 
     return (links_gdf, nodes_gdf)
 
@@ -1292,18 +1346,22 @@ if __name__ == "__main__":
     # Elevate SettingWithCopyWarning to error
     pd.options.mode.chained_assignment = 'raise'
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
+    parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
+    parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
+    parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
+    parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
+    args = parser.parse_args()
+    args.county_no_spaces = args.county.replace(" ","") # remove spaces
+    OUTPUT_DIR = args.output_dir.resolve()
+    INPUT_2023GTFS = args.input_gtfs
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     osmnx.settings.use_cache = True
     osmnx.settings.cache_folder = OUTPUT_DIR / "osmnx_cache"
     osmnx.settings.log_file = True
     osmnx.settings.logs_folder = OUTPUT_DIR / "osmnx_logs"
     osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
-
-    parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
-    parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
-    args = parser.parse_args()
-    args.county_no_spaces = args.county.replace(" ","") # remove spaces
 
     # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.info.log"
     # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.debug.log"
@@ -1320,6 +1378,21 @@ if __name__ == "__main__":
     # For now, doing drive as we'll add handle transit and walk/bike separately
     # Aug 24: switch to all because Market Street bus-only links are missing
     OSM_network_type = "all"
+    
+    # Formatting output and ensuring if hyper is selected, there is another format
+    OUTPUT_FORMAT = args.output_format
+    ROADWAY_OUTPUT_FORMATS = OUTPUT_FORMAT.copy()
+    if 'hyper' in OUTPUT_FORMAT: 
+        import tableau_utils                   # only import if needed
+        ROADWAY_OUTPUT_FORMATS.remove('hyper') # hyper is only for tableau viz
+    WranglerLogger.debug(f"OUTPUT_FORMAT={OUTPUT_FORMAT}")
+    WranglerLogger.debug(f"ROADWAY_OUTPUT_FORMATS={ROADWAY_OUTPUT_FORMATS}")
+    
+    if len(ROADWAY_OUTPUT_FORMATS)==0: 
+        WranglerLogger.info("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'. ")
+        sys.exit()
+
+
 
     # Skip steps if files are present: Read the simplified network graph rather than creating it from OSM
     g = None
@@ -1341,7 +1414,7 @@ if __name__ == "__main__":
         
             # Get bounding box from shapefile
             # If this is cached, it takes about 3 minutes
-            bbox = get_county_bbox(COUNTY_SHAPEFILE)
+            bbox = get_county_bbox(BAY_AREA_COUNTIES)
             WranglerLogger.info(f"Using bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         
             # Use OSMnx to pull the network graph for the bounding box
@@ -1370,7 +1443,7 @@ if __name__ == "__main__":
         # Project to CRS https://epsg.io/2227 where length is feet
         g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
 
-        WranglerLogger.info(f"Calling smnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
+        WranglerLogger.info(f"Calling osmnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
         # If we do simplification, it must be access-based.
         # Drive links shouldn't be simplified to pedestrian links and vice versa
         #
@@ -1408,33 +1481,57 @@ if __name__ == "__main__":
         # Standardize network graph and create roadway network dataframes
         (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"3_simplified_")
 
+        # Create managed lanes fields: access, ML_access, ML_lanes, etc
+        # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
+        create_managed_lanes_fields(links_gdf)
+
         WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
         WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
 
         # Drop columns that we likely won't need anymore
+        # Keep Wrangler columns: 
         LINK_COLS = [
-            'A', 'B', 'highway','name','ref','oneway','reversed','length','geometry',
-            'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_access',
-            'lanes', 'distance', 'county', 'model_link_id', 'shape_id'
+            'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
+            'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
+            'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id'
         ]
         links_gdf = links_gdf[LINK_COLS]
         NODE_COLS = [
-            'osmid', 'X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
+            'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
         ]
         nodes_gdf = nodes_gdf[NODE_COLS]
+
+        # hack: drop these links because they're footway links that prevent the rail link from being created
+        # in add_stations_and_links_to_roadway_network()
+        LINKS_TO_DELETE = [
+            { 'osm_link_id':'676691686', 'reversed':True },
+            { 'osm_link_id':'678238660', 'reversed':True }
+        ]
+        links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
+        links_gdf = links_gdf.merge(
+            right=links_to_delete_df,
+            how='left',
+            indicator=True
+        )
+        WranglerLogger.debug(f"Hack: Deleting the following links:\n{links_gdf.loc[ links_gdf._merge == 'both']}")
+        len_links_gdf = len(links_gdf)
+        links_gdf = links_gdf.loc[ links_gdf._merge == 'left_only' ]
+        links_gdf.drop(columns=['_merge'], inplace=True)
+        assert len(links_gdf) == len_links_gdf - len(LINKS_TO_DELETE)
 
         # create roadway network
         roadway_network = network_wrangler.load_roadway_from_dataframes(
             links_df=links_gdf,
             nodes_df=nodes_gdf,
-            shapes_df=links_gdf
+            shapes_df=links_gdf,
+            filter_to_nodes=True,
         )
         WranglerLogger.info(f"Created RoadwayNetwork")
         WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
 
         # Write the 2023 roadway network to ROADWAY_OUTPUT_FORMATS files
         for roadway_format in ROADWAY_OUTPUT_FORMATS:
-            WranglerLogger.info("Writing 2023 roadway network to {roadway_format} files...")
+            WranglerLogger.info(f"Writing 2023 roadway network to {roadway_format} files...")
             try:
                 write_roadway(
                     roadway_network, 
@@ -1454,7 +1551,7 @@ if __name__ == "__main__":
     gtfs_model_dir = OUTPUT_DIR / f"4_gtfs_model_{args.county_no_spaces}"
     if gtfs_model_dir.exists():
         try:
-            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False)
+            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
             WranglerLogger.info(f"Read gtfs_model from {gtfs_model_dir}")
         except Exception as e:
             WranglerLogger.debug(f"Failed to read gtfs_model from {gtfs_model_dir}")
@@ -1471,11 +1568,13 @@ if __name__ == "__main__":
         WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
         # make service_id a string
         calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-        service_ids = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-        WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
+        service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+        # Convert DataFrame to list for the updated load_feed_from_path function
+        service_ids = service_ids_df['service_id'].tolist()
+        WranglerLogger.debug(f"Filtering to {len(service_ids):,} service_ids")
 
         # Read a GTFS network (not wrangler_flavored)
-        gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
+        gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
         WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
         # drop some columns that are not required or useful
         gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
@@ -1492,7 +1591,9 @@ if __name__ == "__main__":
                     drop_transit_agency(gtfs_model, agency_id=agency_id)
    
 
-        county_gdf = gpd.read_file(COUNTY_SHAPEFILE)
+        
+        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         if (args.county != "Bay Area"):
             # filter to the given county
             county_gdf = county_gdf.loc[county_gdf['NAME10'] == args.county]
@@ -1540,8 +1641,10 @@ if __name__ == "__main__":
             default_frequency_for_onetime_route=180*60, # 180 minutes
             add_stations_and_links=True,
             trace_shape_ids=[
-                'SF:140:20230930', # powell-hyde cable car
-                'SF:2751:20230930' # 27 bus
+                # 'SF:140:20230930',  # powell-hyde cable car
+                # 'SF:2751:20230930', # 27 bus
+                'SF:60:20230930',    # LOWL bus line
+                'SF:19800:20230930', # F line LRT
             ]
         )
         WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
@@ -1552,36 +1655,68 @@ if __name__ == "__main__":
 
         if hasattr(e,'bus_stop_links_gdf'):
             WranglerLogger.debug(f"bus_stop_links_gdf type={type(e.bus_stop_links_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stop_links_gdf,
-                OUTPUT_DIR / f"bus_stop_links.hyper",
-                "bus_stop_links_gdf"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
-        
+            if 'hyper' in OUTPUT_FORMAT:
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.bus_stop_links_gdf,
+                    OUTPUT_DIR / f"bus_stop_links.hyper",
+                    "bus_stop_links_gdf"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_parquet(OUTPUT_DIR / f'bus_stop_links.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.geojson'}")
+
         if hasattr(e, "bus_stops_gdf"):
-            WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stops_gdf,
-                OUTPUT_DIR / f"bus_stops.hyper",
-                "bus_stops_gdf"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
+            if 'hyper' in OUTPUT_FORMAT:
+                WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.bus_stops_gdf,
+                    OUTPUT_DIR / f"bus_stops.hyper",
+                    "bus_stops_gdf"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_parquet(OUTPUT_DIR / f'bus_stop.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.geojson'}")
+
         
         if hasattr(e, "no_bus_path_gdf"):
-            WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.no_bus_path_gdf,
-                OUTPUT_DIR / f"no_bus_path.hyper",
-                "no_bus_path"
-            )
-            WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
+            if 'hyper' in OUTPUT_FORMAT:
+                WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    e.no_bus_path_gdf,
+                    OUTPUT_DIR / f"no_bus_path.hyper",
+                    "no_bus_path"
+                )
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
+            elif 'parquet' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_parquet(OUTPUT_DIR / f'no_bus_path.parquet')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.parquet'}")
+            elif 'gpkg' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.gpkg', driver='GPKG')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.gpkg'}")
+            elif 'geojson' in OUTPUT_FORMAT:
+                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.geojson', driver='GEOJSON')
+                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.geojson'}")
+
         raise(e)
 
     # write roadway network again because now it has the transit
     roadway_net_file = f"5_roadway_network_inc_transit_{args.county_no_spaces}"
     for roadway_format in ROADWAY_OUTPUT_FORMATS:
-        WranglerLogger.info("Writing roadway network with transit links to {roadway_format} files...")
+        WranglerLogger.info(f"Writing roadway network with transit links to {roadway_format} files...")
         try:
             write_roadway(
                 roadway_network, 
@@ -1612,16 +1747,17 @@ if __name__ == "__main__":
     WranglerLogger.info(f"Created transit_network:\n{transit_network}")
 
     # finally, create a scenario
-    # my_scenario = network_wrangler.scenario.create_scenario(
-    #     base_year_scenario = {
-    #         "road_net": roadway_network,
-    #         "transit_net": transit_network,
-    #         "applied_projects": [],
-    #         "conflicts": {}
-    #     },
-    # )
+    my_scenario = network_wrangler.scenario.create_scenario(
+        base_scenario = {
+            "road_net": roadway_network,
+            "transit_net": transit_network,
+            "applied_projects": [],
+            "conflicts": {}
+        },
+    )
+    
     # write it to disk
-    # scenario_dir = OUTPUT_DIR / "wrangler_scenario"
-    # scenario_dir.mkdir(exist_ok=True)
-    # my_scenario.write(path=scenario_dir )
-    # WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
+    scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
+    scenario_dir.mkdir(exist_ok=True)
+    my_scenario.write(path=scenario_dir, name="mtc_2023")
+    WranglerLogger.info(f"Wrote scenario to {scenario_dir}")

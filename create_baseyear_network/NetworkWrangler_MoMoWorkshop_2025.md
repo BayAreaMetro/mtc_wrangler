@@ -36,13 +36,17 @@ conda activate network_wrangler
 
 # Install network-wrangler with visualization support
 # pip install network-wrangler[viz]
+# Ensure your current working directory is where you want the cloned directory
 git clone https://github.com/BayAreaMetro/network_wrangler.git network_wrangler
 # Install network_wrangler in editable mode
 cd network_wrangler
 pip install -e .
 
 # Install additional dependencies
-pip install scikit-learn tableauhyperapi
+pip install scikit-learn pygris
+
+# Install Tableau package if using Tableau for visualization
+pip install tableauhyperapi
 
 # Clone mtc_wrangler with script to run
 cd ..
@@ -87,7 +91,7 @@ OpenStreetMap → OSMnx → NetworkX Graph → Standardization → Network Wrang
 cd mtc_wrangler/create_baseyear_network/
 
 # Run for a single county
-python create_mtc_network_from_OSM.py "San Francisco"
+python create_mtc_network_from_OSM.py "San Francisco" {GTFS Transit Feed File Path}  {Output Directory} {Output Format}
 
 ```
 
@@ -226,7 +230,7 @@ write_transit(feed, feed_dir, overwrite=True)
 
 ## Output Files
 
-The script generates multiple file formats for different use cases:
+The script generates multiple file formats for different use cases. Output files formats are established when running the scrip. Roadway network can only be outputted as Parquet, GeoPackage, or GeoJSON:
 
 ### File Structure
 ```
