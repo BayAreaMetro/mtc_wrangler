@@ -139,4 +139,4 @@ def create_downtown_network_map(nw_gdf):
         location=[37.787589, -122.403542] # Hard coded for downtown links but could make dynamic to create for other areas of the city
     )
     m.save('downtown_sf_network_map.html')
-    return m
+    # return m
