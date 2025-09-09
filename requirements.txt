@@ -1,103 +1,67 @@
-annotated-types==0.7.0
-attrs==25.3.0
-branca
-certifi
-cffi
-charset-normalizer
-click==8.2.1
-click-plugins==1.1.1.2
-cligj==0.7.2
-colorama
-comm
-contourpy
-cycler
-debugpy
-decorator
-exceptiongroup
-executing
-fiona==1.10.1
+# Core Network Wrangler - using BayAreaMetro fork per install instructions
+git+https://github.com/BayAreaMetro/network_wrangler.git
+
+# Geospatial and network analysis
+osmnx>=2.0.0
+geopandas>=1.0.0
+networkx
+shapely
+fiona
+pyproj
 folium
-fonttools
-geographiclib==2.1
-geojson==3.2.0
-geopandas==1.0.1
-h2
-hpack
-hyperframe
-idna
-ijson==3.4.0
-importlib-metadata
+
+# Data manipulation and analysis
+pandas
+numpy
+pyarrow
+
+# Machine learning (from install instructions)
+scikit-learn
+
+# Census/geographic data (from install instructions) 
+pygris
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+# Jupyter notebook support
+jupyter
 ipykernel
 ipython
-jedi
-Jinja2
-joblib
-jsonref==1.1.0
-jsonschema==4.25.1
-jsonschema-specifications==2025.4.1
-jupyter-client
-jupyter-core
-kiwisolver
-mapclassify
-MarkupSafe
-matplotlib==3.10.5
-matplotlib-inline
-munkres==1.1.4
-mypy-extensions==1.1.0
-narwhals
-nest-asyncio
-git+https://github.com/BayAreaMetro/network_wrangler.git@e40967c52d053ad4fc3622dda8bf3f8c64f95d34
-networkx
-numpy
-osmnx==2.0.6
-packaging
-pandas
-pandera==0.26.1
-parso
-pickleshare
-pillow
-platformdirs
-plotly
-projectcard==0.3.3
-prompt-toolkit
-psutil
-pure-eval
-pyarrow==21.0.0
-pycparser
-pydantic==2.11.7
-pydantic-core==2.33.2
-Pygments
-pyogrio==0.11.1
-pyparsing
-pyproj==3.7.1
-python-dateutil
-pytz
-PyYAML==6.0.2
-pyzmq
-referencing==0.36.2
+
+# Additional utilities from your imports
+pydantic>=2.9.2,<2.11.0
+PyYAML
 requests
-rpds-py==0.27.1
-ruff==0.12.11
-scikit-learn
-scipy
-seaborn
-shapely==2.1.1
-six
-stack-data
-tableauhyperapi==0.0.23135
-tabulate==0.9.0
-threadpoolctl
-toml==0.10.2
-tornado
-traitlets
-typeguard==4.4.4
-typing-inspect==0.9.0
-typing-inspection==0.4.1
+click
+attrs
+jsonschema
+tabulate
+zstandard
+
+# Type hints and validation
 typing-extensions
-tzdata
-unicodedata2
-urllib3
-wcwidth
-xyzservices
-zipp
-zstandard==0.23.0
+
+# Development tools
+debugpy
+
+# Geographic projections and transformations
+geographiclib
+cartopy
+
+# File I/O
+openpyxl
+xlsxwriter
+
+# Parallel processing
+joblib
+
+# Statistical analysis
+scipy
+statsmodels
+
+# Progress bars and utilities
+tqdm
+psutil

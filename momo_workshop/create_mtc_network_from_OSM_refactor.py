@@ -61,7 +61,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 
-import tableau_utils
+# import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
@@ -1087,17 +1087,17 @@ def standardize_and_write(
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        links_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_links_momo.hyper", # Added the momo suffix so existing hyper files can be in use while writing
-        f"{county_no_spaces}_links"
-    )
+    # tableau_utils.write_geodataframe_as_tableau_hyper(
+    #     links_gdf, 
+    #     OUTPUT_DIR / f"{prefix}{county_no_spaces}_links_momo.hyper", # Added the momo suffix so existing hyper files can be in use while writing
+    #     f"{county_no_spaces}_links"
+    # )
 
-    tableau_utils.write_geodataframe_as_tableau_hyper(
-        nodes_gdf, 
-        OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes_momo.hyper", 
-        f"{county_no_spaces}_nodes"
-    )
+    # tableau_utils.write_geodataframe_as_tableau_hyper(
+    #     nodes_gdf, 
+    #     OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes_momo.hyper", 
+    #     f"{county_no_spaces}_nodes"
+    # )
 
     # write to parquet -- this requires simpler column types
 
@@ -1499,26 +1499,26 @@ def step6_create_transit_stops_and_links(gtfs_model, roadway_network, county: st
         print(f"Error creating transit stops and links: {e}")
         
         # Write debug outputs if available
-        if hasattr(e, 'bus_stop_links_gdf'):
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stop_links_gdf,
-                OUTPUT_DIR / f"bus_stop_links_momo.hyper",
-                "bus_stop_links_gdf"
-            )
+        # if hasattr(e, 'bus_stop_links_gdf'):
+        #     tableau_utils.write_geodataframe_as_tableau_hyper(
+        #         e.bus_stop_links_gdf,
+        #         OUTPUT_DIR / f"bus_stop_links_momo.hyper",
+        #         "bus_stop_links_gdf"
+        #     )
         
-        if hasattr(e, "bus_stops_gdf"):
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.bus_stops_gdf,
-                OUTPUT_DIR / f"bus_stops_momo.hyper",
-                "bus_stops_gdf"
-            )
+        # if hasattr(e, "bus_stops_gdf"):
+        #     tableau_utils.write_geodataframe_as_tableau_hyper(
+        #         e.bus_stops_gdf,
+        #         OUTPUT_DIR / f"bus_stops_momo.hyper",
+        #         "bus_stops_gdf"
+        #     )
         
-        if hasattr(e, "no_bus_path_gdf"):
-            tableau_utils.write_geodataframe_as_tableau_hyper(
-                e.no_bus_path_gdf,
-                OUTPUT_DIR / f"no_bus_path_momo.hyper",
-                "no_bus_path"
-            )
+        # if hasattr(e, "no_bus_path_gdf"):
+        #     tableau_utils.write_geodataframe_as_tableau_hyper(
+        #         e.no_bus_path_gdf,
+        #         OUTPUT_DIR / f"no_bus_path_momo.hyper",
+        #         "no_bus_path"
+        #     )
         
         raise e
 
