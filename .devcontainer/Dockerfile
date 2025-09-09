@@ -2,7 +2,7 @@
 FROM continuumio/miniconda3:latest
 
 # Set the working directory
-WORKDIR /workspace
+WORKDIR /workspaces/mtc_wrangler
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

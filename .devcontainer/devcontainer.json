@@ -50,6 +50,5 @@
   },
   "postCreateCommand": "conda activate network_wrangler && pip install -e .",
   "remoteUser": "vscode",
-  "workspaceFolder": "/workspace",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  "workspaceFolder": "/workspaces/mtc_wrangler"
 }
