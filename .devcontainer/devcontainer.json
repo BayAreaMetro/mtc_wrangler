@@ -3,20 +3,6 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {
-      "installZsh": true,
-      "installOhMyZsh": true,
-      "upgradePackages": false,
-      "username": "vscode",
-      "uid": "1000",
-      "gid": "1000"
-    },
-    "ghcr.io/devcontainers/features/git:1": {
-      "version": "os-provided",
-      "ppa": false
-    }
-  },
   "customizations": {
     "vscode": {
       "extensions": [
