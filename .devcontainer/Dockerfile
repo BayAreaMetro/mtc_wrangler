@@ -23,7 +23,7 @@ RUN groupadd --gid 1000 vscode \
     && chmod 0440 /etc/sudoers.d/vscode
 
 # Copy environment file
-COPY environment.yaml /tmp/environment.yaml
+COPY ../environment.yaml /tmp/environment.yaml
 
 # Create conda environment from environment.yaml
 RUN conda env create -f /tmp/environment.yaml
