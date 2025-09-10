@@ -1533,7 +1533,7 @@ def step2_simplify_network_topology(
     WranglerLogger.info(f"======= STEP 2: Simplify network topology for {county} =======")
     
     county_no_spaces = county.replace(" ", "")
-    simplified_graph_file = output_dir / f"1_graph_OSM_{county_no_spaces}_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
+    simplified_graph_file = output_dir / f"2_graph_OSM_{county_no_spaces}_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
     
     # Check for cached simplified graph
     if simplified_graph_file.exists():
