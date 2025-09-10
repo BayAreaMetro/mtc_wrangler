@@ -80,6 +80,15 @@ from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
 from network_wrangler.roadway.centroids import FitForCentroidConnection, add_centroid_nodes, add_centroid_connectors
 
+# Suppress FutureWarning about downcasting in fillna
+# The traceback shows this occurs in pandera/backends/pandas/container.py line 570
+# when pandera calls fillna() during DataFrame validation
+import warnings
+warnings.filterwarnings('ignore', 
+                       message='Downcasting object dtype arrays on .fillna',
+                       category=FutureWarning,
+                       module='pandera')
+
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
