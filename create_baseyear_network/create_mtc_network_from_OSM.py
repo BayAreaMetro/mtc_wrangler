@@ -1751,7 +1751,7 @@ def step5_prepare_gtfs_transit_data(
     WranglerLogger.info(f"======= STEP 5: Preparing GTFS transit data for {county} =======")
     
     county_no_spaces = county.replace(" ", "")
-    gtfs_model_dir = output_dir / f"4_gtfs_model_{county_no_spaces}"
+    gtfs_model_dir = output_dir / f"5_gtfs_model_{county_no_spaces}"
     
     # Check for cached GTFS model
     if gtfs_model_dir.exists():
