@@ -5,3 +5,5 @@
 *.log
 
 create_baseyear_network/validation_failure_cases.csv
+*.twbr
+create_baseyear_network/Notes_do_not_commit.md

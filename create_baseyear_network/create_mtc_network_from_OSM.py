@@ -52,6 +52,7 @@ import datetime
 import pathlib
 import pickle
 import pprint
+import requests
 import statistics
 import sys
 from typing import Any, Optional, Tuple, Union
@@ -72,7 +73,7 @@ from network_wrangler.transit.io import load_feed_from_path, write_transit, load
 from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
-from network_wrangler.transit.validate import shape_links_without_road_links
+from network_wrangler.roadway.centroids import FitForCentroidConnection, add_centroid_nodes, add_centroid_connectors
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -163,6 +164,9 @@ OSM_WAY_TAGS = {
     # active modes
     'sidewalk'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:sidewalk
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
+    'cycleway:both'      : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:both
+    'cycleway:left'      : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:left
+    'cycleway:right'     : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:right
 }
 
 # from biggest to smallest
@@ -186,16 +190,14 @@ HIGHWAY_HIERARCHY = [
 ]
 
 def get_county_bbox(counties) -> tuple[float, float, float, float]:
-    """
-    Read in list of counties and return bounding box in WGS84 coordinates.
+    """    
+    This function fetches TIGER county 2010 boundaries using pygris for the
+    givent California counties.
     
-    This function reads the Bay Area county boundaries from a shapefile and
-    calculates the total bounding box encompassing all counties. The coordinates
-    are converted to WGS84 (EPSG:4326) if needed for OSM data retrieval.
+    The coordinates are converted to WGS84 (EPSG:4326) if needed.
     
     Args:
-        county_shapefile: Path to the county shapefile containing Bay Area counties.
-                         Expected to have geometry in any valid CRS.
+        counties: list of California counties to include.
         
     Returns:
         tuple: Bounding box as (west, south, east, north) in decimal degrees.
@@ -205,7 +207,7 @@ def get_county_bbox(counties) -> tuple[float, float, float, float]:
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    WranglerLogger.info(f"Reading county shapefile for Bay Area")
+    WranglerLogger.info(f"Fetching California 2010 county shapes using pygris")
     county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
     county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
 
@@ -390,6 +392,46 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
 
     WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
+
+    ################ set drive_centroid_fit, walk_centroid_fit ################
+    # for centroid connectors, assess fit for centroid connectors based on highway value
+    centroid_dict = {"drive":{}, "walk":{}} # mode -> highway -> fitness
+    current_fit = FitForCentroidConnection.DO_NOT_USE # start with this for freeways
+    for highway in HIGHWAY_HIERARCHY:
+        # special values
+        if highway in ["busway","living_street","track"]:
+            centroid_dict["drive"][highway] = FitForCentroidConnection.DO_NOT_USE
+
+            if highway in ["busway"]:
+                centroid_dict["walk"][highway] = FitForCentroidConnection.DO_NOT_USE
+            else:
+                centroid_dict["walk"][highway] = FitForCentroidConnection.GOOD
+            continue
+
+        # higher in hierarchy is worse
+        # for now, walk and drive are the same
+        if highway == "primary":
+            current_fit = FitForCentroidConnection.OKAY
+        elif highway == "secondary":
+            current_fit = FitForCentroidConnection.GOOD
+        elif highway == "unclassified":
+            current_fit = FitForCentroidConnection.BEST
+        
+        # set it
+        centroid_dict["drive"][highway] = current_fit
+        centroid_dict["walk"][highway] = current_fit
+    
+    for highway in ["path","cycleway","footway"]:
+        centroid_dict["walk"][highway] = FitForCentroidConnection.BEST
+
+    for mode in centroid_dict.keys():
+        WranglerLogger.debug(f"centroid_dict[{mode}]:\n{pprint.pformat(centroid_dict[mode])}")
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf["highway"].map(centroid_dict[mode])
+        # fill na with Not ok
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf[f"{mode}_centroid_fit"].fillna(FitForCentroidConnection.DO_NOT_USE)
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf[f"{mode}_centroid_fit"].astype(int)
+        WranglerLogger.debug(f"{mode}_centroid_fit:\n{links_gdf[f'{mode}_centroid_fit'].value_counts(dropna=False)}")
+
     return
 
 def standardize_lanes_value(
@@ -1304,6 +1346,107 @@ def standardize_and_write(
 
     return (links_gdf, nodes_gdf)
 
+def get_travel_model_zones():
+    """Fetches travel model two zones -- MAZs and TAZs, and returns
+    GeoDataFrames with shapes and centroids.
+
+    Returns:
+       dictionary with keys MAZ and TAZ, and values as GeoDataFrame with
+       columns, MAZ (for MAZ only), TAZ, county, geometry, geometry_centroid
+
+    """
+    ZONES_DIR = OUTPUT_DIR / "mtc_zones"
+    ZONES_DIR.mkdir(exist_ok=True)
+
+    WranglerLogger.info(f"Looking for MTC zones files in {ZONES_DIR}")
+
+    ZONE_VERSION = "2_5"
+    BASE_URL = "https://github.com/BayAreaMetro/tm2py-utils/raw/refs/heads/main/tm2py_utils/inputs/maz_taz"
+    SHAPEFILE_FILETYPES = [".cpg",".dbf",".prj",".shp",".shx"]
+    gdfs = {}
+
+    # Fetch the maz/taz/county mapping
+    county_mapping_file = f"mazs_tazs_county_{ZONE_VERSION.replace('_','.')}.csv"
+    if (ZONES_DIR / county_mapping_file).exists() == False:
+        try:
+            url = f"{BASE_URL}/{county_mapping_file}"
+            WranglerLogger.debug(f"Fetching {url}")
+            response = requests.get(url)
+            response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+            with open(ZONES_DIR / county_mapping_file, "wb") as f:
+                f.write(response.content)
+            WranglerLogger.debug(f"File downloaded successfully to {ZONES_DIR / county_mapping_file}")
+        except requests.exceptions.RequestException as e:
+            WranglerLogger.fatal(f"Error downloading {url} with requests: {e}")
+            raise e
+        WranglerLogger.info(f"Succeeded downloading {ZONES_DIR / county_mapping_file}")
+    county_mapping_df = pd.read_csv(ZONES_DIR / county_mapping_file)
+    WranglerLogger.debug(f"Read {ZONES_DIR / county_mapping_file}")
+    WranglerLogger.debug(f"county_mapping_df:\n{county_mapping_df}")
+
+    # For each zone type, fetch the shapefile from GitHub to local dir if needed
+    # and then read it into the geodataframe
+    for zone_type in ["MAZ","TAZ"]:
+        shapefile = f"{zone_type}s_TM2_{ZONE_VERSION}.shp"
+
+        # fetch it if it doesn't exist
+        if (ZONES_DIR / shapefile).exists() == False:
+            for filetype in SHAPEFILE_FILETYPES:
+                try:
+                    shapefile_file = f"{shapefile}".replace(".shp",filetype)
+                    url = f"{BASE_URL}/shapefiles/{shapefile_file}"
+                    WranglerLogger.debug(f"Fetching {url}")
+                    response = requests.get(url)
+                    response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+                    with open(ZONES_DIR / shapefile_file, "wb") as f:
+                        f.write(response.content)
+                    WranglerLogger.debug(f"File downloaded successfully to {ZONES_DIR / shapefile_file}")
+                except requests.exceptions.RequestException as e:
+                    WranglerLogger.fatal(f"Error downloading {url} with requests: {e}")
+                    raise e
+            WranglerLogger.info(f"Succeeded downloading {ZONES_DIR / shapefile}")
+        
+        # now read it
+        gdfs[zone_type] = gpd.read_file(ZONES_DIR / shapefile)
+        WranglerLogger.info(f"Read {zone_type} shapefile from {ZONES_DIR / shapefile}")
+
+        # create centroid geometry
+        gdfs[zone_type]["geometry_centroid"] = gdfs[zone_type].apply(
+            lambda row: shapely.geometry.Point(
+                [row[f"{zone_type}_X"],
+                 row[f"{zone_type}_Y"]]
+            ),
+            axis=1
+        )
+        # rename maz to MAZ and/or taz to TAZ
+        gdfs[zone_type].rename(columns={zone_type.lower() : zone_type}, inplace=True)
+        if zone_type == "MAZ":
+            gdfs[zone_type].rename(columns={"taz": "TAZ"}, inplace=True)
+
+        # join to county_mapping_df
+        gdfs[zone_type] = pd.merge(
+            gdfs[zone_type],
+            right=county_mapping_df[[zone_type, "county_name"]].drop_duplicates(),
+            how='left',
+            validate='one_to_one',
+            indicator=True
+        )
+        assert (gdfs[zone_type]['_merge'] == 'both').all(), "Not all merge indicators are 'both'"
+
+        # keep only relevant columns
+        keep_cols=[zone_type, "county_name", "geometry", "geometry_centroid"]
+        if zone_type == "MAZ":
+            keep_cols.insert(1, "TAZ")
+        gdfs[zone_type] = gdfs[zone_type][keep_cols]
+
+        # rename county_name to county
+        gdfs[zone_type].rename(columns={"county_name":"county"}, inplace=True)
+
+        WranglerLogger.debug(f"gdfs[{zone_type}] type={type(gdfs[zone_type])}\n{gdfs[zone_type]}")
+
+    return gdfs
+
+
 if __name__ == "__main__":
     """
     Main execution block for creating MTC networks from OpenStreetMap.
@@ -1493,7 +1636,7 @@ if __name__ == "__main__":
         LINK_COLS = [
             'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
             'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-            'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id'
+            'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id', 'drive_centroid_fit', 'walk_centroid_fit'
         ]
         links_gdf = links_gdf[LINK_COLS]
         NODE_COLS = [
@@ -1746,6 +1889,41 @@ if __name__ == "__main__":
     transit_network = load_transit(feed=feed)
     WranglerLogger.info(f"Created transit_network:\n{transit_network}")
 
+    # Create centroid connectors -- fetch travel model zone daata
+    zones_gdf_dict = get_travel_model_zones()
+
+    if args.county != "Bay Area":
+        for zone_type in zones_gdf_dict.keys():
+            zones_gdf_dict[zone_type] = zones_gdf_dict[zone_type].loc[ zones_gdf_dict[zone_type].county == args.county ]
+            WranglerLogger.info(f"Filtered {zone_type} to {args.county}: {len(zones_gdf_dict[zone_type]):,} rows")
+
+    # TAZ & TAZ drive connectors
+    add_centroid_nodes(roadway_network, zones_gdf_dict["TAZ"], "TAZ")
+    summary_gdf = add_centroid_connectors(
+        roadway_network, 
+        zones_gdf_dict["TAZ"], "TAZ", 
+        mode="drive", 
+        local_crs=LOCAL_CRS_FEET,
+        zone_buffer_distance=20,
+        num_centroid_connectors=4,
+        max_mode_graph_degrees=4,
+        default_link_attribute_dict = {"lanes":7, "oneway":False}
+    )
+    WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
+    # MAZ & MAZ walk/bike connectors
+    add_centroid_nodes(roadway_network, zones_gdf_dict["MAZ"], "MAZ")
+    summary_gdf = add_centroid_connectors(
+        roadway_network, 
+        zones_gdf_dict["MAZ"], "MAZ", 
+        mode="walk", 
+        local_crs=LOCAL_CRS_FEET,
+        zone_buffer_distance=20,
+        num_centroid_connectors=2,
+        max_mode_graph_degrees=8, # make this larger because more footway links are oks
+        default_link_attribute_dict = {"lanes":1, "oneway":False, "bike_access":True}
+    )
+    WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
+
     # finally, create a scenario
     my_scenario = network_wrangler.scenario.create_scenario(
         base_scenario = {
@@ -1759,5 +1937,10 @@ if __name__ == "__main__":
     # write it to disk
     scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
     scenario_dir.mkdir(exist_ok=True)
-    my_scenario.write(path=scenario_dir, name="mtc_2023")
+    my_scenario.write(
+        path=scenario_dir,
+        name="mtc_2023",
+        roadway_file_format="geojson",
+        roadway_true_shape=True
+    )
     WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
