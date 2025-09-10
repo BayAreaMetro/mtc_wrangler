@@ -523,7 +523,8 @@ if __name__ == "__main__":
   try:
     gtfs_model = load_feed_from_path(
       feed_path = transit_gtfs_model_dir,
-      wrangler_flavored = False
+      wrangler_flavored = False,
+      low_memory=False
     )
     WranglerLogger.debug("After load_feed_from_path()")
     WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
@@ -698,7 +699,7 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"After filtering service_ids (len={len(service_ids):,}):\n{service_ids}")
 
     # Read a GTFS network (not wrangler_flavored)
-    gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids)
+    gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
     WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
     # drop some columns that are not required or useful
     gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)

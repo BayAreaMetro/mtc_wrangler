@@ -23,6 +23,7 @@ The script performs the following workflow:
 Tested in July-September 2025 with:
   * BayArea network_wrangler fork: https://github.com/BayAreaMetro/network_wrangler
     (pull request pending: https://github.com/network-wrangler/network_wrangler/pull/408)
+    -> centroids branch
   * OSMnx v1.9+
   * GTFS feed from 511 Bay Area (September 2023)
 
@@ -52,6 +53,7 @@ import datetime
 import pathlib
 import pickle
 import pprint
+import requests
 import statistics
 import sys
 from typing import Any, Optional, Tuple, Union
@@ -64,15 +66,29 @@ import geopandas as gpd
 import pygris
 import shapely.geometry
 
+import tableau_utils
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
+from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
+from network_wrangler.models.gtfs.gtfs import GtfsModel
+from network_wrangler.transit.feed.feed import Feed
+from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.transit.io import load_feed_from_path, write_transit, load_transit
 from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.utils.transit import \
   drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
-from network_wrangler.transit.validate import shape_links_without_road_links
+from network_wrangler.roadway.centroids import FitForCentroidConnection, add_centroid_nodes, add_centroid_connectors
+
+# Suppress FutureWarning about downcasting in fillna
+# The traceback shows this occurs in pandera/backends/pandas/container.py line 570
+# when pandera calls fillna() during DataFrame validation
+import warnings
+warnings.filterwarnings('ignore', 
+                       message='Downcasting object dtype arrays on .fillna',
+                       category=FutureWarning,
+                       module='pandera')
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -163,6 +179,9 @@ OSM_WAY_TAGS = {
     # active modes
     'sidewalk'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:sidewalk
     'cycleway'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway
+    'cycleway:both'      : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:both
+    'cycleway:left'      : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:left
+    'cycleway:right'     : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:cycleway:right
 }
 
 # from biggest to smallest
@@ -186,16 +205,14 @@ HIGHWAY_HIERARCHY = [
 ]
 
 def get_county_bbox(counties) -> tuple[float, float, float, float]:
-    """
-    Read in list of counties and return bounding box in WGS84 coordinates.
+    """    
+    This function fetches TIGER county 2010 boundaries using pygris for the
+    givent California counties.
     
-    This function reads the Bay Area county boundaries from a shapefile and
-    calculates the total bounding box encompassing all counties. The coordinates
-    are converted to WGS84 (EPSG:4326) if needed for OSM data retrieval.
+    The coordinates are converted to WGS84 (EPSG:4326) if needed.
     
     Args:
-        county_shapefile: Path to the county shapefile containing Bay Area counties.
-                         Expected to have geometry in any valid CRS.
+        counties: list of California counties to include.
         
     Returns:
         tuple: Bounding box as (west, south, east, north) in decimal degrees.
@@ -205,7 +222,7 @@ def get_county_bbox(counties) -> tuple[float, float, float, float]:
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    WranglerLogger.info(f"Reading county shapefile for Bay Area")
+    WranglerLogger.info(f"Fetching California 2010 county shapes using pygris")
     county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
     county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
 
@@ -390,6 +407,46 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
 
     WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
+
+    ################ set drive_centroid_fit, walk_centroid_fit ################
+    # for centroid connectors, assess fit for centroid connectors based on highway value
+    centroid_dict = {"drive":{}, "walk":{}} # mode -> highway -> fitness
+    current_fit = FitForCentroidConnection.DO_NOT_USE # start with this for freeways
+    for highway in HIGHWAY_HIERARCHY:
+        # special values
+        if highway in ["busway","living_street","track"]:
+            centroid_dict["drive"][highway] = FitForCentroidConnection.DO_NOT_USE
+
+            if highway in ["busway"]:
+                centroid_dict["walk"][highway] = FitForCentroidConnection.DO_NOT_USE
+            else:
+                centroid_dict["walk"][highway] = FitForCentroidConnection.GOOD
+            continue
+
+        # higher in hierarchy is worse
+        # for now, walk and drive are the same
+        if highway == "primary":
+            current_fit = FitForCentroidConnection.OKAY
+        elif highway == "secondary":
+            current_fit = FitForCentroidConnection.GOOD
+        elif highway == "unclassified":
+            current_fit = FitForCentroidConnection.BEST
+        
+        # set it
+        centroid_dict["drive"][highway] = current_fit
+        centroid_dict["walk"][highway] = current_fit
+    
+    for highway in ["path","cycleway","footway"]:
+        centroid_dict["walk"][highway] = FitForCentroidConnection.BEST
+
+    for mode in centroid_dict.keys():
+        WranglerLogger.debug(f"centroid_dict[{mode}]:\n{pprint.pformat(centroid_dict[mode])}")
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf["highway"].map(centroid_dict[mode])
+        # fill na with Not ok
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf[f"{mode}_centroid_fit"].fillna(FitForCentroidConnection.DO_NOT_USE)
+        links_gdf[f"{mode}_centroid_fit"] = links_gdf[f"{mode}_centroid_fit"].astype(int)
+        WranglerLogger.debug(f"{mode}_centroid_fit:\n{links_gdf[f'{mode}_centroid_fit'].value_counts(dropna=False)}")
+
     return
 
 def standardize_lanes_value(
@@ -711,7 +768,7 @@ def standardize_lanes_value(
         highway_to_lanes = {}
 
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['lanes'].value_counts(dropna=False)}")
-    WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
+    WranglerLogger.info(f"buslanes:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     return links_gdf
 
 def create_managed_lanes_fields(
@@ -918,10 +975,12 @@ def handle_links_with_duplicate_A_B(
     return full_gdf
 
 
-def standardize_and_write(
+def stepa_standardize_attributes(
         g: networkx.MultiDiGraph,
         county: str, 
-        prefix: str
+        prefix: str,
+        output_dir: pathlib.Path,
+        output_formats: list[str],
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     Standardize OSM network data and write to multiple output formats.
@@ -940,7 +999,8 @@ def standardize_and_write(
     6. For Bay Area: performs spatial join to assign county to each link/node
     7. Assigns model-specific node and link IDs based on county numbering system
     8. Removes unnamed service roads to simplify network
-    9. Writes outputs in multiple formats for different use cases
+    9. Creates managed lanes fields (via create_managed_lanes_fields())
+    10. Writes outputs in multiple formats for different use cases
     
     County numbering system:
     - San Francisco: nodes 1,000,000+, links 1,000,000+
@@ -961,6 +1021,8 @@ def standardize_and_write(
         county: County name (e.g., "San Francisco") or "Bay Area" for 
                multi-county processing
         prefix: String prefix for output filenames (e.g., "3_simplified_")
+        output_dir: Base directory for output
+        output_formats: Handled formats: hyper, geojson, parquet, gpkg
     
     Returns:
         Tuple of (links_gdf, nodes_gdf) containing:
@@ -980,22 +1042,16 @@ def standardize_and_write(
                 county: Assigned county name
     
     Side Effects:
-        Writes multiple files to OUTPUT_DIR (depending on output formats):
-            - {prefix}{county}_links.hyper: Tableau Hyper format for visualization
-            - {prefix}{county}_nodes.hyper: Tableau Hyper format for visualization
-            - {prefix}{county}_links.parquet: Parquet format for analysis
-            - {prefix}{county}_nodes.parquet: Parquet format for analysis
-            - {prefix}{county}_links.gpkg: GeoPackage format for GIS
-            - {prefix}{county}_nodes.gpkg: GeoPackage format for GIS
-            - {prefix}{county}_links.geojson: GEOJSON format for GIS
-            - {prefix}{county}_nodes.geojson: GEOJSON format for GIS
+        Writes multiple files to output_dir (depending on output_formats):
+            - {prefix}{county}_{nodes|links}.{hyper|parquet|gpkg|geojson}: links and nodes
+              in the given output format
     
     Notes:
         - Multi-county links assigned to county with longest intersection
         - Unnamed service roads removed to reduce complexity
         - Original OSM IDs preserved in osm_node_id and osm_link_id columns
     """
-    WranglerLogger.info(f"======= standardize_and_write(g, {county=}, {prefix=}) =======")
+    WranglerLogger.info(f"======= STEP {prefix[:2]}: Standardize attributes for {county} =======")
     county_no_spaces = county.replace(" ","")
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
@@ -1240,21 +1296,25 @@ def standardize_and_write(
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
+    # Create managed lanes fields: access, ML_access, ML_lanes, etc
+    # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
+    create_managed_lanes_fields(links_gdf)
+
     # If hyper format is specified, write to tableau hyper file
-    if 'hyper' in OUTPUT_FORMAT:
+    if 'hyper' in output_formats:
         tableau_utils.write_geodataframe_as_tableau_hyper(
             links_gdf, 
-            OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.hyper", 
+            output_dir / f"{prefix}{county_no_spaces}_links.hyper", 
             f"{county_no_spaces}_links"
         )
 
         tableau_utils.write_geodataframe_as_tableau_hyper(
             nodes_gdf, 
-            OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.hyper", 
+            output_dir / f"{prefix}{county_no_spaces}_nodes.hyper", 
             f"{county_no_spaces}_nodes"
         )
 
-    # write to parquet -- this requires simpler column types
+    # write to other formats -- this requires simpler column types
     # Outputs depending on specified OUTPUT_FORMAT
     
     # Subset the links columns and convert name, ref to strings
@@ -1262,22 +1322,23 @@ def standardize_and_write(
     links_non_list_cols = [
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_only',
-        'lanes','buslanes','length','distance','county','model_link_id','shape_id'
+        'lanes','ML_lanes','length','distance','county','model_link_id','shape_id',
+        'access','ML_access'
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
     parquet_links_gdf['ref'] = parquet_links_gdf['ref'].astype(str)
     
-    if 'parquet' in OUTPUT_FORMAT:
-        links_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.parquet"
+    if 'parquet' in output_formats:
+        links_parquet_file = output_dir / f"{prefix}{county_no_spaces}_links.parquet"
         parquet_links_gdf.to_parquet(links_parquet_file)
         WranglerLogger.info(f"Wrote {links_parquet_file}")
-    if 'gpkg' in OUTPUT_FORMAT:
-        links_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.gpkg"
+    if 'gpkg' in output_formats:
+        links_gpkg_file = output_dir / f"{prefix}{county_no_spaces}_links.gpkg"
         parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {links_gpkg_file}")
-    if 'geojson' in OUTPUT_FORMAT:
-        links_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_links.geojson"
+    if 'geojson' in output_formats:
+        links_geojson_file = output_dir / f"{prefix}{county_no_spaces}_links.geojson"
         parquet_links_gdf.to_file(links_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {links_geojson_file}")
 
@@ -1289,56 +1350,654 @@ def standardize_and_write(
     parquet_nodes_gdf = nodes_gdf[nodes_non_list_cols].copy()
     parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
 
-    if 'parquet' in OUTPUT_FORMAT:
-        nodes_parquet_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.parquet"
+    if 'parquet' in output_formats:
+        nodes_parquet_file = output_dir / f"{prefix}{county_no_spaces}_nodes.parquet"
         parquet_nodes_gdf.to_parquet(nodes_parquet_file)
         WranglerLogger.info(f"Wrote {nodes_parquet_file}")
-    if 'gpkg' in OUTPUT_FORMAT:
-        nodes_gpkg_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.gpkg"
+    if 'gpkg' in output_formats:
+        nodes_gpkg_file = output_dir / f"{prefix}{county_no_spaces}_nodes.gpkg"
         parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
-    if 'geojson' in OUTPUT_FORMAT:
-        nodes_geojson_file = OUTPUT_DIR / f"{prefix}{county_no_spaces}_nodes.geojson"
+    if 'geojson' in output_formats:
+        nodes_geojson_file = output_dir / f"{prefix}{county_no_spaces}_nodes.geojson"
         parquet_nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {nodes_geojson_file}")
 
     return (links_gdf, nodes_gdf)
 
+def get_travel_model_zones():
+    """Fetches travel model two zones -- MAZs and TAZs, and returns
+    GeoDataFrames with shapes and centroids.
+
+    Returns:
+       dictionary with keys MAZ and TAZ, and values as GeoDataFrame with
+       columns, MAZ (for MAZ only), TAZ, county, geometry, geometry_centroid
+
+    """
+    ZONES_DIR = OUTPUT_DIR / "mtc_zones"
+    ZONES_DIR.mkdir(exist_ok=True)
+
+    WranglerLogger.info(f"Looking for MTC zones files in {ZONES_DIR}")
+
+    ZONE_VERSION = "2_5"
+    BASE_URL = "https://github.com/BayAreaMetro/tm2py-utils/raw/refs/heads/main/tm2py_utils/inputs/maz_taz"
+    SHAPEFILE_FILETYPES = [".cpg",".dbf",".prj",".shp",".shx"]
+    gdfs = {}
+
+    # Fetch the maz/taz/county mapping
+    county_mapping_file = f"mazs_tazs_county_{ZONE_VERSION.replace('_','.')}.csv"
+    if (ZONES_DIR / county_mapping_file).exists() == False:
+        try:
+            url = f"{BASE_URL}/{county_mapping_file}"
+            WranglerLogger.debug(f"Fetching {url}")
+            response = requests.get(url)
+            response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+            with open(ZONES_DIR / county_mapping_file, "wb") as f:
+                f.write(response.content)
+            WranglerLogger.debug(f"File downloaded successfully to {ZONES_DIR / county_mapping_file}")
+        except requests.exceptions.RequestException as e:
+            WranglerLogger.fatal(f"Error downloading {url} with requests: {e}")
+            raise e
+        WranglerLogger.info(f"Succeeded downloading {ZONES_DIR / county_mapping_file}")
+    county_mapping_df = pd.read_csv(ZONES_DIR / county_mapping_file)
+    WranglerLogger.debug(f"Read {ZONES_DIR / county_mapping_file}")
+    WranglerLogger.debug(f"county_mapping_df:\n{county_mapping_df}")
+
+    # For each zone type, fetch the shapefile from GitHub to local dir if needed
+    # and then read it into the geodataframe
+    for zone_type in ["MAZ","TAZ"]:
+        shapefile = f"{zone_type}s_TM2_{ZONE_VERSION}.shp"
+
+        # fetch it if it doesn't exist
+        if (ZONES_DIR / shapefile).exists() == False:
+            for filetype in SHAPEFILE_FILETYPES:
+                try:
+                    shapefile_file = f"{shapefile}".replace(".shp",filetype)
+                    url = f"{BASE_URL}/shapefiles/{shapefile_file}"
+                    WranglerLogger.debug(f"Fetching {url}")
+                    response = requests.get(url)
+                    response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+                    with open(ZONES_DIR / shapefile_file, "wb") as f:
+                        f.write(response.content)
+                    WranglerLogger.debug(f"File downloaded successfully to {ZONES_DIR / shapefile_file}")
+                except requests.exceptions.RequestException as e:
+                    WranglerLogger.fatal(f"Error downloading {url} with requests: {e}")
+                    raise e
+            WranglerLogger.info(f"Succeeded downloading {ZONES_DIR / shapefile}")
+        
+        # now read it
+        gdfs[zone_type] = gpd.read_file(ZONES_DIR / shapefile)
+        WranglerLogger.info(f"Read {zone_type} shapefile from {ZONES_DIR / shapefile}")
+
+        # create centroid geometry
+        gdfs[zone_type]["geometry_centroid"] = gdfs[zone_type].apply(
+            lambda row: shapely.geometry.Point(
+                [row[f"{zone_type}_X"],
+                 row[f"{zone_type}_Y"]]
+            ),
+            axis=1
+        )
+        # rename maz to MAZ and/or taz to TAZ
+        gdfs[zone_type].rename(columns={zone_type.lower() : zone_type}, inplace=True)
+        if zone_type == "MAZ":
+            gdfs[zone_type].rename(columns={"taz": "TAZ"}, inplace=True)
+
+        # join to county_mapping_df
+        gdfs[zone_type] = pd.merge(
+            gdfs[zone_type],
+            right=county_mapping_df[[zone_type, "county_name"]].drop_duplicates(),
+            how='left',
+            validate='one_to_one',
+            indicator=True
+        )
+        assert (gdfs[zone_type]['_merge'] == 'both').all(), "Not all merge indicators are 'both'"
+
+        # keep only relevant columns
+        keep_cols=[zone_type, "county_name", "geometry", "geometry_centroid"]
+        if zone_type == "MAZ":
+            keep_cols.insert(1, "TAZ")
+        gdfs[zone_type] = gdfs[zone_type][keep_cols]
+
+        # rename county_name to county
+        gdfs[zone_type].rename(columns={"county_name":"county"}, inplace=True)
+
+        WranglerLogger.debug(f"gdfs[{zone_type}] type={type(gdfs[zone_type])}\n{gdfs[zone_type]}")
+
+    return gdfs
+
+# =============================================================================
+# 7-STEP NETWORK CREATION WORKFLOW FUNCTIONS
+# =============================================================================
+
+def step1_download_osm_network(
+        county: str, output_dir: pathlib.Path
+    ) -> networkx.MultiDiGraph:
+    """
+    Step 1: Downloads OSM network data for specified geography.
+    
+    Downloads road network data from OpenStreetMap using OSMnx for either
+    individual counties or the entire Bay Area. Uses caching to avoid
+    repeated downloads.
+    
+    Args:
+        county: County name (e.g., "San Francisco") or "Bay Area"
+    
+    Returns:
+        NetworkX MultiDiGraph containing the raw OSM road network
+    """
+    WranglerLogger.info(f"======= STEP 1: Download OSM network for {county} =======")
+    
+    county_no_spaces = county.replace(" ", "")
+    OSM_network_type = "all"  # Include all road types
+    
+    # Check for cached graph
+    initial_graph_file = output_dir / f"1_graph_OSM_{county_no_spaces}.pkl"
+    
+    if initial_graph_file.exists():
+        try:
+            with open(initial_graph_file, 'rb') as f:
+                g = pickle.load(f)
+            WranglerLogger.info(f"Loaded cached OSM graph from {initial_graph_file}")
+            WranglerLogger.info(f"Graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
+            return g
+        except Exception as e:
+            WranglerLogger.warning(f"Could not read cached graph: {e}")
+    
+    # Download new graph
+    if county == 'Bay Area':
+        WranglerLogger.info("Downloading network for Bay Area using bounding box...")
+        bbox = get_county_bbox(BAY_AREA_COUNTIES)
+        WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
+        g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
+    else:
+        WranglerLogger.info(f"Downloading network for {county}...")
+        g = osmnx.graph_from_place(f'{county}, California, USA', network_type=OSM_network_type)
+    
+    # Cache the downloaded graph
+    with open(initial_graph_file, "wb") as f:
+        pickle.dump(g, f)
+    WranglerLogger.info(f"Cached OSM graph to {initial_graph_file}")
+    WranglerLogger.info(f"Downloaded graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
+    
+    return g
+
+
+def step2_simplify_network_topology(
+        g: networkx.MultiDiGraph,
+        county: str,
+        output_dir: pathlib.Path
+    ) -> networkx.MultiDiGraph:
+    """
+    Step 2: Simplifies network topology while preserving connectivity.
+    
+    Consolidates nearby intersections and removes unnecessary intermediate nodes
+    while preserving the essential network structure and connectivity.
+    
+    Args:
+        g: NetworkX MultiDiGraph from step 1
+        county: County name for caching purposes
+        
+    Returns:
+        Simplified NetworkX MultiDiGraph
+    """
+    WranglerLogger.info(f"======= STEP 2: Simplify network topology for {county} =======")
+    
+    county_no_spaces = county.replace(" ", "")
+    simplified_graph_file = output_dir / f"2_graph_OSM_{county_no_spaces}_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
+    
+    # Check for cached simplified graph
+    if simplified_graph_file.exists():
+        try:
+            with open(simplified_graph_file, 'rb') as f:
+                simplified_g = pickle.load(f)
+            WranglerLogger.info(f"Loaded cached simplified graph from {simplified_graph_file}")
+            WranglerLogger.info(f"Simplified graph has {simplified_g.number_of_edges():,} edges and {len(simplified_g.nodes()):,} nodes")
+            return simplified_g
+        except Exception as e:
+            WranglerLogger.warning(f"Could not read cached simplified graph: {e}")
+    
+    # Project to local CRS for accurate distance calculations
+    g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
+    
+    # Simplify by consolidating intersections
+    WranglerLogger.info(f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet...")
+    simplified_g = osmnx.simplification.consolidate_intersections(
+        g,
+        tolerance=NETWORK_SIMPLIFY_TOLERANCE,  # feet
+        rebuild_graph=True,
+        dead_ends=True,  # keep dead-ends
+        reconnect_edges=True,
+    )
+    
+    # Cache the simplified graph
+    with open(simplified_graph_file, "wb") as f:
+        pickle.dump(simplified_g, f)
+    WranglerLogger.info(f"Cached simplified graph to {simplified_graph_file}")
+    WranglerLogger.info(f"Simplified graph has {simplified_g.number_of_edges():,} edges and {len(simplified_g.nodes()):,} nodes")
+    
+    return simplified_g
+
+def step3_assign_county_node_link_numbering(
+        links_gdf: gpd.GeoDataFrame,
+        nodes_gdf: gpd.GeoDataFrame,
+        county: str,
+        output_dir: pathlib.Path,
+        output_formats: list[str],
+) -> RoadwayNetwork:
+    """
+    Step 3: Assigns county-specific node/link numbering schemes.
+    
+    Creates a RoadwayNetwork object with model-specific node and link IDs
+    based on the county numbering system. This step is already integrated
+    into step3_standardize_attributes.
+    
+    Args:
+        links_gdf: Links GeoDataFrame from step 3
+        nodes_gdf: Nodes GeoDataFrame from step 3
+        county: County name
+        output_dir: Base directory for output
+        output_formats: Handled formats: hyper, geojson, parquet, gpkg
+
+    Returns:
+        RoadwayNetwork object with county-specific numbering
+    """
+    WranglerLogger.info(f"======= STEP 3: Create roadway network with county numbering for {county} =======")
+    
+    county_no_spaces = county.replace(" ", "")
+    roadway_net_file = f"3_roadway_network_{county_no_spaces}"
+    
+    # Check for cached roadway network
+    try:
+        cached_nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_node.parquet")
+        cached_links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_link.parquet")
+        shapes_gdf = cached_links_gdf.copy()
+        roadway_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
+        return roadway_network
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
+    
+    # Prepare data for roadway network creation
+    LINK_COLS = [
+        'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
+        'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
+        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id', 'drive_centroid_fit', 'walk_centroid_fit'
+    ]
+    NODE_COLS = [
+        'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
+    ]
+    
+    clean_links_gdf = links_gdf[LINK_COLS].copy()
+    clean_nodes_gdf = nodes_gdf[NODE_COLS].copy()
+    
+    # Create roadway network
+    roadway_network = network_wrangler.load_roadway_from_dataframes(
+        links_df=clean_links_gdf,
+        nodes_df=clean_nodes_gdf,
+        shapes_df=clean_links_gdf
+    )
+    
+    # Write roadway network to cache
+    for roadway_format in output_formats:
+        if roadway_format == "hyper": continue
+        try:
+            write_roadway(
+                roadway_network,
+                out_dir=OUTPUT_DIR,
+                prefix=roadway_net_file,
+                file_format=roadway_format,
+                overwrite=True,
+                true_shape=True
+            )
+            WranglerLogger.info(f"Saved roadway network in {roadway_format} format")
+        except Exception as e:
+            WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
+    
+    WranglerLogger.info(f"Created roadway network with {len(roadway_network.links_df)} links and {len(roadway_network.nodes_df)} nodes")
+    return roadway_network
+
+def step4_add_centroids_and_connectors(
+        roadway_network: RoadwayNetwork,
+        county: str,
+        output_dir: pathlib.Path,
+        output_formats: list[str],
+):
+    """
+    Step 4: Adds centroids and centroid connectors to the RoadwayNetwork.
+
+    Args:
+        roadway_network: RoadwayNetwork to modify
+        county: County name
+        output_dir: Base directory for output
+        output_formats: Handled formats: hyper, geojson, parquet, gpkg
+    
+    Returns:
+        None; roadway_network is modified in place
+    """
+    WranglerLogger.info(f"======= STEP 4: Create centroids and centroid connectors for {county} =======")
+
+    county_no_spaces = county.replace(" ", "")
+    roadway_net_file = f"4_roadway_network_{county_no_spaces}"
+    # Create centroid connectors -- fetch travel model zone daata
+    zones_gdf_dict = get_travel_model_zones()
+
+    if county != "Bay Area":
+        for zone_type in zones_gdf_dict.keys():
+            zones_gdf_dict[zone_type] = zones_gdf_dict[zone_type].loc[ zones_gdf_dict[zone_type].county == county ]
+            WranglerLogger.info(f"Filtered {zone_type} to {county}: {len(zones_gdf_dict[zone_type]):,} rows")
+
+    # TAZ & TAZ drive connectors
+    add_centroid_nodes(roadway_network, zones_gdf_dict["TAZ"], "TAZ")
+    summary_gdf = add_centroid_connectors(
+        roadway_network, 
+        zones_gdf_dict["TAZ"], "TAZ", 
+        mode="drive", 
+        local_crs=LOCAL_CRS_FEET,
+        zone_buffer_distance=20,
+        num_centroid_connectors=4,
+        max_mode_graph_degrees=4,
+        default_link_attribute_dict = {"lanes":7, "oneway":False}
+    )
+    WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
+    # MAZ & MAZ walk/bike connectors
+    add_centroid_nodes(roadway_network, zones_gdf_dict["MAZ"], "MAZ")
+    summary_gdf = add_centroid_connectors(
+        roadway_network, 
+        zones_gdf_dict["MAZ"], "MAZ", 
+        mode="walk", 
+        local_crs=LOCAL_CRS_FEET,
+        zone_buffer_distance=20,
+        num_centroid_connectors=2,
+        max_mode_graph_degrees=8, # make this larger because more footway links are oks
+        default_link_attribute_dict = {"lanes":1, "oneway":False, "bike_access":True}
+    )
+    WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
+
+    # Write roadway network to cache
+    for roadway_format in output_formats:
+        if roadway_format == "hyper":
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                roadway_network.links_df,
+                output_dir / f"{roadway_net_file}_links.hyper",
+                "{roadway_net_file}_links"
+            )
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                roadway_network.nodes_df,
+                output_dir / f"{roadway_net_file}_nodes.hyper",
+                "{roadway_net_file}_nodes"
+            )
+            continue
+
+        try:
+            write_roadway(
+                roadway_network,
+                out_dir=OUTPUT_DIR,
+                prefix=roadway_net_file,
+                file_format=roadway_format,
+                overwrite=True,
+                true_shape=True
+            )
+            WranglerLogger.info(f"Saved roadway network in {roadway_format} format")
+        except Exception as e:
+            WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
+
+def step5_prepare_gtfs_transit_data(
+        county: str, 
+        output_dir: pathlib.Path
+) -> GtfsModel:
+    """
+    Step 5: Prepare GTFS transit data for integration: filter to service date and relevant operators
+    
+    Loads and processes GTFS transit feed data, filtering to the specified
+    geography and preparing for integration with the roadway network.
+    
+    Args:
+        county: County name
+        output_dir: Base directory for output
+        
+    Returns:
+        Filtered GTFS model object
+    """
+    WranglerLogger.info(f"======= STEP 5: Preparing GTFS transit data for {county} =======")
+    
+    county_no_spaces = county.replace(" ", "")
+    gtfs_model_dir = output_dir / f"5_gtfs_model_{county_no_spaces}"
+    
+    # Check for cached GTFS model
+    if gtfs_model_dir.exists():
+        try:
+            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
+            WranglerLogger.info(f"Loaded cached GTFS model from {gtfs_model_dir}")
+            return gtfs_model
+        except Exception as e:
+            WranglerLogger.debug(f"Could not load cached GTFS model: {e}")
+    
+    # Load and filter GTFS data
+    WranglerLogger.info("Loading GTFS feed for September 27, 2023...")
+    
+    # Filter to specific service date
+    calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
+    calendar_dates_df = calendar_dates_df.loc[
+        (calendar_dates_df.date == 20230927) & (calendar_dates_df.exception_type == 1)
+    ]
+    calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
+    service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
+    service_ids = service_ids_df['service_id'].tolist()
+    
+    # Load GTFS model
+    gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
+    
+    # Clean up unnecessary columns
+    gtfs_model.stops.drop(columns=[
+        'stop_code','stop_desc','stop_url','tts_stop_name',
+        'platform_code','stop_timezone','wheelchair_boarding'
+    ], inplace=True, errors='ignore')
+    
+    # Filter agencies by county
+    if county == "Bay Area":
+        drop_transit_agency(gtfs_model, agency_id='SI')  # Drop SFO Airport
+    elif county in COUNTY_NAME_TO_GTFS_AGENCIES:
+        keep_agencies = COUNTY_NAME_TO_GTFS_AGENCIES[county]
+        WranglerLogger.info(f"Keeping agencies for {county}: {keep_agencies}")
+        for agency_id in gtfs_model.agency['agency_id'].tolist():
+            if agency_id not in keep_agencies:
+                drop_transit_agency(gtfs_model, agency_id=agency_id)
+    
+    # Filter by geographic boundary
+    county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+    county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
+    if county != "Bay Area":
+        county_gdf = county_gdf.loc[county_gdf['NAME10'] == county]
+        assert len(county_gdf) == 1
+    
+    filter_transit_by_boundary(
+        gtfs_model,
+        county_gdf,
+        partially_include_route_type_action={RouteType.RAIL: 'truncate'}
+    )
+    
+    # Fix known data issue
+    gtfs_model.trips.loc[
+        gtfs_model.trips['trip_id'] == 'PE:t263-sl17-p182-r1A:20230930', 
+        'direction_id'
+    ] = 1
+    
+    # Cache the filtered GTFS model
+    gtfs_model_dir.mkdir(exist_ok=True)
+    write_transit(
+        gtfs_model,
+        gtfs_model_dir,
+        prefix=f"gtfs_model_{county_no_spaces}",
+        overwrite=True
+    )
+    
+    WranglerLogger.info(f"Integrated GTFS data: {len(gtfs_model.routes)} routes, {len(gtfs_model.stops)} stops")
+    return gtfs_model
+
+def step6_create_transit_network(
+        gtfs_model: GtfsModel,
+        roadway_network: RoadwayNetwork,
+        county: str,
+        output_dir: pathlib.Path,
+        output_formats: list[str],
+) -> TransitNetwork:
+    """
+    Step 6: Create TransitNetwork by converting GtfsModel to Wrangler-flavored Feed object,
+    integrating with RoadwayNetwork
+    
+    Integrates GTFS transit data with the roadway network by creating transit
+    stops and connecting them to the road network with appropriate links.
+    
+    Args:
+        gtfs_model: GTFS model from step 4
+        roadway_network: RoadwayNetwork from step 3
+        county: County name
+        output_dir: Base directory for output. 
+            Only used if an exception is thrown with debug data.
+        output_formats: Handled formats: hyper, geojson, parquet, gpkg
+
+    Returns:
+        TransitNetwork with stops and links integrated
+    """
+    WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
+    
+    # Define time periods for frequency calculation
+    TIME_PERIODS = {
+        'EA': ['03:00','06:00'],  # 3a-6a
+        'AM': ['06:00','10:00'],  # 6a-10a
+        'MD': ['10:00','15:00'],  # 10a-3p
+        'PM': ['15:00','19:00'],  # 3p-7p
+        'EV': ['19:00','03:00'],  # 7p-3a (crosses midnight)
+    }
+
+    # save this to re-apply
+    links_name = roadway_network.links_df.attrs['name']
+    # hack: drop these links because they're footway links that prevent the rail link from being created
+    # in add_stations_and_links_to_roadway_network()
+    LINKS_TO_DELETE = [
+        { 'osm_link_id':'676691686', 'reversed':True },
+        { 'osm_link_id':'678238660', 'reversed':True }
+    ]
+    # TODO: use RoadwayNetwork.delete_links() instead
+    links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
+    roadway_network.links_df = roadway_network.links_df.merge(
+        right=links_to_delete_df,
+        how='left',
+        indicator=True
+    )
+    WranglerLogger.debug(f"Hack: Deleting the following links:\n{roadway_network.links_df.loc[ roadway_network.links_df._merge == 'both']}")
+    len_links_gdf = len(roadway_network.links_df)
+    roadway_network.links_df = roadway_network.links_df.loc[ roadway_network.links_df._merge == 'left_only' ]
+    roadway_network.links_df.drop(columns=['_merge'], inplace=True)
+    assert len(roadway_network.links_df) == len_links_gdf - len(LINKS_TO_DELETE)
+
+    # re-apply
+    roadway_network.links_df.attrs['name'] = links_name
+
+    try:
+        feed = create_feed_from_gtfs_model(
+            gtfs_model,
+            roadway_network,
+            local_crs=LOCAL_CRS_FEET,
+            crs_units="feet",
+            timeperiods=TIME_PERIODS,
+            frequency_method='median_headway',
+            default_frequency_for_onetime_route=180*60,  # 180 minutes
+            add_stations_and_links=True,
+            trace_shape_ids=[
+                'SF:60:20230930',    # LOWL bus line
+                'SF:19800:20230930', # F line LRT
+            ]
+        )
+        WranglerLogger.info(f"Created transit Feed object with stops and links integrated")
+        
+    except Exception as e:
+        WranglerLogger.error(f"Error creating transit stops and links: {e}")
+        
+        for error_gdf_name in ["bus_stop_links_gdf", "bus_stops_gdf", "no_bus_path_gdf"]:
+            # Write debug outputs if available
+            if hasattr(e, error_gdf_name):
+                error_gdf = getattr(e, error_gdf_name)
+                WranglerLogger.debug(f"error_gdf for {error_gdf_name}: {type(error_gdf)}")
+            else:
+                continue
+            
+            if "hyper" in output_formats:
+                tableau_utils.write_geodataframe_as_tableau_hyper(
+                    error_gdf,
+                    output_dir / error_gdf_name.replace("_gdf",".hyper"),
+                    error_gdf_name
+                )
+            if "parquet" in output_formats:
+                debug_file = output_dir / error_gdf_name.replace("_gdf",".parquet")
+                error_gdf.to_parquet(debug_file)
+                WranglerLogger.error(f"Wrote {debug_file}")
+            if "gpkg" in output_formats:
+                debug_file = output_dir / error_gdf_name.replace("_gdf",".gpkg")
+                error_gdf.to_file(debug_file, driver="GPKG")
+                WranglerLogger.error(f"Wrote {debug_file}")
+            if "geojson" in output_formats:
+                debug_file = output_dir / error_gdf_name.replace("_gdf",".geojson")
+                error_gdf.to_file(output_dir / error_gdf_name.replace("_gdf",".geojson"), driver="GeoJSON")
+                WranglerLogger.error(f"Wrote {debug_file}")
+
+        raise e
+    
+    # Write roadway network with transit
+    county_no_spaces = county.replace(" ","")
+    roadway_net_file = f"6_roadway_network_inc_transit_{county_no_spaces}"
+    for roadway_format in output_formats:
+        if roadway_format == "hyper": continue
+        try:
+            write_roadway(
+                roadway_network,
+                out_dir=output_dir,
+                prefix=roadway_net_file,
+                file_format=roadway_format,
+                overwrite=True,
+                true_shape=True
+            )
+            WranglerLogger.info(f"Wrote roadway network with transit in {roadway_format} format")
+        except Exception as e:
+            WranglerLogger.warning(f"Error writing roadway network in {roadway_format}: {e}")
+    
+    # Create transit network
+    transit_network = load_transit(feed=feed)
+    WranglerLogger.info(f"Created transit network:\n{transit_network}")
+
+    transit_network_dir = output_dir / f"6_transit_network_{county_no_spaces}"
+    transit_network_dir.mkdir(exist_ok=True)
+    write_transit(
+        transit_network,
+        out_dir=transit_network_dir,
+        prefix="transit_network",
+        overwrite=True
+    )
+    WranglerLogger.info(f"Wrote transit network to {transit_network_dir}")
+    return transit_network
+
 if __name__ == "__main__":
     """
-    Main execution block for creating MTC networks from OpenStreetMap.
+    Main execution using the 8-step workflow:
     
-    This script follows a multi-step workflow with caching for efficiency:
-    
-    1. OSM Network Extraction:
-       - Downloads road network from OSM via OSMnx
-       - Caches raw graph for faster re-runs
-       
-    2. Network Simplification:
-       - Consolidates intersections within tolerance (20 feet)
-       - Preserves connectivity and attributes
-       - Caches simplified graph
-       
-    3. Standardization:
-       - Processes highway types and lane counts
-       - Assigns access permissions by mode
-       - Creates model-specific IDs
-       
-    4. GTFS Integration:
-       - Loads 511 Bay Area GTFS feed
-       - Filters to specified geography
-       - Creates transit stops and links on road network
-       
-    5. Output Generation:
-       - Writes road network with transit
-       - Creates feed object for transit
-       - Outputs in multiple formats
+    1. Downloads OSM network data for specified geography
+    1a. Standardize attributes and write
+    2. Simplifies network topology while preserving connectivity
+    2a. Standardize attributes and write
+    3. Assigns county-specific node/link numbering schemes
+    4. Add centroids and centroid connectors
+    5. Prepare GTFS transit data for integration by filtering to service
+       date and county
+    6. Create TransitNetwork integrated with RoadwayNetwork
+    7. Create base year Scenario
+    8. TODO: Apply projects and write future year Scenario
        
     The script uses caching extensively - if intermediate files exist,
     they are loaded instead of regenerating, significantly speeding up
     iterative development and debugging.
     """
 
+    # Setup pandas display options
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
@@ -1356,15 +2015,17 @@ if __name__ == "__main__":
     OUTPUT_DIR = args.output_dir.resolve()
     INPUT_2023GTFS = args.input_gtfs
 
+    # Create output directory
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Configure OSMnx
     osmnx.settings.use_cache = True
     osmnx.settings.cache_folder = OUTPUT_DIR / "osmnx_cache"
     osmnx.settings.log_file = True
     osmnx.settings.logs_folder = OUTPUT_DIR / "osmnx_logs"
     osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
 
-    # INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.info.log"
-    # DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}_{NOW}.debug.log"
+    # Setup logging
     INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}.info.log"
     DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}.debug.log"
 
@@ -1374,390 +2035,87 @@ if __name__ == "__main__":
         std_out_level="info",
         file_mode='w'
     )
+    WranglerLogger.info(f"Starting 7-step network creation workflow for {args.county}")
     WranglerLogger.info(f"Created by {__file__}")
+
     # For now, doing drive as we'll add handle transit and walk/bike separately
     # Aug 24: switch to all because Market Street bus-only links are missing
     OSM_network_type = "all"
     
     # Formatting output and ensuring if hyper is selected, there is another format
-    OUTPUT_FORMAT = args.output_format
-    ROADWAY_OUTPUT_FORMATS = OUTPUT_FORMAT.copy()
-    if 'hyper' in OUTPUT_FORMAT: 
-        import tableau_utils                   # only import if needed
-        ROADWAY_OUTPUT_FORMATS.remove('hyper') # hyper is only for tableau viz
-    WranglerLogger.debug(f"OUTPUT_FORMAT={OUTPUT_FORMAT}")
-    WranglerLogger.debug(f"ROADWAY_OUTPUT_FORMATS={ROADWAY_OUTPUT_FORMATS}")
-    
-    if len(ROADWAY_OUTPUT_FORMATS)==0: 
-        WranglerLogger.info("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'. ")
+    if (len(args.output_format) == 0) or (args.output_format == ["hyper"]):
+        WranglerLogger.fatal("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'")
         sys.exit()
 
-
-
-    # Skip steps if files are present: Read the simplified network graph rather than creating it from OSM
-    g = None
-    simplified_graph_file = OUTPUT_DIR / f"1_graph_OSM_{args.county_no_spaces}_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
-    if simplified_graph_file.exists():
-        try:
-            # Read the MultiDiGraph from the pickle file
-            with open(simplified_graph_file, 'rb') as f:
-                g = pickle.load(f)
-            WranglerLogger.info(f"Read {simplified_graph_file}; graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
-        except Exception as e:
-            WranglerLogger.info(f"Could not read {simplified_graph_file}")
-            WranglerLogger.error(e)
-
-    if g == None:
-        if args.county == 'Bay Area':
-            # Use bounding box approach for Bay Area
-            WranglerLogger.info("Creating network for Bay Area using bounding box approach...")
-        
-            # Get bounding box from shapefile
-            # If this is cached, it takes about 3 minutes
-            bbox = get_county_bbox(BAY_AREA_COUNTIES)
-            WranglerLogger.info(f"Using bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
-        
-            # Use OSMnx to pull the network graph for the bounding box
-            # See https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.graph.graph_from_bbox
-            g = osmnx.graph_from_bbox(
-                bbox,  # (west, south, east, north) tuple
-                network_type=OSM_network_type
-            )
-        else:    
-            # Use OXMnx to pull the network graph for a place.
-            # See https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.graph.graph_from_place
-            #
-            # g is a [networkx.MultiDiGraph](https://networkx.org/documentation/stable/reference/classes/multidigraph.html#), 
-            # a directed graph with self loops and parallel edges (muliple edges can exist between two nodes)
-            WranglerLogger.info(f"Calling osmnx.graph_from_place('{args.county}, California, USA', {OSM_network_type})")
-            g = osmnx.graph_from_place(f'{args.county}, California, USA', network_type=OSM_network_type)
-
-        initial_graph_file = OUTPUT_DIR / f"0_graph_OSM_{args.county_no_spaces}.pkl"
-        with open(initial_graph_file, "wb") as f: pickle.dump(g, f)
-        WranglerLogger.info(f"Wrote {initial_graph_file}")
-        WranglerLogger.info(f"Initial graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
-        if args.county != "Bay Area":
-            # For counties, write stadardized version of this too so we can check against simplified
-            standardize_and_write(g, args.county, "2_original_")
-
-        # Project to CRS https://epsg.io/2227 where length is feet
-        g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
-
-        WranglerLogger.info(f"Calling osmnx.simplification.consolidate_intersections() with tolerance={NETWORK_SIMPLIFY_TOLERANCE} ")
-        # If we do simplification, it must be access-based.
-        # Drive links shouldn't be simplified to pedestrian links and vice versa
-        #
-        # Simplify to consolidate intersections
-        # https://osmnx.readthedocs.io/en/stable/user-reference.html#osmnx.simplification.consolidate_intersections
-        g = osmnx.simplification.consolidate_intersections(
-            g, 
-            tolerance=NETWORK_SIMPLIFY_TOLERANCE, # feet
-            rebuild_graph=True,
-            dead_ends=True, # keep dead-ends
-            reconnect_edges=True,
-        )
-        WranglerLogger.info(f"After simplifying, graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
-        with open(simplified_graph_file, "wb") as f: pickle.dump(g, f)
-        WranglerLogger.info(f"Wrote {simplified_graph_file}")
-
-    # Skip steps if files are present: Read the roadway network 
-    roadway_network = None
-    roadway_net_file = f"4_roadway_network_{args.county_no_spaces}"
     try:
-        nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_node.parquet")
-        links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_link.parquet")
-        shapes_gdf = links_gdf.copy()
-        roadway_network = load_roadway_from_dataframes(links_gdf, nodes_gdf, shapes_gdf)
-        WranglerLogger.info(f"Read roadway network from {roadway_net_file}_[node,link].parquet")
-        WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
-    except Exception as e:
-        # that's ok
-        WranglerLogger.debug(f"Failed to read roadway network:")
-        WranglerLogger.debug(e)
-        pass
+        # STEP 1: Download OSM network data
+        g = step1_download_osm_network(args.county, OUTPUT_DIR)
 
-    if roadway_network == None:
+        # STEP 1a: standardize attributes (and write)
+        # Note: we don't keep the results of this, since we'll use version from the simplified graph
+        stepa_standardize_attributes(g, args.county, "1a_original_", OUTPUT_DIR, args.output_format)
+        
+        # STEP 2: Simplify network topology
+        simplified_g = step2_simplify_network_topology(g, args.county, OUTPUT_DIR)
 
-        # Standardize network graph and create roadway network dataframes
-        (links_gdf, nodes_gdf) = standardize_and_write(g, args.county, f"3_simplified_")
+        # STEP 2a: standardize attributes and write
+        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", OUTPUT_DIR, args.output_format)
+        
+        # STEP 3: Assign county-specific numbering and create RoadwayNetwork object
+        # This also drops columns we're done with and writes the roadway network
+        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, OUTPUT_DIR, args.output_format)
 
-        # Create managed lanes fields: access, ML_access, ML_lanes, etc
-        # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
-        create_managed_lanes_fields(links_gdf)
+        # STEP 4: Add centroids and centroid connectors
+        step4_add_centroids_and_connectors(roadway_network, args.county, OUTPUT_DIR, args.output_format)
+        
+        # STEP 5: Prepare GTFS transit data: Read and filter to service date, relevant operators. Creates GtfsModel object
+        # This also writes the GtfsModel as GTFS
+        gtfs_model = step5_prepare_gtfs_transit_data(args.county, OUTPUT_DIR)
+        
+        # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
+        # This writes the RoadwayNetwork and TransitNetwork
+        transit_network = step6_create_transit_network(gtfs_model, roadway_network, args.county, OUTPUT_DIR, args.output_format)
 
-        WranglerLogger.debug(f"links_gdf.head()\n{links_gdf.head()}")
-        WranglerLogger.debug(f"nodes_gdf.head()\n{nodes_gdf.head()}")
-
-        # Drop columns that we likely won't need anymore
-        # Keep Wrangler columns: 
-        LINK_COLS = [
-            'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
-            'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-            'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id'
-        ]
-        links_gdf = links_gdf[LINK_COLS]
-        NODE_COLS = [
-            'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
-        ]
-        nodes_gdf = nodes_gdf[NODE_COLS]
-
-        # hack: drop these links because they're footway links that prevent the rail link from being created
-        # in add_stations_and_links_to_roadway_network()
-        LINKS_TO_DELETE = [
-            { 'osm_link_id':'676691686', 'reversed':True },
-            { 'osm_link_id':'678238660', 'reversed':True }
-        ]
-        links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
-        links_gdf = links_gdf.merge(
-            right=links_to_delete_df,
-            how='left',
-            indicator=True
+        # STEP 7: Create base year scenario
+        my_scenario = network_wrangler.scenario.create_scenario(
+            base_scenario = {
+                "road_net": roadway_network,
+                "transit_net": transit_network,
+                "applied_projects": [],
+                "conflicts": {}
+            },
         )
-        WranglerLogger.debug(f"Hack: Deleting the following links:\n{links_gdf.loc[ links_gdf._merge == 'both']}")
-        len_links_gdf = len(links_gdf)
-        links_gdf = links_gdf.loc[ links_gdf._merge == 'left_only' ]
-        links_gdf.drop(columns=['_merge'], inplace=True)
-        assert len(links_gdf) == len_links_gdf - len(LINKS_TO_DELETE)
-
-        # create roadway network
-        roadway_network = network_wrangler.load_roadway_from_dataframes(
-            links_df=links_gdf,
-            nodes_df=nodes_gdf,
-            shapes_df=links_gdf,
-            filter_to_nodes=True,
-        )
-        WranglerLogger.info(f"Created RoadwayNetwork")
-        WranglerLogger.debug(f"roadway_network:\n{roadway_network}")
-
-        # Write the 2023 roadway network to ROADWAY_OUTPUT_FORMATS files
-        for roadway_format in ROADWAY_OUTPUT_FORMATS:
-            WranglerLogger.info(f"Writing 2023 roadway network to {roadway_format} files...")
-            try:
-                write_roadway(
-                    roadway_network, 
-                    out_dir=OUTPUT_DIR,
-                    prefix=roadway_net_file,
-                    file_format=roadway_format,
-                    overwrite=True,
-                    true_shape=True
-                )
-                WranglerLogger.info(f"Roadway network saved to {OUTPUT_DIR} in {roadway_format}")
-            except Exception as e:
-                WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
-                raise(e)
-
-    # Skip steps if files are present: Read the GtfsModel object
-    gtfs_model = None
-    gtfs_model_dir = OUTPUT_DIR / f"4_gtfs_model_{args.county_no_spaces}"
-    if gtfs_model_dir.exists():
-        try:
-            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
-            WranglerLogger.info(f"Read gtfs_model from {gtfs_model_dir}")
-        except Exception as e:
-            WranglerLogger.debug(f"Failed to read gtfs_model from {gtfs_model_dir}")
-            WranglerLogger.debug(e)
-            pass
     
-    if gtfs_model == None:
-        # The gtfs feed covers the month of September 2023; select to Wednesday, September 27, 2023
-        # gtfs_model doesn't include calendar_dates so read this ourselves
-        # tableau viz of this feed: https://10ay.online.tableau.com/#/site/metropolitantransportationcommission/views/regional_feed_511_2023-10/Dashboard1?:iid=1
-        calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
-        WranglerLogger.debug(f"calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-        calendar_dates_df = calendar_dates_df.loc[ (calendar_dates_df.date == 20230927) & (calendar_dates_df.exception_type == 1) ]
-        WranglerLogger.debug(f"After filtering calendar_dates_df (len={len(calendar_dates_df):,}):\n{calendar_dates_df}")
-        # make service_id a string
-        calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-        service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-        # Convert DataFrame to list for the updated load_feed_from_path function
-        service_ids = service_ids_df['service_id'].tolist()
-        WranglerLogger.debug(f"Filtering to {len(service_ids):,} service_ids")
+        # write it to disk
+        scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
+        scenario_dir.mkdir(exist_ok=True)
+        my_scenario.write(
+            path=scenario_dir,
+            name="mtc_2023",
+            roadway_file_format="geojson",
+            roadway_true_shape=True
+        )
+        WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
 
-        # Read a GTFS network (not wrangler_flavored)
-        gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
-        WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
-        # drop some columns that are not required or useful
-        gtfs_model.stops.drop(columns=['stop_code','stop_desc','stop_url','tts_stop_name','platform_code','stop_timezone','wheelchair_boarding'], inplace=True)
+        # TODO: apply some projects
+        # TODO: Write scneario with projects
+        # TODO: Write as cube network?
 
-        if args.county == "Bay Area":
-            # Bay Area: drop SFO Airport rail/bus for now
-            drop_transit_agency(gtfs_model, agency_id='SI')
-        elif args.county in COUNTY_NAME_TO_GTFS_AGENCIES:
-            keep_agencies = COUNTY_NAME_TO_GTFS_AGENCIES[args.county]
-            WranglerLogger.debug(f"For {args.county}, keeping agencies {keep_agencies}")
-            # if this is configured, drop transit agencies not included in this list
-            for agency_id in gtfs_model.agency['agency_id'].tolist():
-                if agency_id not in keep_agencies:
-                    drop_transit_agency(gtfs_model, agency_id=agency_id)
-   
+        WranglerLogger.info("=" * 60)
+        WranglerLogger.info("7-STEP WORKFLOW COMPLETED SUCCESSFULLY")
+        WranglerLogger.info("=" * 60)
+        WranglerLogger.info(f"Final network summary for {args.county}:")
+        WranglerLogger.info(f"  - Roadway links: {len(roadway_network.links_df):,}")
+        WranglerLogger.info(f"  - Roadway nodes: {len(roadway_network.nodes_df):,}")
+        WranglerLogger.info(f"  - Transit routes: {len(transit_network.feed.routes):,}")
+        WranglerLogger.info(f"  - Transit stops: {len(transit_network.feed.stops):,}")
+        sys.exit()
+        
+    except Exception as e:
+        WranglerLogger.error("WORKFLOW FAILED")
+        WranglerLogger.error(f"Error: {e}")
+        raise
 
         
-        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
-        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
-        if (args.county != "Bay Area"):
-            # filter to the given county
-            county_gdf = county_gdf.loc[county_gdf['NAME10'] == args.county]
-            assert(len(county_gdf) == 1)
 
-        # filter out routes outside of Bay Area
-        filter_transit_by_boundary(
-            gtfs_model,
-            county_gdf, 
-            partially_include_route_type_action={RouteType.RAIL: 'truncate'})
-        WranglerLogger.debug(f"gtfs_model:\n{gtfs_model}")
 
-        # this one trip_id seems to have the wrong direction_id; it's 0 but should be 1
-        gtfs_model.trips.loc[ gtfs_model.trips['trip_id'] == 'PE:t263-sl17-p182-r1A:20230930', 'direction_id'] = 1
-
-        # write filtered gtfs_model
-        gtfs_model_dir.mkdir(exist_ok=True)
-        write_transit(
-            gtfs_model,
-            gtfs_model_dir,
-            prefix=f"gtfs_model_{args.county_no_spaces}",
-            overwrite=True
-        )
-
-    # Define time periods for frequency calculation: 3a-6a, 6a-10a, 10a-3p, 3p-7p, 7p-3a
-    # https://bayareametro.github.io/travel-model-two/develop/input/#time-periods
-    TIME_PERIODS = {
-        'EA':['03:00','06:00'],  # 3a-6a
-        'AM':['06:00','10:00'],  # 6a-10a
-        'MD':['10:00','15:00'],  # 10a-3p
-        'PM':['15:00','19:00'],  # 3p-7p
-        'EV':['19:00','03:00'],  # 7p-3a (crosses midnight)
-    }
-    # If max_rows is exceeded, switch to truncate view
-    pd.options.display.max_rows = 500
-
-    try:
-        feed = create_feed_from_gtfs_model(
-            gtfs_model,
-            roadway_network,
-            local_crs=LOCAL_CRS_FEET,
-            crs_units="feet",
-            timeperiods=TIME_PERIODS,
-            frequency_method='median_headway',
-            default_frequency_for_onetime_route=180*60, # 180 minutes
-            add_stations_and_links=True,
-            trace_shape_ids=[
-                # 'SF:140:20230930',  # powell-hyde cable car
-                # 'SF:2751:20230930', # 27 bus
-                'SF:60:20230930',    # LOWL bus line
-                'SF:19800:20230930', # F line LRT
-            ]
-        )
-        WranglerLogger.debug(f"Created feed from gtfs_model: {feed}")
-    except Exception as e:
-        WranglerLogger.error(e)
-
-        WranglerLogger.error(vars(e).keys())
-
-        if hasattr(e,'bus_stop_links_gdf'):
-            WranglerLogger.debug(f"bus_stop_links_gdf type={type(e.bus_stop_links_gdf)}")
-            if 'hyper' in OUTPUT_FORMAT:
-                tableau_utils.write_geodataframe_as_tableau_hyper(
-                    e.bus_stop_links_gdf,
-                    OUTPUT_DIR / f"bus_stop_links.hyper",
-                    "bus_stop_links_gdf"
-                )
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.hyper'}")
-            elif 'parquet' in OUTPUT_FORMAT:
-                e.bus_stop_links_gdf.to_parquet(OUTPUT_DIR / f'bus_stop_links.parquet')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.parquet'}")
-            elif 'gpkg' in OUTPUT_FORMAT:
-                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.gpkg', driver='GPKG')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.gpkg'}")
-            elif 'geojson' in OUTPUT_FORMAT:
-                e.bus_stop_links_gdf.to_file(OUTPUT_DIR / f'bus_stop_links.geojson', driver='GEOJSON')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop_links.geojson'}")
-
-        if hasattr(e, "bus_stops_gdf"):
-            if 'hyper' in OUTPUT_FORMAT:
-                WranglerLogger.debug(f"bus_stops_gdf type={type(e.bus_stops_gdf)}")
-                tableau_utils.write_geodataframe_as_tableau_hyper(
-                    e.bus_stops_gdf,
-                    OUTPUT_DIR / f"bus_stops.hyper",
-                    "bus_stops_gdf"
-                )
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stops.hyper'}")
-            elif 'parquet' in OUTPUT_FORMAT:
-                e.bus_stop_gdf.to_parquet(OUTPUT_DIR / f'bus_stop.parquet')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.parquet'}")
-            elif 'gpkg' in OUTPUT_FORMAT:
-                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.gpkg', driver='GPKG')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.gpkg'}")
-            elif 'geojson' in OUTPUT_FORMAT:
-                e.bus_stop_gdf.to_file(OUTPUT_DIR / f'bus_stop.geojson', driver='GEOJSON')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'bus_stop.geojson'}")
-
-        
-        if hasattr(e, "no_bus_path_gdf"):
-            if 'hyper' in OUTPUT_FORMAT:
-                WranglerLogger.debug(f"no_bus_path_gdf type={type(e.no_bus_path_gdf)}")
-                tableau_utils.write_geodataframe_as_tableau_hyper(
-                    e.no_bus_path_gdf,
-                    OUTPUT_DIR / f"no_bus_path.hyper",
-                    "no_bus_path"
-                )
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.hyper'}")
-            elif 'parquet' in OUTPUT_FORMAT:
-                e.no_bus_path_gdf.to_parquet(OUTPUT_DIR / f'no_bus_path.parquet')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.parquet'}")
-            elif 'gpkg' in OUTPUT_FORMAT:
-                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.gpkg', driver='GPKG')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.gpkg'}")
-            elif 'geojson' in OUTPUT_FORMAT:
-                e.no_bus_path_gdf.to_file(OUTPUT_DIR / f'no_bus_path.geojson', driver='GEOJSON')
-                WranglerLogger.info(f"Wrote {OUTPUT_DIR / f'no_bus_path.geojson'}")
-
-        raise(e)
-
-    # write roadway network again because now it has the transit
-    roadway_net_file = f"5_roadway_network_inc_transit_{args.county_no_spaces}"
-    for roadway_format in ROADWAY_OUTPUT_FORMATS:
-        WranglerLogger.info(f"Writing roadway network with transit links to {roadway_format} files...")
-        try:
-            write_roadway(
-                roadway_network, 
-                out_dir=OUTPUT_DIR,
-                prefix=roadway_net_file,
-                file_format=roadway_format,
-                overwrite=True,
-                true_shape=True
-            )
-        except Exception as e:
-            # that's ok
-            WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
-            WranglerLogger.debug(e)
-            pass
-
-    # write feed object
-    feed_dir = OUTPUT_DIR / f"6_feed_{args.county_no_spaces}"
-    feed_dir.mkdir(exist_ok=True)
-    write_transit(
-        feed,
-        feed_dir,
-        prefix=f"feed_{args.county_no_spaces}",
-        overwrite=True
-    )
-
-    # create a transit network
-    transit_network = load_transit(feed=feed)
-    WranglerLogger.info(f"Created transit_network:\n{transit_network}")
-
-    # finally, create a scenario
-    my_scenario = network_wrangler.scenario.create_scenario(
-        base_scenario = {
-            "road_net": roadway_network,
-            "transit_net": transit_network,
-            "applied_projects": [],
-            "conflicts": {}
-        },
-    )
-    
-    # write it to disk
-    scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
-    scenario_dir.mkdir(exist_ok=True)
-    my_scenario.write(path=scenario_dir, name="mtc_2023")
-    WranglerLogger.info(f"Wrote scenario to {scenario_dir}")

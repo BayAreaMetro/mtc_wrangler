@@ -21,7 +21,7 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
         filename: Output filename for the Hyper file
         tablename: Name of the table within the Hyper file
     """
-    WranglerLogger.info(f"write_geodataframe_as_tableau_hyper: {filename=}, {tablename=}")
+    WranglerLogger.debug(f"write_geodataframe_as_tableau_hyper: {filename=}, {tablename=}")
     
     # Handle regular DataFrame with X,Y columns
     if isinstance(in_gdf, pd.DataFrame) and not isinstance(in_gdf, gpd.GeoDataFrame):
@@ -219,4 +219,4 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
                 inserter.execute()
 
 
-    WranglerLogger.info(f"GeoDataFrame written to {filename} as Tableau Hyper file.")
+    WranglerLogger.info(f"Wrote {filename}")
