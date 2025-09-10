@@ -27,6 +27,8 @@
             "type": "pythonEnvironment"
           }
         ],
+        "jupyter.defaultKernel": "network_wrangler",
+        "notebook.defaultLanguage": "python",
         "files.exclude": {
           "**/__pycache__": true,
           "**/*.pyc": true
@@ -34,7 +36,7 @@
       }
     }
   },
-  "postCreateCommand": "conda activate network_wrangler && pip install -e .",
+  "postCreateCommand": "conda activate network_wrangler && pip install -e . && python -m ipykernel install --user --name network_wrangler --display-name 'Python (network_wrangler)' && conda deactivate && conda activate network_wrangler",
   "remoteUser": "vscode",
   "workspaceFolder": "/workspaces/mtc_wrangler"
 }

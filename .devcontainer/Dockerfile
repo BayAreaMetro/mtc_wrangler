@@ -31,6 +31,9 @@ RUN conda env create -f /tmp/environment.yaml
 # Make RUN commands use the new environment
 SHELL ["conda", "run", "-n", "network_wrangler", "/bin/bash", "-c"]
 
+# Register the conda environment as a Jupyter kernel
+RUN python -m ipykernel install --user --name network_wrangler --display-name "Python (network_wrangler)"
+
 # Initialize conda for bash
 RUN conda init bash
 
