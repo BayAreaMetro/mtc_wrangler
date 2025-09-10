@@ -23,6 +23,7 @@ The script performs the following workflow:
 Tested in July-September 2025 with:
   * BayArea network_wrangler fork: https://github.com/BayAreaMetro/network_wrangler
     (pull request pending: https://github.com/network-wrangler/network_wrangler/pull/408)
+    -> centroids branch
   * OSMnx v1.9+
   * GTFS feed from 511 Bay Area (September 2023)
 
@@ -1975,11 +1976,9 @@ def step6_create_transit_network(
     WranglerLogger.info(f"Wrote transit network to {transit_network_dir}")
     return transit_network
 
-
-
 if __name__ == "__main__":
     """
-    Main execution using the 9-step workflow:
+    Main execution using the 8-step workflow:
     
     1. Downloads OSM network data for specified geography
     1a. Standardize attributes and write
@@ -1991,7 +1990,7 @@ if __name__ == "__main__":
        date and county
     6. Create TransitNetwork integrated with RoadwayNetwork
     7. Create base year Scenario
-    8. Apply projects and write future year Scenario
+    8. TODO: Apply projects and write future year Scenario
        
     The script uses caching extensively - if intermediate files exist,
     they are loaded instead of regenerating, significantly speeding up
@@ -2077,7 +2076,7 @@ if __name__ == "__main__":
         # This writes the RoadwayNetwork and TransitNetwork
         transit_network = step6_create_transit_network(gtfs_model, roadway_network, args.county, OUTPUT_DIR, args.output_format)
 
-        # finally, create a scenario
+        # STEP 7: Create base year scenario
         my_scenario = network_wrangler.scenario.create_scenario(
             base_scenario = {
                 "road_net": roadway_network,
