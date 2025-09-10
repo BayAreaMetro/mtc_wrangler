@@ -136,7 +136,7 @@ dependencies:
       - jsonschema==4.25.1
       - jsonschema-specifications==2025.4.1
       - mypy-extensions==1.1.0
-      - network-wrangler==1.0b3
+      - git+https://github.com/BayAreaMetro/network_wrangler.git
       - osmnx==2.0.6
       - pandera==0.26.1
       - projectcard==0.3.3
@@ -151,6 +151,8 @@ dependencies:
       - ruff==0.12.11
       - scipy==1.15.3
       - shapely==2.1.1
+      - scikit-learn
+      - pygris
       - tableauhyperapi==0.0.23135
       - tabulate==0.9.0
       - toml==0.10.2
