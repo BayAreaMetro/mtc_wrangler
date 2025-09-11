@@ -204,6 +204,8 @@ HIGHWAY_HIERARCHY = [
     'track',          # minor land-access roads
 ]
 
+INPUT_2023GTFS = pathlib.Path("M:/Data/Transit/511/2023-09")
+
 def get_county_bbox(counties) -> tuple[float, float, float, float]:
     """    
     This function fetches TIGER county 2010 boundaries using pygris for the
@@ -1365,7 +1367,7 @@ def stepa_standardize_attributes(
 
     return (links_gdf, nodes_gdf)
 
-def get_travel_model_zones():
+def get_travel_model_zones(output_dir: pathlib.Path,):
     """Fetches travel model two zones -- MAZs and TAZs, and returns
     GeoDataFrames with shapes and centroids.
 
@@ -1374,7 +1376,7 @@ def get_travel_model_zones():
        columns, MAZ (for MAZ only), TAZ, county, geometry, geometry_centroid
 
     """
-    ZONES_DIR = OUTPUT_DIR / "mtc_zones"
+    ZONES_DIR = output_dir / "mtc_zones"
     ZONES_DIR.mkdir(exist_ok=True)
 
     WranglerLogger.info(f"Looking for MTC zones files in {ZONES_DIR}")
@@ -1406,7 +1408,7 @@ def get_travel_model_zones():
     # For each zone type, fetch the shapefile from GitHub to local dir if needed
     # and then read it into the geodataframe
     for zone_type in ["MAZ","TAZ"]:
-        shapefile = f"{zone_type}s_TM2_{ZONE_VERSION}.shp"
+        shapefile = f"{zone_type.lower()}s_TM2_{ZONE_VERSION}.shp"
 
         # fetch it if it doesn't exist
         if (ZONES_DIR / shapefile).exists() == False:
@@ -1608,8 +1610,8 @@ def step3_assign_county_node_link_numbering(
     
     # Check for cached roadway network
     try:
-        cached_nodes_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_node.parquet")
-        cached_links_gdf = gpd.read_parquet(path=OUTPUT_DIR / f"{roadway_net_file}_link.parquet")
+        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
+        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
         shapes_gdf = cached_links_gdf.copy()
         roadway_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
         WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
@@ -1643,7 +1645,7 @@ def step3_assign_county_node_link_numbering(
         try:
             write_roadway(
                 roadway_network,
-                out_dir=OUTPUT_DIR,
+                out_dir=output_dir,
                 prefix=roadway_net_file,
                 file_format=roadway_format,
                 overwrite=True,
@@ -1679,7 +1681,7 @@ def step4_add_centroids_and_connectors(
     county_no_spaces = county.replace(" ", "")
     roadway_net_file = f"4_roadway_network_{county_no_spaces}"
     # Create centroid connectors -- fetch travel model zone daata
-    zones_gdf_dict = get_travel_model_zones()
+    zones_gdf_dict = get_travel_model_zones(output_dir)
 
     if county != "Bay Area":
         for zone_type in zones_gdf_dict.keys():
@@ -1731,7 +1733,7 @@ def step4_add_centroids_and_connectors(
         try:
             write_roadway(
                 roadway_network,
-                out_dir=OUTPUT_DIR,
+                out_dir=output_dir,
                 prefix=roadway_net_file,
                 file_format=roadway_format,
                 overwrite=True,
@@ -1743,6 +1745,7 @@ def step4_add_centroids_and_connectors(
 
 def step5_prepare_gtfs_transit_data(
         county: str, 
+        input_gtfs: pathlib.Path,
         output_dir: pathlib.Path
 ) -> GtfsModel:
     """
