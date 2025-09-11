@@ -204,8 +204,6 @@ HIGHWAY_HIERARCHY = [
     'track',          # minor land-access roads
 ]
 
-INPUT_2023GTFS = pathlib.Path("M:/Data/Transit/511/2023-09")
-
 def get_county_bbox(counties) -> tuple[float, float, float, float]:
     """    
     This function fetches TIGER county 2010 boundaries using pygris for the
@@ -1779,7 +1777,7 @@ def step5_prepare_gtfs_transit_data(
     WranglerLogger.info("Loading GTFS feed for September 27, 2023...")
     
     # Filter to specific service date
-    calendar_dates_df = pd.read_csv(INPUT_2023GTFS / "calendar_dates.txt")
+    calendar_dates_df = pd.read_csv(input_gtfs / "calendar_dates.txt")
     calendar_dates_df = calendar_dates_df.loc[
         (calendar_dates_df.date == 20230927) & (calendar_dates_df.exception_type == 1)
     ]
@@ -1788,7 +1786,7 @@ def step5_prepare_gtfs_transit_data(
     service_ids = service_ids_df['service_id'].tolist()
     
     # Load GTFS model
-    gtfs_model = load_feed_from_path(INPUT_2023GTFS, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
+    gtfs_model = load_feed_from_path(input_gtfs, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
     
     # Clean up unnecessary columns
     gtfs_model.stops.drop(columns=[
@@ -2015,22 +2013,21 @@ if __name__ == "__main__":
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
-    OUTPUT_DIR = args.output_dir.resolve()
-    INPUT_2023GTFS = args.input_gtfs
+    output_dir = args.output_dir.resolve()
 
     # Create output directory
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Configure OSMnx
     osmnx.settings.use_cache = True
-    osmnx.settings.cache_folder = OUTPUT_DIR / "osmnx_cache"
+    osmnx.settings.cache_folder = output_dir / "osmnx_cache"
     osmnx.settings.log_file = True
-    osmnx.settings.logs_folder = OUTPUT_DIR / "osmnx_logs"
+    osmnx.settings.logs_folder = output_dir / "osmnx_logs"
     osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
 
     # Setup logging
-    INFO_LOG  = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}.info.log"
-    DEBUG_LOG = OUTPUT_DIR / f"create_mtc_network_from_OSM_{args.county_no_spaces}.debug.log"
+    INFO_LOG  = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.info.log"
+    DEBUG_LOG = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.debug.log"
 
     network_wrangler.setup_logging(
         info_log_filename=INFO_LOG,
@@ -2052,32 +2049,32 @@ if __name__ == "__main__":
 
     try:
         # STEP 1: Download OSM network data
-        g = step1_download_osm_network(args.county, OUTPUT_DIR)
+        g = step1_download_osm_network(args.county, output_dir)
 
         # STEP 1a: standardize attributes (and write)
         # Note: we don't keep the results of this, since we'll use version from the simplified graph
-        stepa_standardize_attributes(g, args.county, "1a_original_", OUTPUT_DIR, args.output_format)
+        stepa_standardize_attributes(g, args.county, "1a_original_", output_dir, args.output_format)
         
         # STEP 2: Simplify network topology
-        simplified_g = step2_simplify_network_topology(g, args.county, OUTPUT_DIR)
+        simplified_g = step2_simplify_network_topology(g, args.county, output_dir)
 
         # STEP 2a: standardize attributes and write
-        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", OUTPUT_DIR, args.output_format)
+        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", output_dir, args.output_format)
         
         # STEP 3: Assign county-specific numbering and create RoadwayNetwork object
         # This also drops columns we're done with and writes the roadway network
-        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, OUTPUT_DIR, args.output_format)
+        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, args.output_format)
 
         # STEP 4: Add centroids and centroid connectors
-        step4_add_centroids_and_connectors(roadway_network, args.county, OUTPUT_DIR, args.output_format)
+        step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, args.output_format)
         
         # STEP 5: Prepare GTFS transit data: Read and filter to service date, relevant operators. Creates GtfsModel object
         # This also writes the GtfsModel as GTFS
-        gtfs_model = step5_prepare_gtfs_transit_data(args.county, OUTPUT_DIR)
+        gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir)
         
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
         # This writes the RoadwayNetwork and TransitNetwork
-        transit_network = step6_create_transit_network(gtfs_model, roadway_network, args.county, OUTPUT_DIR, args.output_format)
+        transit_network = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format)
 
         # STEP 7: Create base year scenario
         my_scenario = network_wrangler.scenario.create_scenario(
@@ -2090,7 +2087,7 @@ if __name__ == "__main__":
         )
     
         # write it to disk
-        scenario_dir = OUTPUT_DIR / "7_wrangler_scenario"
+        scenario_dir = output_dir / "7_wrangler_scenario"
         scenario_dir.mkdir(exist_ok=True)
         my_scenario.write(
             path=scenario_dir,
