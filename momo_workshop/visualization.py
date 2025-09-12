@@ -1,3 +1,6 @@
+from typing import Optional, Tuple
+from pathlib import Path
+import networkx as nx
 import osmnx as ox
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,8 +11,17 @@ import folium
 from folium import plugins
 import seaborn as sns
 
-def create_osmnx_plot(osm_network):
+def create_osmnx_plot(osm_network: nx.MultiDiGraph) -> Tuple[plt.Figure, plt.Axes]:
+    """Create an interactive plot of an OSMnx network graph.
     
+    Args:
+        osm_network: A networkx MultiDiGraph created by OSMnx representing the street network.
+    
+    Returns:
+        tuple: A tuple containing:
+            - fig (matplotlib.figure.Figure): The matplotlib figure object.
+            - ax (matplotlib.axes.Axes): The matplotlib axes object.
+    """
     # Create an interactive plot using OSMnx
     fig, ax = ox.plot_graph(
         osm_network,
@@ -30,8 +42,25 @@ def create_osmnx_plot(osm_network):
 
 
 
-def compare_original_and_simplified_networks(original_nw, simplified_nw, network_names=("Original OSM", "Simplified OSM")):
+def compare_original_and_simplified_networks(
+    original_nw: nx.Graph, 
+    simplified_nw: nx.Graph, 
+    network_names: Tuple[str, str] = ("Original OSM", "Simplified OSM")
+) -> None:
+    """Compare statistics between original and simplified network graphs.
     
+    Prints comprehensive statistics comparing node counts, edge counts, degree distributions,
+    and edge lengths (if available) between two network graphs.
+    
+    Args:
+        original_nw: A networkx graph representing the original network.
+        simplified_nw: A networkx graph representing the simplified network.
+        network_names (tuple, optional): A tuple of two strings naming the networks for display.
+            Defaults to ("Original OSM", "Simplified OSM").
+    
+    Returns:
+        None: Prints comparison statistics to console.
+    """
     print(f"=== Network Comparison: {network_names[0]} vs {network_names[1]} ===\n")
     
     # Basic counts
@@ -75,9 +104,19 @@ def compare_original_and_simplified_networks(original_nw, simplified_nw, network
         print(f"Longest edge: {max(orig_lengths):.1f}m → {max(simp_lengths):.1f}m")
 
 
-def plot_node_degree_changes(original_nw, simplified_nw):
-    """Analyze how node degrees changed during simplification - plot only"""
+def plot_node_degree_changes(original_nw: nx.Graph, simplified_nw: nx.Graph) -> None:
+    """Plot bar chart comparing node degree distributions between original and simplified networks.
     
+    Creates a bar chart showing the distribution of node degrees (number of connections per node)
+    for both the original and simplified networks side by side.
+    
+    Args:
+        original_nw: A networkx graph representing the original network.
+        simplified_nw: A networkx graph representing the simplified network.
+    
+    Returns:
+        None: Displays a matplotlib bar chart.
+    """
     orig_degrees = pd.Series([d for n, d in original_nw.degree()], name='Original')
     simp_degrees = pd.Series([d for n, d in simplified_nw.degree()], name='Simplified')
     
@@ -98,8 +137,22 @@ def plot_node_degree_changes(original_nw, simplified_nw):
     plt.show()
 
 
-def create_downtown_network_map(nw_gdf):
-
+def create_downtown_network_map(nw_gdf: gpd.GeoDataFrame, output_html_file: Optional[Path | str] = None) -> folium.Map:
+    """Create an interactive Folium map of downtown San Francisco network links.
+    
+    Filters the network to downtown SF bounding box and creates an interactive map
+    with color-coded highway types and tooltips showing link attributes.
+    
+    Args:
+        nw_gdf (gpd.GeoDataFrame): A GeoDataFrame containing network links with columns including
+            'A', 'B', 'highway', 'name', 'oneway', 'reversed', 'lanes', 'bike_access',
+            'truck_access', 'walk_access', 'bus_only', 'ferry_only', 'rail_only'.
+        output_html_file (Optional[Path | str]): If provided, saves the map to this HTML file path.
+            Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
+    
+    Returns:
+        folium.Map: The interactive Folium map object that can be displayed or further modified.
+    """
     # Define downtown bounding box
     downtown_sf_bbox = [-122.42, 37.77, -122.39, 37.80]
 
@@ -141,12 +194,27 @@ def create_downtown_network_map(nw_gdf):
         zoom_start=15,
         location=[37.787589, -122.403542] # Hard coded for downtown links but could make dynamic to create for other areas of the city
     )
-    m.save('downtown_sf_network_map.html')
-    # return m
+    if output_html_file:
+        m.save(output_html_file)
+    return m
 
 
-def clip_original_and_simplified_links(orig_links, links_gdf, taz_gdf):
-
+def clip_original_and_simplified_links(orig_links: gpd.GeoDataFrame, links_gdf: gpd.GeoDataFrame, taz_gdf: gpd.GeoDataFrame) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Clip original and simplified link networks to specific TAZ zones.
+    
+    Filters both original and simplified networks to only include links within
+    specified Traffic Analysis Zones (TAZs).
+    
+    Args:
+        orig_links (gpd.GeoDataFrame): GeoDataFrame of original network links.
+        links_gdf (gpd.GeoDataFrame): GeoDataFrame of simplified network links.
+        taz_gdf (gpd.GeoDataFrame): GeoDataFrame containing TAZ boundaries with a 'TAZ' column.
+    
+    Returns:
+        tuple: A tuple containing:
+            - orig_links_gdf_clip (gpd.GeoDataFrame): Original links clipped to TAZ boundaries.
+            - links_gdf_clip (gpd.GeoDataFrame): Simplified links clipped to TAZ boundaries.
+    """
     # For taz mask
     taz_list = [360, 293, 292, 406, 562, 561, 565]
     taz_gdf_subs = taz_gdf[taz_gdf["TAZ"].isin(taz_list)]
@@ -158,8 +226,24 @@ def clip_original_and_simplified_links(orig_links, links_gdf, taz_gdf):
     return orig_links_gdf_clip, links_gdf_clip
 
 
-def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, output_dir):
-
+def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, links_gdf_clip: gpd.GeoDataFrame, output_file: Optional[Path | str] = None) -> folium.plugins.DualMap:
+    """Create a dual-pane Folium map comparing original and simplified network links.
+    
+    Creates an interactive side-by-side map with original links on the left and simplified
+    links on the right, color-coded by highway type with a shared legend.
+    
+    Args:
+        orig_links_gdf_clip (gpd.GeoDataFrame): Clipped GeoDataFrame of original network links
+            with a 'highway' column indicating road type.
+        links_gdf_clip (gpd.GeoDataFrame): Clipped GeoDataFrame of simplified network links,
+            optionally with a 'highway' column.
+        output_file (Optional[Path | str]): Full file path where the output HTML map will be saved.
+            Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
+    
+    Returns:
+        folium.plugins.DualMap: The dual map object showing both networks side by side.
+            Optionally saves the map to the specified output file path if provided.
+    """
     # Create color palette
     palette1 = sns.color_palette("Set1", 9).as_hex()
     palette2 = sns.color_palette("Set2", 8).as_hex() 
@@ -243,5 +327,6 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
     m.m1.get_root().html.add_child(folium.Element(legend_html))
     m.m2.get_root().html.add_child(folium.Element(legend_html))
 
-    m.save(output_dir / "split_map.html")
+    if output_file:
+        m.save(output_file)
     return m
