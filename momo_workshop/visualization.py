@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-
+import folium
+from folium import plugins
+import seaborn as sns
 
 def create_osmnx_plot(osm_network):
     
@@ -140,3 +142,121 @@ def create_downtown_network_map(nw_gdf):
     )
     m.save('downtown_sf_network_map.html')
     # return m
+
+
+def clip_original_and_simplified_links(original_links, simplified_links):
+    # Load taz file
+    taz_gdf = gpd.read_file("data/processed/mtc_zones/tazs_TM2_2_5.shp")
+
+    # For taz mask
+    taz_list = [360, 293, 292, 406, 562, 561, 565]
+    taz_gdf_subs = taz_gdf[taz_gdf["taz"].isin(taz_list)]
+
+    # Get gdf of original graph edges
+    orig_links_gdf = osmnx.graph_to_gdfs(g, nodes=False, edges=True)
+
+    # Change lists to strings in highway column of original network
+    def get_highway_type(highway_val):
+        if isinstance(highway_val, list):
+            return highway_val[0] if highway_val else 'unknown'
+        return highway_val if highway_val else 'unknown'
+
+    # Apply the function to get clean highway types
+    orig_links_gdf_clean = orig_links_gdf.copy()
+    orig_links_gdf_clean['highway'] = orig_links_gdf_clean['highway'].apply(get_highway_type)
+
+
+    # Clip
+    orig_links_gdf_clip = gpd.clip(orig_links_gdf_clean, taz_gdf_subs)
+    links_gdf_clip = gpd.clip(links_gdf, taz_gdf_subs)
+
+    return orig_links_gdf_clip, links_gdf_clip
+
+
+
+def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip):
+
+    # Create color palette
+    palette1 = sns.color_palette("Set1", 9).as_hex()
+    palette2 = sns.color_palette("Set2", 8).as_hex() 
+    palette3 = sns.color_palette("Dark2", 6).as_hex()
+    highway_palette = palette1 + palette2 + palette3
+
+    # Get unique highway types and create color mapping
+    highway_types = sorted(orig_links_gdf_clip['highway'].unique())
+    highway_colors = {highway_type: highway_palette[i % len(highway_palette)] 
+                    for i, highway_type in enumerate(highway_types)}
+
+    # Get bounds for the map instead of centroid
+    bounds = orig_links_gdf_clip.total_bounds
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lon = (bounds[0] + bounds[2]) / 2
+
+    # Create dual map with CartoDB light base maps
+    m = plugins.DualMap(location=[center_lat, center_lon], zoom_start=17, tiles=None)
+
+    folium.TileLayer("cartodbpositron").add_to(m.m1)
+    folium.TileLayer("cartodbpositron").add_to(m.m2)
+
+    # Add original links to left map with highway-based colors
+    for highway_type in highway_types:
+        highway_subset = orig_links_gdf_clip[orig_links_gdf_clip['highway'] == highway_type]
+        if not highway_subset.empty:
+            folium.GeoJson(
+                highway_subset,
+                style_function=lambda x, color=highway_colors[highway_type]: {
+                    'color': color,
+                    'weight': 2,
+                    'opacity': 0.8
+                }
+            ).add_to(m.m1)
+
+    # Add simplified links to right map with highway-based colors
+    links_gdf_clip_with_highway = links_gdf_clip.copy()
+    # Map simplified links to highway types if not already present
+    if 'highway' not in links_gdf_clip_with_highway.columns:
+        # You may need to add logic here to map highway types to simplified links
+        # For now, using a default style
+        folium.GeoJson(
+            links_gdf_clip,
+            style_function=lambda x: {
+                'color': 'blue', 
+                'weight': 2,
+                'opacity': 0.8
+            }
+        ).add_to(m.m2)
+    else:
+        for highway_type in highway_types:
+            highway_subset = links_gdf_clip_with_highway[links_gdf_clip_with_highway['highway'] == highway_type]
+            if not highway_subset.empty:
+                folium.GeoJson(
+                    highway_subset,
+                    style_function=lambda x, color=highway_colors[highway_type]: {
+                        'color': color,
+                        'weight': 2,
+                        'opacity': 0.8
+                    }
+                ).add_to(m.m2)
+
+    # Create legend using Folium's native legend functionality
+    legend_html = '''
+    <div style="position: fixed; 
+                bottom: 50px; left: 50px; width: 200px; height: auto; 
+                background-color: white; border:2px solid grey; z-index:9999; 
+                font-size:14px; padding: 10px">
+    <p><b>Highway Types</b></p>
+    '''
+
+    for highway_type, color in highway_colors.items():
+        legend_html += f'''
+        <p><i class="fa fa-minus" style="color:{color}; font-size: 20px"></i> {highway_type}</p>
+        '''
+
+    legend_html += '</div>'
+
+    # Add legend to both maps
+    m.m1.get_root().html.add_child(folium.Element(legend_html))
+    m.m2.get_root().html.add_child(folium.Element(legend_html))
+
+    m.save("maps/split_map.html")
+    m
