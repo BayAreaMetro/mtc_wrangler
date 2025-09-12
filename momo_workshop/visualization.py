@@ -2,6 +2,7 @@ import osmnx as ox
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 import seaborn as sns
 import folium
 from folium import plugins
@@ -14,7 +15,7 @@ def create_osmnx_plot(osm_network):
         osm_network,
         figsize=(15, 15),
         node_size=0,  # Hide nodes for cleaner view
-        edge_color='blue',
+        edge_color='grey',
         edge_alpha=0.5,
         bgcolor='white',
         show=False,
@@ -144,37 +145,20 @@ def create_downtown_network_map(nw_gdf):
     # return m
 
 
-def clip_original_and_simplified_links(original_links, simplified_links):
-    # Load taz file
-    taz_gdf = gpd.read_file("data/processed/mtc_zones/tazs_TM2_2_5.shp")
+def clip_original_and_simplified_links(orig_links, links_gdf, taz_gdf):
 
     # For taz mask
     taz_list = [360, 293, 292, 406, 562, 561, 565]
-    taz_gdf_subs = taz_gdf[taz_gdf["taz"].isin(taz_list)]
-
-    # Get gdf of original graph edges
-    orig_links_gdf = osmnx.graph_to_gdfs(g, nodes=False, edges=True)
-
-    # Change lists to strings in highway column of original network
-    def get_highway_type(highway_val):
-        if isinstance(highway_val, list):
-            return highway_val[0] if highway_val else 'unknown'
-        return highway_val if highway_val else 'unknown'
-
-    # Apply the function to get clean highway types
-    orig_links_gdf_clean = orig_links_gdf.copy()
-    orig_links_gdf_clean['highway'] = orig_links_gdf_clean['highway'].apply(get_highway_type)
-
+    taz_gdf_subs = taz_gdf[taz_gdf["TAZ"].isin(taz_list)]
 
     # Clip
-    orig_links_gdf_clip = gpd.clip(orig_links_gdf_clean, taz_gdf_subs)
+    orig_links_gdf_clip = gpd.clip(orig_links, taz_gdf_subs)
     links_gdf_clip = gpd.clip(links_gdf, taz_gdf_subs)
 
     return orig_links_gdf_clip, links_gdf_clip
 
 
-
-def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip):
+def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, output_dir):
 
     # Create color palette
     palette1 = sns.color_palette("Set1", 9).as_hex()
@@ -194,6 +178,7 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip):
 
     # Create dual map with CartoDB light base maps
     m = plugins.DualMap(location=[center_lat, center_lon], zoom_start=17, tiles=None)
+    print(f"Created map {type(m)}")
 
     folium.TileLayer("cartodbpositron").add_to(m.m1)
     folium.TileLayer("cartodbpositron").add_to(m.m2)
@@ -258,5 +243,5 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip):
     m.m1.get_root().html.add_child(folium.Element(legend_html))
     m.m2.get_root().html.add_child(folium.Element(legend_html))
 
-    m.save("maps/split_map.html")
-    m
+    m.save(output_dir / "split_map.html")
+    return m
