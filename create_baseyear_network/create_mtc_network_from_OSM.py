@@ -316,6 +316,8 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     - cycleway         separate way for cycling (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcycleway)
     - pedestrian       designated for pedestrians (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dpedestrian)
                        -> converted to footway or path (if cycleway too)
+    - corridor         hallway inside a building (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcorridor)
+                       -> converted to footway
     - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
     - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
 
@@ -359,6 +361,8 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # steps -> footway, steps=True
     links_gdf.loc[links_gdf.highway == 'steps', 'steps'] = True
     links_gdf.loc[links_gdf.highway == 'steps', 'highway'] = 'footway'
+    # corridor -> footway
+    links_gdf.loc[links_gdf.highway == 'corridor', 'highway'] = 'footway'
 
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'steps'  ] = True
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and 'steps' in x), 'highway'] = 'footway'
@@ -1800,9 +1804,12 @@ def step5_prepare_gtfs_transit_data(
     elif county in COUNTY_NAME_TO_GTFS_AGENCIES:
         keep_agencies = COUNTY_NAME_TO_GTFS_AGENCIES[county]
         WranglerLogger.info(f"Keeping agencies for {county}: {keep_agencies}")
+        drop_agencies = []
         for agency_id in gtfs_model.agency['agency_id'].tolist():
             if agency_id not in keep_agencies:
-                drop_transit_agency(gtfs_model, agency_id=agency_id)
+                drop_agencies.append(agency_id)
+        WranglerLogger.info(f"Dropping agencies for {drop_agencies}")
+        drop_transit_agency(gtfs_model, agency_id=drop_agencies)
     
     # Filter by geographic boundary
     county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
