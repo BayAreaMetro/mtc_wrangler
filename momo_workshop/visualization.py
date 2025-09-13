@@ -170,6 +170,14 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
     highway_types = sorted(orig_links_gdf_clip['highway'].unique())
     highway_colors = {highway_type: highway_palette[i % len(highway_palette)] 
                     for i, highway_type in enumerate(highway_types)}
+    
+    # Create A + B col for tooltip
+    orig_links_gdf_clip["A & B (Combined)"] = orig_links_gdf_clip["A"].astype(str) + ", " + orig_links_gdf_clip["B"].astype(str)
+    links_gdf_clip["A & B (Combined)"] = links_gdf_clip["A"].astype(str) + ", " + links_gdf_clip["B"].astype(str)
+
+    # Define tooltip fields
+    tooltip_fields = ["A & B (Combined)", "highway", "name", "oneway", "reversed", "lanes", "bike_access", "truck_access", "walk_access", "bus_only"]
+    tooltip_aliases = ["A & B:", "Highway:", "Name:", "Oneway:", "Reversed:", "Lanes:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
 
     # Get bounds for the map instead of centroid
     bounds = orig_links_gdf_clip.total_bounds
@@ -183,6 +191,27 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
     folium.TileLayer("cartodbpositron").add_to(m.m1)
     folium.TileLayer("cartodbpositron").add_to(m.m2)
 
+    # Add titles to each map
+    title_left = '''
+    <div style="position: fixed; 
+                top: 10px; left: 25%; transform: translateX(-50%); width: 200px; height: 40px; 
+                background-color: white; border:2px solid grey; z-index:9999; 
+                font-size:16px; font-weight:bold; text-align:center; padding: 8px;
+                white-space: nowrap;">
+    <p>Original OSM Network</p>
+    </div>
+    '''
+    
+    title_right = '''
+    <div style="position: fixed; 
+                top: 10px; left: 75%; transform: translateX(-50%); width: 200px; height: 40px; 
+                background-color: white; border:2px solid grey; z-index:9999; 
+                font-size:16px; font-weight:bold; text-align:center; padding: 8px;
+                white-space: nowrap;">
+    <p>Simplified OSM Network</p>
+    </div>
+    '''
+
     # Add original links to left map with highway-based colors
     for highway_type in highway_types:
         highway_subset = orig_links_gdf_clip[orig_links_gdf_clip['highway'] == highway_type]
@@ -193,7 +222,16 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
                     'color': color,
                     'weight': 2,
                     'opacity': 0.8
-                }
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=tooltip_fields,
+                    aliases=tooltip_aliases
+                    ),
+                    marker=folium.Circle(
+                        radius=0, 
+                        # opacity=0,
+                        stroke=False
+                        )
             ).add_to(m.m1)
 
     # Add simplified links to right map with highway-based colors
@@ -208,7 +246,11 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
                 'color': 'blue', 
                 'weight': 2,
                 'opacity': 0.8
-            }
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                aliases=tooltip_aliases
+            ),
         ).add_to(m.m2)
     else:
         for highway_type in highway_types:
@@ -220,7 +262,11 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
                         'color': color,
                         'weight': 2,
                         'opacity': 0.8
-                    }
+                    },
+            tooltip=folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                aliases=tooltip_aliases
+            )
                 ).add_to(m.m2)
 
     # Create legend using Folium's native legend functionality
@@ -239,8 +285,11 @@ def map_original_and_simplified_links(orig_links_gdf_clip, links_gdf_clip, outpu
 
     legend_html += '</div>'
 
-    # Add legend to both maps
+    # Add titles and legend to both maps
+    m.m1.get_root().html.add_child(folium.Element(title_left))
     m.m1.get_root().html.add_child(folium.Element(legend_html))
+    
+    m.m2.get_root().html.add_child(folium.Element(title_right))
     m.m2.get_root().html.add_child(folium.Element(legend_html))
 
     m.save(output_dir / "split_map.html")
