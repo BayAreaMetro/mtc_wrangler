@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from pathlib import Path
 import networkx as nx
 import osmnx as ox
@@ -9,7 +9,54 @@ import geopandas as gpd
 import seaborn as sns
 import folium
 from folium import plugins
-import seaborn as sns
+
+# Dictionary mapping highway types to display categories
+HIGHWAY_CATEGORY_MAP = {
+    # Transit links
+    'transit': 'Transit',
+    'busway': 'Transit',
+    'rail': 'Transit',
+    'light_rail': 'Transit',
+    
+    # MAZ/TAZ centroids
+    'MAZ': 'MAZ connector',
+    'TAZ': 'TAZ connector',
+
+    # Footway and cycle
+    'footway': 'Footway/Cycle',
+    'path': 'Footway/Cycle',
+    'cycleway': 'Footway/Cycle',
+    'pedestrian': 'Footway/Cycle',
+    'steps': 'Footway/Cycle',
+    'living_street': 'Footway/Cycle',
+    
+    # Auto links by hierarchy
+    'motorway': 'Motorway/Trunk',
+    'motorway_link': 'Motorway/Trunk',
+    'trunk': 'Motorway/Trunk',
+    'trunk_link': 'Motorway/Trunk',
+    'primary': 'Primary/Secondary',
+    'primary_link': 'Primary/Secondary',
+    'secondary': 'Primary/Secondary',
+    'secondary_link': 'Primary/Secondary',
+    'tertiary': 'Tertiary/Local',
+    'tertiary_link': 'Tertiary/Local',
+    'residential': 'Tertiary/Local',
+    'unclassified': 'Tertiary/Local',
+    'service': 'Tertiary/Local',
+}
+
+# Dictionary for category styles (color, line width)
+CATEGORY_STYLES = {
+    'Transit': ('#1f77b4', 4),           # Medium blue
+    'MAZ connector': ('#9467bd', 2),     # Purple, thin
+    'TAZ connector': ('#6a3d9a', 3),     # Darker purple, medium
+    'Footway/Cycle': ('#2ca02c', 2),     # Green
+    'Motorway/Trunk': ('#d62728', 6),    # Dark red-orange
+    'Primary/Secondary': ('#ff7f0e', 5), # Dark orange
+    'Tertiary/Local': ('#ff9933', 4),    # Medium orange
+    'Other': ('#808080', 2)              # Gray
+}
 
 def create_osmnx_plot(osm_network: nx.MultiDiGraph) -> Tuple[plt.Figure, plt.Axes]:
     """Create an interactive plot of an OSMnx network graph.
@@ -163,37 +210,71 @@ def create_downtown_network_map(nw_gdf: gpd.GeoDataFrame, output_html_file: Opti
     print(f"Original network: {len(nw_gdf):,} links")
     print(f"Subset network: {len(subset_gdf):,} links")
 
-    
-
     # Create A + B column for tooltip
     subset_gdf["A & B (Combined)"] = subset_gdf["A"].astype(str) + ", " + subset_gdf["B"].astype(str) 
+    
+    # Create highway_display column with aggregate categories
+    # Check for unknown highway types
+    unknown_highways = set(subset_gdf['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
+    if unknown_highways:
+        print(f"ERROR: Unknown highway types found: {unknown_highways}")
+        raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
+    
+    subset_gdf['highway_display'] = subset_gdf['highway'].map(HIGHWAY_CATEGORY_MAP)
 
-    # Create palette for 23 cats
-    palette1 = sns.color_palette("Set1", 9).as_hex()
-    palette2 = sns.color_palette("Set2", 8).as_hex() 
-    palette3 = sns.color_palette("Dark2", 6).as_hex()
-    highway_palette = palette1 + palette2 + palette3
+    # Define the tooltip columns
+    tooltip_cols = ["A & B (Combined)", "highway", "highway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only", "ferry_only", "rail_only"] 
 
-    # Define the tooltip columns - missing osm link id, ML columns
-    tooltip_cols = ["A & B (Combined)", "highway", "name", "oneway", "reversed", "lanes", "bike_access", "truck_access", "walk_access", "bus_only", "ferry_only", "rail_only"] 
-
-    # This drags render speed so not using for now
-    # esri_satellite = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-
-    m = subset_gdf.explore(
-        column='highway',
-        categorical=True,
-        cmap=highway_palette,
-        legend=True,
-        style_kwds={'weight': 3, 'opacity': 1},
-        tooltip=tooltip_cols,
-        popup=True,
-        tiles='CartoDB dark_matter',
-        # tiles=esri_satellite,
-        # attr='Esri',
+    # Create base map with CartoDB light background
+    center_lat, center_lon = 37.787589, -122.403542
+    m = folium.Map(
+        location=[center_lat, center_lon],
         zoom_start=15,
-        location=[37.787589, -122.403542] # Hard coded for downtown links but could make dynamic to create for other areas of the city
+        tiles='CartoDB positron'  # Use CartoDB light tiles with proper name
     )
+    
+    # Add each display category with custom styling
+    display_categories = subset_gdf['highway_display'].unique()
+    
+    for display_cat in display_categories:
+        cat_subset = subset_gdf[subset_gdf['highway_display'] == display_cat]
+        color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
+        
+        if not cat_subset.empty:
+            folium.GeoJson(
+                cat_subset,
+                style_function=lambda x, color=color, width=width: {
+                    'color': color,
+                    'weight': width,
+                    'opacity': 0.8
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=tooltip_cols,
+                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"],
+                    style="background-color: white; color: #333333; font-family: arial; font-size: 11px; padding: 7px;"
+                ),
+                popup=folium.GeoJsonPopup(
+                    fields=tooltip_cols,
+                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"]
+                )
+            ).add_to(m)
+    
+    # Add simplified legend based on display categories actually present
+    legend_html = '<div style="position: fixed; top: 10px; right: 10px; width: 200px; height: auto; background-color: white; border:2px solid grey; z-index:9999; font-size:11px; padding: 7px">'
+    legend_html += '<p style="margin: 2px 0;"><b>Road Categories</b></p>'
+    
+    # Only add legend items for categories present in the data
+    category_order = ['Transit', 'MAZ connector', 'TAZ connector', 'Footway/Cycle', 'Motorway/Trunk', 'Primary/Secondary', 'Tertiary/Local', 'Other']
+    for category in category_order:
+        if category in display_categories:
+            color, width = CATEGORY_STYLES.get(category, ('#808080', 2))
+            # Scale font size based on line width
+            font_size = 10 + width * 2
+            legend_html += f'<p style="margin: 2px 0;"><i class="fa fa-minus" style="color:{color}; font-size: {font_size}px"></i> {category}</p>'
+    
+    legend_html += '</div>'
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
     if output_html_file:
         m.save(output_html_file)
     return m
@@ -244,36 +325,43 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
         folium.plugins.DualMap: The dual map object showing both networks side by side.
             Optionally saves the map to the specified output file path if provided.
     """
-    # Create color palette
-    palette1 = sns.color_palette("Set1", 9).as_hex()
-    palette2 = sns.color_palette("Set2", 8).as_hex() 
-    palette3 = sns.color_palette("Dark2", 6).as_hex()
-    highway_palette = palette1 + palette2 + palette3
-
-    # Get unique highway types and create color mapping
-    highway_types = sorted(orig_links_gdf_clip['highway'].unique())
-    highway_colors = {highway_type: highway_palette[i % len(highway_palette)] 
-                    for i, highway_type in enumerate(highway_types)}
+    # Check for unknown highway types
+    orig_links_gdf_clip = orig_links_gdf_clip.copy()
+    unknown_highways = set(orig_links_gdf_clip['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
+    if unknown_highways:
+        print(f"ERROR: Unknown highway types in original links: {unknown_highways}")
+        raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
     
-    # Create A + B col for tooltip
+    orig_links_gdf_clip['highway_display'] = orig_links_gdf_clip['highway'].map(HIGHWAY_CATEGORY_MAP)
+    
+    links_gdf_clip = links_gdf_clip.copy()
+    if 'highway' in links_gdf_clip.columns:
+        unknown_highways = set(links_gdf_clip['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
+        if unknown_highways:
+            print(f"ERROR: Unknown highway types in simplified links: {unknown_highways}")
+            raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
+        links_gdf_clip['highway_display'] = links_gdf_clip['highway'].map(HIGHWAY_CATEGORY_MAP)
+    
+    # Create A + B columns for tooltip
     orig_links_gdf_clip["A & B (Combined)"] = orig_links_gdf_clip["A"].astype(str) + ", " + orig_links_gdf_clip["B"].astype(str)
     links_gdf_clip["A & B (Combined)"] = links_gdf_clip["A"].astype(str) + ", " + links_gdf_clip["B"].astype(str)
 
     # Define tooltip fields
-    tooltip_fields = ["A & B (Combined)", "highway", "name", "oneway", "reversed", "lanes", "bike_access", "truck_access", "walk_access", "bus_only"]
-    tooltip_aliases = ["A & B:", "Highway:", "Name:", "Oneway:", "Reversed:", "Lanes:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
-
-    # Get bounds for the map instead of centroid
+    tooltip_fields = ["A & B (Combined)", "highway", "highway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only"]
+    tooltip_aliases = ["A & B:", "Highway:", "Category:", "Name:", "Oneway:", "Reversed:", "Lanes:", "ML Lanes:", "Access:", "ML Access:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
+    
+    # Get bounds for the map
     bounds = orig_links_gdf_clip.total_bounds
     center_lat = (bounds[1] + bounds[3]) / 2
     center_lon = (bounds[0] + bounds[2]) / 2
 
-    # Create dual map with CartoDB light base maps
+    # Create dual map without default tiles
     m = plugins.DualMap(location=[center_lat, center_lon], zoom_start=17, tiles=None)
     print(f"Created map {type(m)}")
 
-    folium.TileLayer("cartodbpositron").add_to(m.m1)
-    folium.TileLayer("cartodbpositron").add_to(m.m2)
+    # Add CartoDB light background to both maps
+    folium.TileLayer("CartoDB positron").add_to(m.m1)
+    folium.TileLayer("CartoDB positron").add_to(m.m2)
 
     # Add titles to each map
     title_left = '''
@@ -296,77 +384,81 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
     </div>
     '''
 
-    # Add original links to left map with highway-based colors
-    for highway_type in highway_types:
-        highway_subset = orig_links_gdf_clip[orig_links_gdf_clip['highway'] == highway_type]
-        if not highway_subset.empty:
+    # Get unique display categories from original links
+    display_categories = sorted(orig_links_gdf_clip['highway_display'].unique())
+
+    # Add original links to left map with category-based colors and widths
+    for display_cat in display_categories:
+        cat_subset = orig_links_gdf_clip[orig_links_gdf_clip['highway_display'] == display_cat]
+        color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
+        
+        if not cat_subset.empty:
             folium.GeoJson(
-                highway_subset,
-                style_function=lambda x, color=highway_colors[highway_type]: {
+                cat_subset,
+                style_function=lambda x, color=color, width=width: {
                     'color': color,
-                    'weight': 2,
+                    'weight': width,
                     'opacity': 0.8
                 },
                 tooltip=folium.GeoJsonTooltip(
                     fields=tooltip_fields,
                     aliases=tooltip_aliases
-                    ),
-                    marker=folium.Circle(
-                        radius=0, 
-                        # opacity=0,
-                        stroke=False
-                        )
+                )
             ).add_to(m.m1)
 
-    # Add simplified links to right map with highway-based colors
-    links_gdf_clip_with_highway = links_gdf_clip.copy()
-    # Map simplified links to highway types if not already present
-    if 'highway' not in links_gdf_clip_with_highway.columns:
-        # You may need to add logic here to map highway types to simplified links
-        # For now, using a default style
+    # Handle simplified links styling
+    if 'highway_display' not in links_gdf_clip.columns:
+        # If no highway column, use default blue styling
         folium.GeoJson(
             links_gdf_clip,
             style_function=lambda x: {
-                'color': 'blue', 
-                'weight': 2,
+                'color': '#1f77b4', 
+                'weight': 3,
                 'opacity': 0.8
             },
             tooltip=folium.GeoJsonTooltip(
-                fields=tooltip_fields,
-                aliases=tooltip_aliases
-            ),
+                fields=["A & B (Combined)"],
+                aliases=["A & B:"]
+            )
         ).add_to(m.m2)
     else:
-        for highway_type in highway_types:
-            highway_subset = links_gdf_clip_with_highway[links_gdf_clip_with_highway['highway'] == highway_type]
-            if not highway_subset.empty:
+        # Use category-based styling for simplified links
+        simplified_categories = sorted(links_gdf_clip['highway_display'].unique())
+        for display_cat in simplified_categories:
+            cat_subset = links_gdf_clip[links_gdf_clip['highway_display'] == display_cat]
+            color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
+            
+            if not cat_subset.empty:
                 folium.GeoJson(
-                    highway_subset,
-                    style_function=lambda x, color=highway_colors[highway_type]: {
+                    cat_subset,
+                    style_function=lambda x, color=color, width=width: {
                         'color': color,
-                        'weight': 2,
+                        'weight': width,
                         'opacity': 0.8
                     },
-            tooltip=folium.GeoJsonTooltip(
-                fields=tooltip_fields,
-                aliases=tooltip_aliases
-            )
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=tooltip_fields,
+                        aliases=tooltip_aliases
+                    )
                 ).add_to(m.m2)
 
-    # Create legend using Folium's native legend functionality
-    legend_html = '''
-    <div style="position: fixed; 
-                bottom: 50px; left: 50px; width: 200px; height: auto; 
-                background-color: white; border:2px solid grey; z-index:9999; 
-                font-size:14px; padding: 10px">
-    <p><b>Highway Types</b></p>
-    '''
-
-    for highway_type, color in highway_colors.items():
-        legend_html += f'''
-        <p><i class="fa fa-minus" style="color:{color}; font-size: 20px"></i> {highway_type}</p>
-        '''
-
+    # Create dynamic simplified legend based on categories present
+    all_categories = set(display_categories)
+    if 'highway_display' in links_gdf_clip.columns:
+        all_categories.update(links_gdf_clip['highway_display'].unique())
+    
+    legend_html = '<div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: auto; background-color: white; border:2px solid grey; z-index:9999; font-size:11px; padding: 7px">'
+    legend_html += '<p style="margin: 2px 0;"><b>Link Categories</b></p>'
+    
+    # Add legend items in a logical order
+    category_order = ['Transit', 'MAZ connector', 'TAZ connector', 'Footway/Cycle', 'Motorway/Trunk', 'Primary/Secondary', 'Tertiary/Local', 'Other']
+    for category in category_order:
+        if category in all_categories:
+            color, width = CATEGORY_STYLES.get(category, ('#808080', 2))
+            # Scale font size based on line width to show visual hierarchy
+            font_size = 10 + width * 2
+            legend_html += f'<p style="margin: 2px 0;"><i class="fa fa-minus" style="color:{color}; font-size: {font_size}px"></i> {category}</p>'
+    
     legend_html += '</div>'
 
     # Add titles and legend to both maps
