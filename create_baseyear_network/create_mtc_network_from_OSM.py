@@ -1924,8 +1924,9 @@ def step6_create_transit_network(
             default_frequency_for_onetime_route=180*60,  # 180 minutes
             add_stations_and_links=True,
             trace_shape_ids=[
-                'SF:60:20230930',    # LOWL bus line
-                'SF:19800:20230930', # F line LRT
+                'SF:1400:20230930',    # 14 bus
+                # 'SF:60:20230930',    # LOWL bus line
+                # 'SF:19800:20230930', # F line LRT
             ]
         )
         WranglerLogger.info(f"Created transit Feed object with stops and links integrated")
