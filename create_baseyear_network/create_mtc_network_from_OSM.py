@@ -1490,7 +1490,14 @@ def step1_download_osm_network(
         NetworkX MultiDiGraph containing the raw OSM road network
     """
     WranglerLogger.info(f"======= STEP 1: Download OSM network for {county} =======")
-    
+
+    # Configure OSMnx
+    osmnx.settings.use_cache = True
+    osmnx.settings.cache_folder = output_dir / "osmnx_cache"
+    osmnx.settings.log_file = True
+    osmnx.settings.logs_folder = output_dir / "osmnx_logs"
+    osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
+        
     county_no_spaces = county.replace(" ", "")
     OSM_network_type = "all"  # Include all road types
     
@@ -2024,14 +2031,10 @@ if __name__ == "__main__":
 
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Configure OSMnx
-    osmnx.settings.use_cache = True
-    osmnx.settings.cache_folder = output_dir / "osmnx_cache"
-    osmnx.settings.log_file = True
-    osmnx.settings.logs_folder = output_dir / "osmnx_logs"
-    osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
-
+    
+    # Note: pygris uses its own default cache location determined by appdirs
+    # The cache=True parameter in pygris.counties() calls enables caching
+    
     # Setup logging
     INFO_LOG  = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.info.log"
     DEBUG_LOG = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.debug.log"
