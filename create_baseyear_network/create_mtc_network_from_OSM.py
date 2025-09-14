@@ -1707,7 +1707,11 @@ def step4_add_centroids_and_connectors(
         zone_buffer_distance=20,
         num_centroid_connectors=4,
         max_mode_graph_degrees=4,
-        default_link_attribute_dict = {"lanes":7, "oneway":False}
+        default_link_attribute_dict = {
+            "lanes":7, "oneway":False,
+            # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
+            "drive_access": False
+        }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
     # MAZ & MAZ walk/bike connectors
