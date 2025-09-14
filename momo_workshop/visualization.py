@@ -513,7 +513,8 @@ def create_roadway_transit_map(
     roadway_gdf: gpd.GeoDataFrame,
     transit_gdf: gpd.GeoDataFrame,
     output_html_file: Optional[Path | str] = None,
-    bbox_name: Optional[str] = None
+    bbox_name: Optional[str] = None,
+    route_ids: Optional[list[str]] = None
 ) -> folium.Map:
     """Create an interactive Folium map showing both roadway and transit networks.
     
@@ -529,6 +530,8 @@ def create_roadway_transit_map(
             Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
         bbox_name (Optional[str]): Name of bounding box from BOUNDING_BOXES dictionary to filter the map.
             If None, no spatial filtering is applied. Defaults to None.
+        route_ids (Optional[list[str]]): List of route_id strings to display. If None, displays all routes.
+            Defaults to None.
     
     Returns:
         folium.Map: The interactive Folium map object showing both networks.
@@ -555,6 +558,13 @@ def create_roadway_transit_map(
     # Exclude centroid connectors (MAZ and TAZ) from roadway
     roadway_subset = roadway_subset[~roadway_subset['highway'].isin(['MAZ', 'TAZ'])]
     print(f"Roadway network after removing centroids: {len(roadway_subset):,} links")
+    
+    # Filter transit by route_ids if specified
+    if route_ids is not None and 'route_id' in transit_subset.columns:
+        transit_subset = transit_subset[transit_subset['route_id'].isin(route_ids)].copy()
+        print(f"Transit network filtered to {len(route_ids)} routes: {len(transit_subset):,} links")
+        if transit_subset.empty:
+            print(f"WARNING: No transit links found for route_ids: {route_ids}")
     
     # Create A + B column for roadway tooltips
     roadway_subset["A & B (Combined)"] = roadway_subset["A"].astype(str) + ", " + roadway_subset["B"].astype(str)
