@@ -10,6 +10,18 @@ import seaborn as sns
 import folium
 from folium import plugins
 
+# Dictionary of common bounding boxes [min_lon, min_lat, max_lon, max_lat]
+BOUNDING_BOXES = {
+    'SF_downtown': [-122.42, 37.77, -122.39, 37.80],
+    'SF_financial_district': [-122.41, 37.79, -122.39, 37.80],
+    'SF_mission': [-122.43, 37.75, -122.40, 37.77],
+    'SF': [-122.52, 37.70, -122.35, 37.82],  # All of San Francisco
+    'Oakland_downtown': [-122.28, 37.79, -122.26, 37.82],
+    'Berkeley_downtown': [-122.27, 37.86, -122.25, 37.88],
+    'San_Jose_downtown': [-121.90, 37.32, -121.87, 37.35],
+    'Bay_Area': [-123.0, 36.9, -121.0, 38.9]
+}
+
 # Dictionary mapping highway types to display categories
 HIGHWAY_CATEGORY_MAP = {
     # Transit links
@@ -24,6 +36,8 @@ HIGHWAY_CATEGORY_MAP = {
 
     # Footway and cycle
     'footway': 'Footway/Cycle',
+    'track': 'Footway/Cycle',
+    'bridleway': 'Footway/Cycle',
     'path': 'Footway/Cycle',
     'cycleway': 'Footway/Cycle',
     'pedestrian': 'Footway/Cycle',
@@ -42,6 +56,7 @@ HIGHWAY_CATEGORY_MAP = {
     'tertiary': 'Tertiary/Local',
     'tertiary_link': 'Tertiary/Local',
     'residential': 'Tertiary/Local',
+    'residential_link': 'Tertiary/Local',
     'unclassified': 'Tertiary/Local',
     'service': 'Tertiary/Local',
 }
@@ -53,8 +68,8 @@ CATEGORY_STYLES = {
     'TAZ connector': ('#6a3d9a', 3),     # Darker purple, medium
     'Footway/Cycle': ('#2ca02c', 2),     # Green
     'Motorway/Trunk': ('#d62728', 6),    # Dark red-orange
-    'Primary/Secondary': ('#ff7f0e', 5), # Dark orange
-    'Tertiary/Local': ('#ff9933', 4),    # Medium orange
+    'Primary/Secondary': ('#e67300', 5), # Muted dark orange
+    'Tertiary/Local': ('#cc7a00', 4),    # Muted medium orange
     'Other': ('#808080', 2)              # Gray
 }
 
@@ -184,11 +199,15 @@ def plot_node_degree_changes(original_nw: nx.Graph, simplified_nw: nx.Graph) -> 
     plt.show()
 
 
-def create_downtown_network_map(nw_gdf: gpd.GeoDataFrame, output_html_file: Optional[Path | str] = None) -> folium.Map:
-    """Create an interactive Folium map of downtown San Francisco network links.
+def create_roadway_network_map(
+    nw_gdf: gpd.GeoDataFrame, 
+    output_html_file: Optional[Path | str] = None,
+    bbox_name: Optional[str] = None,
+) -> folium.Map:
+    """Create an interactive Folium map of roadway network links.
     
-    Filters the network to downtown SF bounding box and creates an interactive map
-    with color-coded highway types and tooltips showing link attributes.
+    Creates an interactive map with color-coded highway types and tooltips showing link attributes.
+    Can optionally filter to a specific bounding box area.
     
     Args:
         nw_gdf (gpd.GeoDataFrame): A GeoDataFrame containing network links with columns including
@@ -196,19 +215,23 @@ def create_downtown_network_map(nw_gdf: gpd.GeoDataFrame, output_html_file: Opti
             'truck_access', 'walk_access', 'bus_only', 'ferry_only', 'rail_only'.
         output_html_file (Optional[Path | str]): If provided, saves the map to this HTML file path.
             Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
+        bbox_name (Optional[str]): Name of bounding box from BOUNDING_BOXES dictionary to filter the map.
+            If None, no spatial filtering is applied. Defaults to 'SF_downtown'.
     
     Returns:
         folium.Map: The interactive Folium map object that can be displayed or further modified.
     """
-    # Define downtown bounding box
-    downtown_sf_bbox = [-122.42, 37.77, -122.39, 37.80]
-
-    # Filter network to bbox
-    subset_gdf = nw_gdf.cx[downtown_sf_bbox[0]:downtown_sf_bbox[2], 
-                            downtown_sf_bbox[1]:downtown_sf_bbox[3]]
-
-    print(f"Original network: {len(nw_gdf):,} links")
-    print(f"Subset network: {len(subset_gdf):,} links")
+    # Apply bounding box filter if specified
+    if bbox_name:
+        if bbox_name not in BOUNDING_BOXES:
+            raise ValueError(f"Unknown bounding box: {bbox_name}. Available options: {list(BOUNDING_BOXES.keys())}")
+        bbox = BOUNDING_BOXES[bbox_name]
+        subset_gdf = nw_gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]]
+        print(f"Original network: {len(nw_gdf):,} links")
+        print(f"Filtered to {bbox_name}: {len(subset_gdf):,} links")
+    else:
+        subset_gdf = nw_gdf
+        print(f"Network: {len(nw_gdf):,} links (no spatial filtering)")
 
     # Create A + B column for tooltip
     subset_gdf["A & B (Combined)"] = subset_gdf["A"].astype(str) + ", " + subset_gdf["B"].astype(str) 
@@ -225,11 +248,24 @@ def create_downtown_network_map(nw_gdf: gpd.GeoDataFrame, output_html_file: Opti
     # Define the tooltip columns
     tooltip_cols = ["A & B (Combined)", "highway", "highway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only", "ferry_only", "rail_only"] 
 
+    # Calculate map center and zoom
+    if bbox_name:
+        # Use the filtered data bounds for center
+        bounds = subset_gdf.total_bounds
+        center_lat = (bounds[1] + bounds[3]) / 2
+        center_lon = (bounds[0] + bounds[2]) / 2
+        zoom_start = 15
+    else:
+        # Use SF bbox for center/zoom when no filtering
+        sf_bbox = BOUNDING_BOXES['SF']
+        center_lat = (sf_bbox[1] + sf_bbox[3]) / 2
+        center_lon = (sf_bbox[0] + sf_bbox[2]) / 2
+        zoom_start = 12
+    
     # Create base map with CartoDB light background
-    center_lat, center_lon = 37.787589, -122.403542
     m = folium.Map(
         location=[center_lat, center_lon],
-        zoom_start=15,
+        zoom_start=zoom_start,
         tiles='CartoDB positron'  # Use CartoDB light tiles with proper name
     )
     
@@ -470,4 +506,225 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
 
     if output_file:
         m.save(output_file)
+    return m
+
+
+def create_roadway_transit_map(
+    roadway_gdf: gpd.GeoDataFrame,
+    transit_gdf: gpd.GeoDataFrame,
+    output_html_file: Optional[Path | str] = None,
+    bbox_name: Optional[str] = None
+) -> folium.Map:
+    """Create an interactive Folium map showing both roadway and transit networks.
+    
+    Creates a map with roadway links (excluding centroid connectors) and overlays transit
+    network links as a separate layer. Transit links are shown in a distinct blue color.
+    
+    Args:
+        roadway_gdf (gpd.GeoDataFrame): GeoDataFrame containing roadway network links with
+            columns including 'A', 'B', 'highway', 'name', 'lanes', etc.
+        transit_gdf (gpd.GeoDataFrame): GeoDataFrame containing transit network links.
+            Should have geometry and optionally route/service information.
+        output_html_file (Optional[Path | str]): If provided, saves the map to this HTML file path.
+            Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
+        bbox_name (Optional[str]): Name of bounding box from BOUNDING_BOXES dictionary to filter the map.
+            If None, no spatial filtering is applied. Defaults to None.
+    
+    Returns:
+        folium.Map: The interactive Folium map object showing both networks.
+    """
+    # Apply bounding box filter if specified
+    if bbox_name:
+        if bbox_name not in BOUNDING_BOXES:
+            raise ValueError(f"Unknown bounding box: {bbox_name}. Available options: {list(BOUNDING_BOXES.keys())}")
+        bbox = BOUNDING_BOXES[bbox_name]
+        
+        # Filter networks to bbox
+        roadway_subset = roadway_gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+        transit_subset = transit_gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
+        
+        print(f"Original roadway network: {len(roadway_gdf):,} links")
+        print(f"Filtered to {bbox_name}: {len(roadway_subset):,} roadway links")
+        print(f"Transit network in {bbox_name}: {len(transit_subset):,} links")
+    else:
+        roadway_subset = roadway_gdf.copy()
+        transit_subset = transit_gdf.copy()
+        print(f"Roadway network: {len(roadway_gdf):,} links (no spatial filtering)")
+        print(f"Transit network: {len(transit_gdf):,} links (no spatial filtering)")
+    
+    # Exclude centroid connectors (MAZ and TAZ) from roadway
+    roadway_subset = roadway_subset[~roadway_subset['highway'].isin(['MAZ', 'TAZ'])]
+    print(f"Roadway network after removing centroids: {len(roadway_subset):,} links")
+    
+    # Create A + B column for roadway tooltips
+    roadway_subset["A & B (Combined)"] = roadway_subset["A"].astype(str) + ", " + roadway_subset["B"].astype(str)
+    
+    # Create highway_display column for roadway
+    unknown_highways = set(roadway_subset['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
+    if unknown_highways:
+        print(f"WARNING: Unknown highway types found: {unknown_highways}. Treating as 'Other'.")
+        for unk in unknown_highways:
+            HIGHWAY_CATEGORY_MAP[unk] = 'Other'
+    
+    roadway_subset['highway_display'] = roadway_subset['highway'].map(HIGHWAY_CATEGORY_MAP)
+    
+    # Calculate map center and zoom
+    if bbox_name:
+        # Use the filtered data bounds for center
+        bounds = roadway_subset.total_bounds
+        center_lat = (bounds[1] + bounds[3]) / 2
+        center_lon = (bounds[0] + bounds[2]) / 2
+        zoom_start = 15
+    else:
+        # Use SF bbox for center/zoom when no filtering
+        sf_bbox = BOUNDING_BOXES['SF']
+        center_lat = (sf_bbox[1] + sf_bbox[3]) / 2
+        center_lon = (sf_bbox[0] + sf_bbox[2]) / 2
+        zoom_start = 12
+    
+    # Create base map with CartoDB light background
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=zoom_start,
+        tiles='CartoDB positron'
+    )
+    
+    # Add roadway network layers by category (excluding centroids)
+    display_categories = roadway_subset['highway_display'].unique()
+    
+    for display_cat in display_categories:
+        cat_subset = roadway_subset[roadway_subset['highway_display'] == display_cat]
+        color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
+        
+        if not cat_subset.empty:
+            folium.GeoJson(
+                cat_subset,
+                style_function=lambda x, color=color, width=width: {
+                    'color': color,
+                    'weight': width,
+                    'opacity': 0.7  # Slightly transparent for roadway
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["A & B (Combined)", "highway", "highway_display", "name", "lanes"],
+                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "Lanes"],
+                    style="background-color: white; color: #333333; font-family: arial; font-size: 11px; padding: 7px;"
+                ),
+                name=f"Roadway: {display_cat}"
+            ).add_to(m)
+    
+    # Add transit network as overlay
+    if not transit_subset.empty:
+        # Convert to GeoJSON to handle data type issues
+        import json
+        
+        # Create a clean copy for conversion
+        transit_clean = transit_subset.copy()
+        
+        # Convert problematic data types before GeoJSON conversion
+        for col in transit_clean.columns:
+            if col == 'geometry':
+                continue
+            try:
+                # Convert int64 and float64 to native Python types
+                if pd.api.types.is_integer_dtype(transit_clean[col]):
+                    transit_clean[col] = transit_clean[col].fillna(0).astype(int)
+                elif pd.api.types.is_float_dtype(transit_clean[col]):
+                    transit_clean[col] = transit_clean[col].fillna(0.0).astype(float)
+                elif pd.api.types.is_object_dtype(transit_clean[col]):
+                    transit_clean[col] = transit_clean[col].fillna('').astype(str)
+            except:
+                # If conversion fails, convert to string
+                transit_clean[col] = transit_clean[col].astype(str)
+        
+        # Create A + B column for transit tooltips if columns exist
+        if 'A' in transit_clean.columns and 'B' in transit_clean.columns:
+            transit_clean["A & B (Combined)"] = transit_clean["A"].astype(str) + ", " + transit_clean["B"].astype(str)
+        
+        # Convert to GeoJSON string and back to ensure JSON compatibility
+        transit_geojson = json.loads(transit_clean.to_json())
+        
+        # Prepare transit tooltip fields based on available columns
+        transit_tooltip_fields = []
+        transit_tooltip_aliases = []
+        
+        # Check for common transit fields and add if present
+        if 'A & B (Combined)' in transit_clean.columns:
+            transit_tooltip_fields.append('A & B (Combined)')
+            transit_tooltip_aliases.append('Nodes (A,B)')
+        if 'trip_id' in transit_clean.columns:
+            transit_tooltip_fields.append('trip_id')
+            transit_tooltip_aliases.append('Trip ID')
+        if 'route_id' in transit_clean.columns:
+            transit_tooltip_fields.append('route_id')
+            transit_tooltip_aliases.append('Route ID')
+        if 'route_short_name' in transit_clean.columns:
+            transit_tooltip_fields.append('route_short_name')
+            transit_tooltip_aliases.append('Route')
+        if 'direction_id' in transit_clean.columns:
+            transit_tooltip_fields.append('direction_id')
+            transit_tooltip_aliases.append('Direction')
+        if 'name' in transit_clean.columns:
+            transit_tooltip_fields.append('name')
+            transit_tooltip_aliases.append('Name')
+        if 'shape_id' in transit_clean.columns:
+            transit_tooltip_fields.append('shape_id')
+            transit_tooltip_aliases.append('Shape ID')
+        
+        # Create transit layer with distinct styling
+        if transit_tooltip_fields:
+            transit_layer = folium.GeoJson(
+                transit_geojson,
+                style_function=lambda x: {
+                    'color': '#87CEEB',  # Light sky blue for transit
+                    'weight': 4,
+                    'opacity': 0.9
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=transit_tooltip_fields,
+                    aliases=transit_tooltip_aliases,
+                    style="background-color: lightyellow; color: #333333; font-family: arial; font-size: 11px; padding: 7px;"
+                ),
+                name="Transit Network"
+            )
+        else:
+            transit_layer = folium.GeoJson(
+                transit_geojson,
+                style_function=lambda x: {
+                    'color': '#87CEEB',  # Light sky blue for transit
+                    'weight': 4,
+                    'opacity': 0.9
+                },
+                name="Transit Network"
+            )
+        
+        transit_layer.add_to(m)
+    
+    # Add layer control to toggle layers
+    folium.LayerControl().add_to(m)
+    
+    # Create legend
+    legend_html = '<div style="position: fixed; top: 10px; right: 10px; width: 200px; height: auto; background-color: white; border:2px solid grey; z-index:9999; font-size:11px; padding: 7px">'
+    legend_html += '<p style="margin: 2px 0;"><b>Network Layers</b></p>'
+    
+    # Add transit to legend
+    legend_html += '<p style="margin: 2px 0;"><i class="fa fa-minus" style="color:#87CEEB; font-size: 14px"></i> Transit Network</p>'
+    
+    # Add separator
+    legend_html += '<hr style="margin: 5px 0;">'
+    legend_html += '<p style="margin: 2px 0;"><b>Road Categories</b></p>'
+    
+    # Add roadway categories
+    category_order = ['Transit', 'Footway/Cycle', 'Motorway/Trunk', 'Primary/Secondary', 'Tertiary/Local', 'Other']
+    for category in category_order:
+        if category in display_categories:
+            color, width = CATEGORY_STYLES.get(category, ('#808080', 2))
+            font_size = 10 + width * 2
+            legend_html += f'<p style="margin: 2px 0;"><i class="fa fa-minus" style="color:{color}; font-size: {font_size}px"></i> {category}</p>'
+    
+    legend_html += '</div>'
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
+    if output_html_file:
+        m.save(output_html_file)
+    
     return m
