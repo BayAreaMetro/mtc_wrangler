@@ -72,6 +72,7 @@ from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
+from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.models.gtfs.gtfs import GtfsModel
 from network_wrangler.transit.feed.feed import Feed
 from network_wrangler.transit.network import TransitNetwork
@@ -1647,6 +1648,9 @@ def step3_assign_county_node_link_numbering(
         nodes_df=clean_nodes_gdf,
         shapes_df=clean_links_gdf
     )
+
+    # use link names to set a new attribute to nodes: link_names
+    add_roadway_link_names_to_nodes(roadway_network)
     
     # Write roadway network to cache
     for roadway_format in output_formats:
