@@ -1589,6 +1589,69 @@ def step2_simplify_network_topology(
     
     return simplified_g
 
+def hack_rename_nodes(roadway_network):
+    """Apply manual corrections to node link names for specific locations.
+
+    This function contains hacks to fix node names that don't match their transit stops properly.
+
+    Args:
+        roadway_network: RoadwayNetwork object to modify in place
+    """
+    import numpy as np
+
+    # hack: this node is labeled as Vista Access Road but we want it to be matched with
+    # the Golden Gate Bridge/Parking Lot stop
+
+    # TODO: Add support for node selection by X/Y location in RoadwayNetwork.get_selection()
+    # For now, find the node manually by calculating distances
+
+    target_x = -122.4740
+    target_y = 37.8072
+    tolerance = 0.001  # ~100 meters
+
+    # Find nodes within tolerance of target coordinates
+    mask = (
+        (roadway_network.nodes_df['X'] >= target_x - tolerance) &
+        (roadway_network.nodes_df['X'] <= target_x + tolerance) &
+        (roadway_network.nodes_df['Y'] >= target_y - tolerance) &
+        (roadway_network.nodes_df['Y'] <= target_y + tolerance)
+    )
+
+    matching_nodes = roadway_network.nodes_df[mask]
+
+    if len(matching_nodes) > 0:
+        # If multiple nodes found, get the closest one
+        if len(matching_nodes) > 1:
+            distances = np.sqrt(
+                (matching_nodes['X'] - target_x) ** 2 +
+                (matching_nodes['Y'] - target_y) ** 2
+            )
+            closest_idx = distances.idxmin()
+            selected_node_ids = [int(matching_nodes.loc[closest_idx, 'model_node_id'])]  # Convert numpy int64 to regular int
+        else:
+            selected_node_ids = [int(nid) for nid in matching_nodes['model_node_id'].tolist()]  # Convert numpy int64 to regular int
+
+        WranglerLogger.info(f"Found node(s) near Golden Gate Bridge/Parking Lot stop: {selected_node_ids}")
+
+        # Use get_selection() with the found model_node_id(s)
+        node_selection = roadway_network.get_selection({
+            "nodes": {"model_node_id": selected_node_ids}
+        })
+
+        # Directly update the node attributes since custom list attributes aren't supported in property_changes
+        # This is a hack, so we'll modify the dataframe directly
+        for node_id in selected_node_ids:
+            node_idx = roadway_network.nodes_df[roadway_network.nodes_df['model_node_id'] == node_id].index[0]
+            roadway_network.nodes_df.at[node_idx, 'link_names'] = ["Golden Gate Bridge/Parking Lot"]
+            roadway_network.nodes_df.at[node_idx, 'incoming_link_names'] = ["Golden Gate Bridge/Parking Lot"]
+            roadway_network.nodes_df.at[node_idx, 'outgoing_link_names'] = ["Golden Gate Bridge/Parking Lot"]
+
+        WranglerLogger.info(f"Updated node(s) {selected_node_ids} link_names to 'Golden Gate Bridge/Parking Lot'")
+    else:
+        WranglerLogger.warning(f"No nodes found near coordinates ({target_x}, {target_y})")
+
+    # Add more node rename hacks here as needed
+
 def step3_assign_county_node_link_numbering(
         links_gdf: gpd.GeoDataFrame,
         nodes_gdf: gpd.GeoDataFrame,
@@ -1651,7 +1714,11 @@ def step3_assign_county_node_link_numbering(
 
     # use link names to set a new attribute to nodes: link_names
     add_roadway_link_names_to_nodes(roadway_network)
-    
+
+    # Apply node name hacks for specific locations
+    hack_rename_nodes(roadway_network)
+
+
     # Write roadway network to cache
     for roadway_format in output_formats:
         if roadway_format == "hyper": continue
@@ -1927,8 +1994,10 @@ def step6_create_transit_network(
             frequency_method='median_headway',
             default_frequency_for_onetime_route=180*60,  # 180 minutes
             add_stations_and_links=True,
+            max_stop_distance = 0.10*FEET_PER_MILE,
             trace_shape_ids=[
-                'SF:1400:20230930',    # 14 bus
+                'SF:2808:20230930',    # 28 bus
+                # 'SF:1400:20230930',  # 14 bus
                 # 'SF:60:20230930',    # LOWL bus line
                 # 'SF:19800:20230930', # F line LRT
             ]
