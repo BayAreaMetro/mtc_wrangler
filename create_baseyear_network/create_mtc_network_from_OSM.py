@@ -73,6 +73,7 @@ from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
+from network_wrangler.utils.geo import add_direction_to_links
 from network_wrangler.models.gtfs.gtfs import GtfsModel
 from network_wrangler.transit.feed.feed import Feed
 from network_wrangler.transit.network import TransitNetwork
@@ -1285,8 +1286,11 @@ def stepa_standardize_attributes(
     standardize_highway_value(links_gdf)
     links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
     links_gdf = handle_links_with_duplicate_A_B(links_gdf)
-    # and distance
+    # calculate length (in feet) directly; don't trust the existing value
+    links_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
+    links_gdf['length'] = links_gdf.length
     links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
+    links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # additional simplifications
     # Delete links with highway=='service' and no name
@@ -1304,6 +1308,9 @@ def stepa_standardize_attributes(
     # Create managed lanes fields: access, ML_access, ML_lanes, etc
     # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
     create_managed_lanes_fields(links_gdf)
+
+    # Add direction to links
+    links_gdf = add_direction_to_links(links_gdf, cardinal_only = True)
 
     # If hyper format is specified, write to tableau hyper file
     if 'hyper' in output_formats:
@@ -1696,7 +1703,8 @@ def step3_assign_county_node_link_numbering(
     LINK_COLS = [
         'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
         'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id', 'drive_centroid_fit', 'walk_centroid_fit'
+        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id', 
+        'drive_centroid_fit', 'walk_centroid_fit', 'direction'
     ]
     NODE_COLS = [
         'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
@@ -1717,7 +1725,6 @@ def step3_assign_county_node_link_numbering(
 
     # Apply node name hacks for specific locations
     hack_rename_nodes(roadway_network)
-
 
     # Write roadway network to cache
     for roadway_format in output_formats:
@@ -1930,7 +1937,7 @@ def step6_create_transit_network(
         county: str,
         output_dir: pathlib.Path,
         output_formats: list[str],
-) -> TransitNetwork:
+) -> tuple[TransitNetwork, gpd.GeoDataFrame]:
     """
     Step 6: Create TransitNetwork by converting GtfsModel to Wrangler-flavored Feed object,
     integrating with RoadwayNetwork
@@ -1947,7 +1954,7 @@ def step6_create_transit_network(
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
 
     Returns:
-        TransitNetwork with stops and links integrated
+        Tuple of (TransitNetwork with stops and links integrated, shape_links_gdf)
     """
     WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
     
@@ -1996,8 +2003,10 @@ def step6_create_transit_network(
             add_stations_and_links=True,
             max_stop_distance = 0.10*FEET_PER_MILE,
             trace_shape_ids=[
-                'SF:2808:20230930',    # 28 bus
+                'SF:366:20230930', # 1X bus
+                # 'SF:2808:20230930',  # 28 bus
                 # 'SF:1400:20230930',  # 14 bus
+                # 'SF:4502:20230930', # 45 bus
                 # 'SF:60:20230930',    # LOWL bus line
                 # 'SF:19800:20230930', # F line LRT
             ]
@@ -2031,7 +2040,7 @@ def step6_create_transit_network(
                 WranglerLogger.error(f"Wrote {debug_file}")
             if "geojson" in output_formats:
                 debug_file = output_dir / error_gdf_name.replace("_gdf",".geojson")
-                error_gdf.to_file(output_dir / error_gdf_name.replace("_gdf",".geojson"), driver="GeoJSON")
+                error_gdf.to_file(debug_file, driver="GeoJSON")
                 WranglerLogger.error(f"Wrote {debug_file}")
 
         raise e
@@ -2040,7 +2049,18 @@ def step6_create_transit_network(
     county_no_spaces = county.replace(" ","")
     roadway_net_file = f"6_roadway_network_inc_transit_{county_no_spaces}"
     for roadway_format in output_formats:
-        if roadway_format == "hyper": continue
+        if roadway_format == "hyper":
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                roadway_network.links_df,
+                output_dir / f"{roadway_net_file}_links.hyper",
+                "6_roadway_links"
+            )
+            tableau_utils.write_geodataframe_as_tableau_hyper(
+                roadway_network.nodes_df,
+                output_dir / f"{roadway_net_file}_nodes.hyper",
+                "6_roadway_nodes"
+            )
+            continue
         try:
             write_roadway(
                 roadway_network,
@@ -2067,7 +2087,52 @@ def step6_create_transit_network(
         overwrite=True
     )
     WranglerLogger.info(f"Wrote transit network to {transit_network_dir}")
-    return transit_network
+
+    # Construct links from transit network shape points
+    shape_links_gdf = transit_network.feed.shapes.sort_values(by=["shape_id","shape_pt_sequence"]).reset_index(drop=True)
+    shape_links_gdf["next_shape_model_node_id"] = shape_links_gdf.groupby("shape_id")["shape_model_node_id"].shift(-1)
+    shape_links_gdf["next_shape_pt_sequence"] = shape_links_gdf.groupby("shape_id")["shape_pt_sequence"].shift(-1)
+    # Filter to only rows that have a next node (excludes last point of each shape)
+    shape_links_gdf = shape_links_gdf.loc[ shape_links_gdf["next_shape_model_node_id"].notna() ]
+    shape_links_gdf["next_shape_model_node_id"] = shape_links_gdf["next_shape_model_node_id"].astype(int)
+    shape_links_gdf["next_shape_pt_sequence"] = shape_links_gdf["next_shape_pt_sequence"].astype(int)
+    shape_links_gdf.rename(columns={"shape_model_node_id":"A", "next_shape_model_node_id":"B"}, inplace=True)
+
+    # Drop these columns
+    shape_links_gdf.drop(columns=["shape_id","shape_pt_lat","shape_pt_lon","geometry","stop_id","stop_name"], inplace=True)
+
+    # Join them with roadway network shapes
+    roadnet_shapes_gdf = roadway_network.links_df
+    shape_roadnet_links_gdf = gpd.GeoDataFrame(
+        pd.merge(
+            left=shape_links_gdf,
+            right=roadnet_shapes_gdf,
+            on=["A","B"],
+            how="left",
+            indicator=True
+        ), crs=roadnet_shapes_gdf.crs
+    )
+    # write it
+    shape_roadnet_links_name = "6_transit_road_links_gdf"
+    if "hyper" in output_formats:
+        tableau_utils.write_geodataframe_as_tableau_hyper(
+            shape_roadnet_links_gdf,
+                output_dir / shape_roadnet_links_name.replace("_gdf",".hyper"),
+                shape_roadnet_links_name
+            )
+    if "parquet" in output_formats:
+        debug_file = output_dir / shape_roadnet_links_name.replace("_gdf",".parquet")
+        shape_roadnet_links_gdf.to_parquet(debug_file)
+        WranglerLogger.error(f"Wrote {debug_file}")
+    if "gpkg" in output_formats:
+        debug_file = output_dir / shape_roadnet_links_name.replace("_gdf",".gpkg")
+        shape_roadnet_links_gdf.to_file(debug_file, driver="GPKG")
+        WranglerLogger.error(f"Wrote {debug_file}")
+    if "geojson" in output_formats:
+        debug_file = output_dir / shape_roadnet_links_name.replace("_gdf",".geojson")
+        shape_roadnet_links_gdf.to_file(debug_file, driver="GeoJSON")
+        WranglerLogger.error(f"Wrote {debug_file}")
+    return transit_network, shape_links_gdf
 
 if __name__ == "__main__":
     """
@@ -2094,6 +2159,7 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
+    pd.options.display.max_rows = 300 # number of rows to show before truncating
     pd.set_option('display.float_format', '{:.2f}'.format)
     # Elevate SettingWithCopyWarning to error
     pd.options.mode.chained_assignment = 'raise'
@@ -2162,7 +2228,7 @@ if __name__ == "__main__":
         
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
         # This writes the RoadwayNetwork and TransitNetwork
-        transit_network = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format)
+        transit_network, shape_links_gdf = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format)
 
         # STEP 7: Create base year scenario
         my_scenario = network_wrangler.scenario.create_scenario(
