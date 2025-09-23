@@ -1310,7 +1310,7 @@ def stepa_standardize_attributes(
     create_managed_lanes_fields(links_gdf)
 
     # Add direction to links
-    links_gdf = add_direction_to_links(links_gdf, cardinal_only = True)
+    links_gdf = add_direction_to_links(links_gdf, cardinal_only = False)
 
     # If hyper format is specified, write to tableau hyper file
     if 'hyper' in output_formats:
@@ -1966,30 +1966,6 @@ def step6_create_transit_network(
         'PM': ['15:00','19:00'],  # 3p-7p
         'EV': ['19:00','03:00'],  # 7p-3a (crosses midnight)
     }
-
-    # save this to re-apply
-    links_name = roadway_network.links_df.attrs['name']
-    # hack: drop these links because they're footway links that prevent the rail link from being created
-    # in add_stations_and_links_to_roadway_network()
-    LINKS_TO_DELETE = [
-        { 'osm_link_id':'676691686', 'reversed':True },
-        { 'osm_link_id':'678238660', 'reversed':True }
-    ]
-    # TODO: use RoadwayNetwork.delete_links() instead
-    links_to_delete_df = pd.DataFrame(LINKS_TO_DELETE)
-    roadway_network.links_df = roadway_network.links_df.merge(
-        right=links_to_delete_df,
-        how='left',
-        indicator=True
-    )
-    WranglerLogger.debug(f"Hack: Deleting the following links:\n{roadway_network.links_df.loc[ roadway_network.links_df._merge == 'both']}")
-    len_links_gdf = len(roadway_network.links_df)
-    roadway_network.links_df = roadway_network.links_df.loc[ roadway_network.links_df._merge == 'left_only' ]
-    roadway_network.links_df.drop(columns=['_merge'], inplace=True)
-    assert len(roadway_network.links_df) == len_links_gdf - len(LINKS_TO_DELETE)
-
-    # re-apply
-    roadway_network.links_df.attrs['name'] = links_name
 
     try:
         feed = create_feed_from_gtfs_model(
