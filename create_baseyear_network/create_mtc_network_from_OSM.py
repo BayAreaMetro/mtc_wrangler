@@ -57,6 +57,7 @@ import requests
 import statistics
 import sys
 from typing import Any, Optional, Tuple, Union
+import us
 
 import networkx
 import osmnx
@@ -206,16 +207,43 @@ HIGHWAY_HIERARCHY = [
     'track',          # minor land-access roads
 ]
 
-def get_county_bbox(counties) -> tuple[float, float, float, float]:
+def get_county_geodataframe(
+        output_dir: pathlib.Path,
+        state: str
+) -> gpd.GeoDataFrame:
+    """
+    Fetch the US Census TIGER shapefile for 2010 county shapes using pygris,
+    or uses cached version if available.
+
+    Saves to output_dir / tl_2010_us_county10 / tl_2010_us_county10.shp
+    """
+    county_shapefile = output_dir / "tl_2010_us_county10" / "tl_2010_us_county10.shp"
+    if county_shapefile.exists():
+        county_gdf = gpd.read_file(county_shapefile)
+        WranglerLogger.info(f"Read {county_shapefile}")
+    else:
+        WranglerLogger.info(f"Fetching California 2010 county shapes using pygris")
+        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        # save it to the cache dir
+        county_shapefile.parent.mkdir(exist_ok=True)
+        county_gdf.to_file(county_shapefile)
+
+    my_state = us.states.lookup(state)
+    county_gdf = county_gdf.loc[ county_gdf["STATEFP10"] == my_state.fips]
+    WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
+    return county_gdf
+
+def get_county_bbox(
+        counties: list[str],
+        output_dir: pathlib.Path,
+) -> tuple[float, float, float, float]:
     """    
-    This function fetches TIGER county 2010 boundaries using pygris for the
-    givent California counties.
-    
     The coordinates are converted to WGS84 (EPSG:4326) if needed.
     
     Args:
         counties: list of California counties to include.
-        
+        output_dir: Base directory for output
+
     Returns:
         tuple: Bounding box as (west, south, east, north) in decimal degrees.
                These are longitude/latitude coordinates in WGS84 projection.
@@ -224,8 +252,7 @@ def get_county_bbox(counties) -> tuple[float, float, float, float]:
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    WranglerLogger.info(f"Fetching California 2010 county shapes using pygris")
-    county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+    county_gdf = get_county_geodataframe(output_dir, "CA")
     county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
 
     # Get the total bounds (bounding box) of all counties
@@ -1107,7 +1134,7 @@ def stepa_standardize_attributes(
     if county == "Bay Area":
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
-        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+        county_gdf = get_county_geodataframe(output_dir, "CA")
         county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
         WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
@@ -1525,7 +1552,7 @@ def step1_download_osm_network(
     # Download new graph
     if county == 'Bay Area':
         WranglerLogger.info("Downloading network for Bay Area using bounding box...")
-        bbox = get_county_bbox(BAY_AREA_COUNTIES)
+        bbox = get_county_bbox(BAY_AREA_COUNTIES, output_dir)
         WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
@@ -1901,7 +1928,7 @@ def step5_prepare_gtfs_transit_data(
         drop_transit_agency(gtfs_model, agency_id=drop_agencies)
     
     # Filter by geographic boundary
-    county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
+    county_gdf = get_county_geodataframe(output_dir, "CA")
     county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
     if county != "Bay Area":
         county_gdf = county_gdf.loc[county_gdf['NAME10'] == county]
