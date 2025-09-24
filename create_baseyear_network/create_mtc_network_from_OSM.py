@@ -2108,7 +2108,7 @@ def step6_create_transit_network(
         debug_file = output_dir / shape_roadnet_links_name.replace("_gdf",".geojson")
         shape_roadnet_links_gdf.to_file(debug_file, driver="GeoJSON")
         WranglerLogger.error(f"Wrote {debug_file}")
-    return transit_network, shape_links_gdf
+    return transit_network, shape_roadnet_links_gdf
 
 if __name__ == "__main__":
     """
