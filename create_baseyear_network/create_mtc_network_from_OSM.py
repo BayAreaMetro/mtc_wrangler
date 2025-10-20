@@ -128,11 +128,16 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
         'BA', # BART
         # 'GG', # Golden Gate Transit
         'CT', # Caltrain
+        'MB', # Mission Bay TMA
     ],
     'San Mateo': [
         'SM', # SamTrans
         'BA', # BART
         'CT', # Caltrain
+    ],
+    'Santa Clara': [
+        'MV', # Mountain View Go
+        'SC', # VTA
     ]
 }
 
@@ -317,7 +322,12 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
         else:
             return int(statistics.median(lane))
     elif isinstance(lane, str):
-        return int(float(lane)) # float conversion first for values like 1.5 
+        try:
+            return int(float(lane)) # float conversion first for values like 1.5
+        except ValueError:
+            # if it's not a string at all
+            WranglerLogger.error(f"get_min_or_median_value() for lane string:{lane}")
+            return 0
     return lane
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
@@ -1086,6 +1096,16 @@ def stepa_standardize_attributes(
     """
     WranglerLogger.info(f"======= STEP {prefix[:2]}: Standardize attributes for {county} =======")
     county_no_spaces = county.replace(" ","")
+
+    # Check for cached roadway network -- just parquet for now
+    try:
+        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_nodes.parquet")
+        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_links.parquet")
+        WranglerLogger.info(f"Loaded cached roadway network from {cached_links_gdf}")
+        return (cached_links_gdf, cached_nodes_gdf)
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
+
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
 
@@ -1557,7 +1577,7 @@ def step1_download_osm_network(
         g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
         WranglerLogger.info(f"Downloading network for {county}...")
-        g = osmnx.graph_from_place(f'{county}, California, USA', network_type=OSM_network_type)
+        g = osmnx.graph_from_place(f'{county} County, California, USA', network_type=OSM_network_type)
     
     # Cache the downloaded graph
     with open(initial_graph_file, "wb") as f:
@@ -1788,12 +1808,24 @@ def step4_add_centroids_and_connectors(
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
     
     Returns:
-        None; roadway_network is modified in place
+        RoadwayNetwork
     """
     WranglerLogger.info(f"======= STEP 4: Create centroids and centroid connectors for {county} =======")
 
     county_no_spaces = county.replace(" ", "")
     roadway_net_file = f"4_roadway_network_{county_no_spaces}"
+
+    # Check for cached roadway network
+    try:
+        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
+        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
+        shapes_gdf = cached_links_gdf.copy()
+        roadway_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
+        return roadway_network
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
+
     # Create centroid connectors -- fetch travel model zone daata
     zones_gdf_dict = get_travel_model_zones(output_dir)
 
@@ -1839,12 +1871,12 @@ def step4_add_centroids_and_connectors(
             tableau_utils.write_geodataframe_as_tableau_hyper(
                 roadway_network.links_df,
                 output_dir / f"{roadway_net_file}_links.hyper",
-                "{roadway_net_file}_links"
+                f"{roadway_net_file}_links"
             )
             tableau_utils.write_geodataframe_as_tableau_hyper(
                 roadway_network.nodes_df,
                 output_dir / f"{roadway_net_file}_nodes.hyper",
-                "{roadway_net_file}_nodes"
+                f"{roadway_net_file}_nodes"
             )
             continue
 
@@ -1860,6 +1892,8 @@ def step4_add_centroids_and_connectors(
             WranglerLogger.info(f"Saved roadway network in {roadway_format} format")
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
+
+    return roadway_network
 
 def step5_prepare_gtfs_transit_data(
         county: str, 
@@ -1984,7 +2018,7 @@ def step6_create_transit_network(
         Tuple of (TransitNetwork with stops and links integrated, shape_links_gdf)
     """
     WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
-    
+
     # Define time periods for frequency calculation
     TIME_PERIODS = {
         'EA': ['03:00','06:00'],  # 3a-6a
@@ -2006,18 +2040,22 @@ def step6_create_transit_network(
             add_stations_and_links=True,
             max_stop_distance = 0.10*FEET_PER_MILE,
             trace_shape_ids=[
-                'SF:366:20230930', # 1X bus
+                'CM:p_1433183:20230930',
+                # 'SF:366:20230930', # 1X bus
                 # 'SF:2808:20230930',  # 28 bus
                 # 'SF:1400:20230930',  # 14 bus
                 # 'SF:4502:20230930', # 45 bus
                 # 'SF:60:20230930',    # LOWL bus line
                 # 'SF:19800:20230930', # F line LRT
-            ]
+            ],
+            # for 9-county Bay Area, ignore these - they're logged
+            errors = "ignore"
         )
         WranglerLogger.info(f"Created transit Feed object with stops and links integrated")
         
     except Exception as e:
         WranglerLogger.error(f"Error creating transit stops and links: {e}")
+        county_no_spaces = county.replace(" ", "")
         
         for error_gdf_name in ["bus_stop_links_gdf", "bus_stops_gdf", "no_bus_path_gdf"]:
             # Write debug outputs if available
@@ -2030,19 +2068,19 @@ def step6_create_transit_network(
             if "hyper" in output_formats:
                 tableau_utils.write_geodataframe_as_tableau_hyper(
                     error_gdf,
-                    output_dir / error_gdf_name.replace("_gdf",".hyper"),
+                    output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.hyper"),
                     error_gdf_name
                 )
             if "parquet" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",".parquet")
+                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.parquet")
                 error_gdf.to_parquet(debug_file)
                 WranglerLogger.error(f"Wrote {debug_file}")
             if "gpkg" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",".gpkg")
+                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.gpkg")
                 error_gdf.to_file(debug_file, driver="GPKG")
                 WranglerLogger.error(f"Wrote {debug_file}")
             if "geojson" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",".geojson")
+                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.geojson")
                 error_gdf.to_file(debug_file, driver="GeoJSON")
                 WranglerLogger.error(f"Wrote {debug_file}")
 
@@ -2104,8 +2142,15 @@ def step6_create_transit_network(
     # Drop these columns
     shape_links_gdf.drop(columns=["shape_id","shape_pt_lat","shape_pt_lon","geometry","stop_id","stop_name"], inplace=True)
 
-    # Join them with roadway network shapes
+    # Join them with roadway network shapes to replicate
+    # network_wrangler/transit/validate.py:shape_links_without_road_links()
     roadnet_shapes_gdf = roadway_network.links_df
+    roadnet_shapes_gdf = roadnet_shapes_gdf.loc[
+        (roadnet_shapes_gdf["drive_access"])
+        | (roadnet_shapes_gdf["bus_only"])
+        | (roadnet_shapes_gdf["rail_only"])
+        | (roadnet_shapes_gdf["ferry_only"])
+    ]
     shape_roadnet_links_gdf = gpd.GeoDataFrame(
         pd.merge(
             left=shape_links_gdf,
@@ -2115,6 +2160,7 @@ def step6_create_transit_network(
             indicator=True
         ), crs=roadnet_shapes_gdf.crs
     )
+    WranglerLogger.debug(f"shape_roadnet_links_gdf['_merge'].value_counts():\n{shape_roadnet_links_gdf['_merge'].value_counts()}")
     # write it
     shape_roadnet_links_name = "6_transit_road_links_gdf"
     if "hyper" in output_formats:
@@ -2162,8 +2208,11 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
-    pd.options.display.max_rows = 300 # number of rows to show before truncating
+    pd.options.display.max_rows = 500 # number of rows to show before truncating
     pd.set_option('display.float_format', '{:.2f}'.format)
+    # numpy
+    np.set_printoptions(linewidth=500)
+
     # Elevate SettingWithCopyWarning to error
     pd.options.mode.chained_assignment = 'raise'
 
@@ -2223,7 +2272,7 @@ if __name__ == "__main__":
         roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, args.output_format)
 
         # STEP 4: Add centroids and centroid connectors
-        step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, args.output_format)
+        roadway_network = step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, args.output_format)
         
         # STEP 5: Prepare GTFS transit data: Read and filter to service date, relevant operators. Creates GtfsModel object
         # This also writes the GtfsModel as GTFS
@@ -2244,7 +2293,7 @@ if __name__ == "__main__":
         )
     
         # write it to disk
-        scenario_dir = output_dir / "7_wrangler_scenario"
+        scenario_dir = output_dir / f"7_scenario_{args.county_no_spaces}"
         scenario_dir.mkdir(exist_ok=True)
         my_scenario.write(
             path=scenario_dir,
