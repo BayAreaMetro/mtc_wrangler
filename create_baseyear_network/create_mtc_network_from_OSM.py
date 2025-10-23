@@ -74,6 +74,7 @@ from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
+from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
 from network_wrangler.utils.geo import add_direction_to_links
 from network_wrangler.models.gtfs.gtfs import GtfsModel
 from network_wrangler.transit.feed.feed import Feed
@@ -123,6 +124,31 @@ LOCAL_CRS_FEET = "EPSG:2227"
 """ NAD83 / California zone 3 (ftUS) https://epsg.io/2227 """
 
 COUNTY_NAME_TO_GTFS_AGENCIES = {
+    'Alameda': [
+        'AC', # AC Transit
+        'BA', # BART
+        # 'AM', # Capital Corridor - remove this because it dips in and out of county
+        # 'CE', # ACE -  remove this because it dips in and out of county
+        'EM', # Emery Go-Round
+        'WH', # LAVTA
+        'UC', # Union City Transi
+    ],
+    'Contra Costa': [
+        'CC', # County Connection
+        'FS', # FAST
+        'RV', # Rio Vista Delta Breeze
+        '3D', # Tri Delta Transit
+        'VC', # Vacaville City Coach
+        'WC', # WestCat (Western Contra Costa)
+    ],
+    'Marin': [
+        'GG', # Golden Gate Transit
+        'MA', # Marin Transit
+        'SA', # SMART
+    ],
+    'Napa': [
+        'VN', # VINE Transit
+    ],
     'San Francisco': [
         'SF', # SF Muni
         'BA', # BART
@@ -138,6 +164,15 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
     'Santa Clara': [
         'MV', # Mountain View Go
         'SC', # VTA
+    ],
+    'Solano': [
+        'ST', # SolTrans
+    ],
+    'Sonoma': [
+        'PE', # Petaluma
+        'SR', # Santa Rosa CityBus
+        'SO', # Sonoma County Transit
+        'SA', # SMART
     ]
 }
 
@@ -1101,7 +1136,9 @@ def stepa_standardize_attributes(
     try:
         cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_nodes.parquet")
         cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_links.parquet")
-        WranglerLogger.info(f"Loaded cached roadway network from {cached_links_gdf}")
+        WranglerLogger.info(f"Loaded cached roadway network from:")
+        WranglerLogger.info(f"  {output_dir / f'{prefix}{county_no_spaces}_nodes.parquet'}")
+        WranglerLogger.info(f"  {output_dir / f'{prefix}{county_no_spaces}_links.parquet'}")
         return (cached_links_gdf, cached_nodes_gdf)
     except Exception as e:
         WranglerLogger.debug(f"Could not load cached roadway network: {e}")
@@ -1767,6 +1804,9 @@ def step3_assign_county_node_link_numbering(
         shapes_df=clean_links_gdf
     )
 
+    # filter nodes to links
+    roadway_network.nodes_df = filter_nodes_to_links(roadway_network.links_df, roadway_network.nodes_df)
+
     # use link names to set a new attribute to nodes: link_names
     add_roadway_link_names_to_nodes(roadway_network)
 
@@ -1992,6 +2032,178 @@ def step5_prepare_gtfs_transit_data(
     WranglerLogger.info(f"Integrated GTFS data: {len(gtfs_model.routes)} routes, {len(gtfs_model.stops)} stops")
     return gtfs_model
 
+def hack_gtfs_shape_points(gtfs_model: GtfsModel):
+    """
+    Update shape points for routes that don't work well with stops.
+
+    Drop some shape points in the GtfsModel that are too close to
+    the wrong stops and messing things up.
+
+    Add some stops as shape points. Most of these problems come from routes
+    that double back on themselves a bunch.
+
+    TODO: This should be replaced with an algorithm improvement that walks the shape pts
+    TODO: and walks the stop pts and inserts stop pts along the shapes
+    """
+    # these incorrectly match to stop_sequence 3
+    mask = ((gtfs_model.shapes["shape_id"] == "WH:42265:20230930") &
+             gtfs_model.shapes["shape_pt_sequence"].isin([501,504,507]))
+    if mask.any():
+        # Log which rows will be dropped
+        WranglerLogger.debug(f"hack_gtfs_shape_points(): Dropping rows:\n{gtfs_model.shapes[mask]}")
+        # Filter out the masked rows (keep where mask is False)
+        gtfs_model.shapes = gtfs_model.shapes[~mask]
+
+    # these incorrectly match to stop_sequence 12
+    mask = ((gtfs_model.shapes["shape_id"] == "WH:42265:20230930") &
+             gtfs_model.shapes["shape_pt_sequence"].isin([192,195,198]))
+    if mask.any():
+        # Log which rows will be dropped
+        WranglerLogger.debug(f"hack_gtfs_shape_points(): Dropping rows:\n{gtfs_model.shapes[mask]}")
+        # Filter out the masked rows (keep where mask is False)
+        gtfs_model.shapes = gtfs_model.shapes[~mask]
+
+    # add these stop_ids as shape points
+    ADD_STOP_AS_SHAPE_PT = [
+        {"stop_id":"881753", "shape_id":"WH:42265:20230930", "shape_pt_sequence":423},
+        #----
+        {"stop_id":"880059", "shape_id":"WH:42277:20230930", "shape_pt_sequence":81},   # 2
+        {"stop_id":"881527", "shape_id":"WH:42277:20230930", "shape_pt_sequence":162},  # 4
+        {"stop_id":"881506", "shape_id":"WH:42277:20230930", "shape_pt_sequence":921},  # 18
+        {"stop_id":"881514", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1254}, # 29
+        {"stop_id":"882714", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1737}, # 36
+        {"stop_id":"881551", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1821}, # 39
+        {"stop_id":"881555", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1857}, # 40
+        {"stop_id":"882847", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1858}, # 41
+        #----
+        {"stop_id":"881846", "shape_id":"WH:42352:20230930", "shape_pt_sequence":435}, # 5}
+        {"stop_id":"881852", "shape_id":"WH:42352:20230930", "shape_pt_sequence":2148}, # 27}
+        {"stop_id":"883114", "shape_id":"WH:42352:20230930", "shape_pt_sequence":2160}, # 28}
+        {"stop_id":"881862", "shape_id":"WH:42352:20230930", "shape_pt_sequence":3033}, # 38}
+        #----
+        {"stop_id":"881952", "shape_id":'WH:42352:20230930', "shape_pt_sequence":1410}, # 15
+        {"stop_id":"882631", "shape_id":'WH:42352:20230930', "shape_pt_sequence":2742}, # 34
+        #----
+        {"stop_id":"881745", "shape_id":'WH:42349:20230930', "shape_pt_sequence":276}, # 2
+        {"stop_id":"881742", "shape_id":'WH:42349:20230930', "shape_pt_sequence":6081}, # 5
+        #----
+        {"stop_id":"881911", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":402}, # 5
+        {"stop_id":"881903", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":1659}, # 15
+        {"stop_id":"882961", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":1683}, # 16
+        #----
+        {"stop_id":"883118", "shape_id":"WH:42303:20230930",  "shape_pt_sequence":15}, # 1
+        #----
+        {"stop_id":"881799", "shape_id":"WH:42314:20230930",  "shape_pt_sequence":1194}, # 20
+        #----
+        {"stop_id":"881799", "shape_id":"WH:42315:20230930",  "shape_pt_sequence":1197}, # 20
+        #----
+        {"stop_id":"881799", "shape_id":"WH:42316:20230930",  "shape_pt_sequence":177}, # 3
+        #----
+        {"stop_id":"881799", "shape_id":"WH:42317:20230930",  "shape_pt_sequence":1311}, # 4
+        {"stop_id":"881874", "shape_id":"WH:42317:20230930",  "shape_pt_sequence":2193}, # 21
+        #----
+        {"stop_id":"882706", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1230}, # 17
+        {"stop_id":"882705", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1245}, # 18
+        {"stop_id":"882704", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1251}, # 19
+        {"stop_id":"882703", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1263}, # 20
+        {"stop_id":"882702", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1278}, # 21
+        {"stop_id":"882701", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1296}, # 22
+        {"stop_id":"882700", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1305}, # 23
+        #-----
+        {"stop_id":"882706", "shape_id":"WH:42325:20230930", "shape_pt_sequence":801}, # 7
+        {"stop_id":"882705", "shape_id":"WH:42325:20230930", "shape_pt_sequence":816}, # 8
+        {"stop_id":"882704", "shape_id":"WH:42325:20230930", "shape_pt_sequence":822}, # 9
+        {"stop_id":"882703", "shape_id":"WH:42325:20230930", "shape_pt_sequence":834}, # 10
+        {"stop_id":"882702", "shape_id":"WH:42325:20230930", "shape_pt_sequence":849}, # 11
+        {"stop_id":"882701", "shape_id":"WH:42325:20230930", "shape_pt_sequence":867}, # 12
+        {"stop_id":"882700", "shape_id":"WH:42325:20230930", "shape_pt_sequence":876}, # 13
+        {"stop_id":"881871", "shape_id":"WH:42325:20230930", "shape_pt_sequence":981}, # 14
+        #-----
+        {"stop_id":"882706", "shape_id":"WH:42327:20230930", "shape_pt_sequence":801}, # 7
+        {"stop_id":"882705", "shape_id":"WH:42327:20230930", "shape_pt_sequence":816}, # 8
+        {"stop_id":"882704", "shape_id":"WH:42327:20230930", "shape_pt_sequence":822}, # 9
+        {"stop_id":"882703", "shape_id":"WH:42327:20230930", "shape_pt_sequence":834}, # 10
+        {"stop_id":"882702", "shape_id":"WH:42327:20230930", "shape_pt_sequence":849}, # 11
+        {"stop_id":"882701", "shape_id":"WH:42327:20230930", "shape_pt_sequence":867}, # 12
+        {"stop_id":"882700", "shape_id":"WH:42327:20230930", "shape_pt_sequence":876}, # 13
+        {"stop_id":"881871", "shape_id":"WH:42327:20230930", "shape_pt_sequence":981}, # 14
+        #----
+        {"stop_id":"882399", "shape_id":"WH:42331:20230930", "shape_pt_sequence":3}, # 1
+        {"stop_id":"882400", "shape_id":"WH:42331:20230930", "shape_pt_sequence":4}, # 2
+        #----
+        {"stop_id":"882399", "shape_id":"WH:42333:20230930", "shape_pt_sequence":3}, # 1
+        {"stop_id":"882400", "shape_id":"WH:42333:20230930", "shape_pt_sequence":4}, # 2
+        {"stop_id":"882492", "shape_id":"WH:42333:20230930", "shape_pt_sequence":876}, # 16
+        #----
+        {"stop_id":"882492", "shape_id":"WH:42334:20230930", "shape_pt_sequence":630}, # 9
+        #----
+        {"stop_id":"882237", "shape_id":"WH:42335:20230930", "shape_pt_sequence":66}, # 3
+        #----
+        {"stop_id":"882237", "shape_id":"WH:42336:20230930", "shape_pt_sequence":231}, # 7
+        {"stop_id":"882241", "shape_id":"WH:42336:20230930", "shape_pt_sequence":642}, # 15
+        #----
+        {"stop_id":"882382", "shape_id":"WH:42337:20230930", "shape_pt_sequence":159}, # 7
+        {"stop_id":"882343", "shape_id":"WH:42337:20230930", "shape_pt_sequence":186}, # 8
+        #----
+        {"stop_id":"882382", "shape_id":"WH:42338:20230930", "shape_pt_sequence":876}, # 12
+        {"stop_id":"882343", "shape_id":"WH:42338:20230930", "shape_pt_sequence":903}, # 13
+        #----
+        {"stop_id":"882706", "shape_id":"WH:42342:20230930", "shape_pt_sequence":360}, # 9
+        {"stop_id":"882705", "shape_id":"WH:42342:20230930", "shape_pt_sequence":375}, # 10
+        {"stop_id":"882704", "shape_id":"WH:42342:20230930", "shape_pt_sequence":381}, # 11
+        {"stop_id":"882703", "shape_id":"WH:42342:20230930", "shape_pt_sequence":390}, # 12
+        {"stop_id":"882702", "shape_id":"WH:42342:20230930", "shape_pt_sequence":405}, # 13
+        {"stop_id":"882701", "shape_id":"WH:42342:20230930", "shape_pt_sequence":420}, # 14
+        #----
+        {"stop_id":"882706", "shape_id":"WH:42343:20230930", "shape_pt_sequence":456}, # 8
+        {"stop_id":"882705", "shape_id":"WH:42343:20230930", "shape_pt_sequence":471}, # 9
+        {"stop_id":"882704", "shape_id":"WH:42343:20230930", "shape_pt_sequence":477}, # 10
+        {"stop_id":"882703", "shape_id":"WH:42343:20230930", "shape_pt_sequence":486}, # 11
+        {"stop_id":"882702", "shape_id":"WH:42343:20230930", "shape_pt_sequence":501}, # 12
+        {"stop_id":"882701", "shape_id":"WH:42343:20230930", "shape_pt_sequence":516}, # 13
+        #----
+        {"stop_id":"882392", "shape_id":"WH:42346:20230930", "shape_pt_sequence":1176}, # 13
+        #----
+        {"stop_id":"881745", "shape_id":'WH:42351:20230930', "shape_pt_sequence":279}, # 2
+        {"stop_id":"881742", "shape_id":'WH:42351:20230930', "shape_pt_sequence":6006}, # 5
+        #----
+        # {"stop_id":"", "shape_id":"WH:42324:20230930", "shape_pt_sequence":}, # 21
+    ]
+    for add_dict in ADD_STOP_AS_SHAPE_PT:
+        # sort/reindex
+        gtfs_model.shapes.sort_values(by=["shape_id","shape_pt_sequence"], inplace=True, ignore_index=True)
+
+        # insert this stop point as a shape point after this shape point
+        stop_pt_df = gtfs_model.stops.loc [ 
+            gtfs_model.stops["stop_id"] == add_dict["stop_id"]
+        ]
+        shape_pt_df = gtfs_model.shapes.loc [ 
+            (gtfs_model.shapes["shape_id"] == add_dict["shape_id"]) &
+            (gtfs_model.shapes["shape_pt_sequence"] == add_dict["shape_pt_sequence"] )
+        ]
+        if (len(stop_pt_df) != 1) or (len(shape_pt_df) != 1):
+            continue
+
+        insert_after_idx = int(shape_pt_df.index[0])
+        stop_pt_info = stop_pt_df.iloc[0]
+        WranglerLogger.debug(f"stop_pt_info:\n{stop_pt_info}")
+        WranglerLogger.debug(f"{insert_after_idx=} shape_pt_df:\n{shape_pt_df}")
+        new_row = pd.DataFrame({
+            "shape_id": [add_dict["shape_id"]],
+            "shape_pt_lat": [stop_pt_info["stop_lat"]],
+            "shape_pt_lon": [stop_pt_info["stop_lon"]],
+            "shape_pt_sequence": [add_dict["shape_pt_sequence"]+1],
+        })
+        gtfs_model.shapes = pd.concat([
+            gtfs_model.shapes.loc[:insert_after_idx],
+            new_row,
+            gtfs_model.shapes.loc[gtfs_model.shapes.index > insert_after_idx]
+        ]).reset_index(drop=True)
+
+        WranglerLogger.debug(
+            f"gtfs_model.shapes after:\n"
+            f"{gtfs_model.shapes.loc[ (gtfs_model.shapes.index > insert_after_idx-5) & (gtfs_model.shapes.index < insert_after_idx+5) ]}")
+
 def step6_create_transit_network(
         gtfs_model: GtfsModel,
         roadway_network: RoadwayNetwork,
@@ -2029,6 +2241,8 @@ def step6_create_transit_network(
     }
 
     try:
+        hack_gtfs_shape_points(gtfs_model)
+
         feed = create_feed_from_gtfs_model(
             gtfs_model,
             roadway_network,
@@ -2281,6 +2495,12 @@ if __name__ == "__main__":
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
         # This writes the RoadwayNetwork and TransitNetwork
         transit_network, shape_links_gdf = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format)
+
+        # before doing this, convert list-columns to strings or writing the scenario will fail
+        list_columns = ["link_names", "incoming_link_names", "outgoing_link_names"]
+        for list_col in list_columns:
+            if list_col in roadway_network.nodes_df.columns:
+                roadway_network.nodes_df[list_col] = roadway_network.nodes_df[list_col].astype(str)
 
         # STEP 7: Create base year scenario
         my_scenario = network_wrangler.scenario.create_scenario(
