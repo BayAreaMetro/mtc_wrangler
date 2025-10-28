@@ -35,16 +35,16 @@ References:
   * network_wrangler\\notebook\\Create Network from OSM.ipynb
 
 Usage:
-    python create_mtc_network_from_OSM.py <county>
-    
+    python create_mtc_network_from_OSM.py <county> <input_gtfs> <output_dir> <output_format> [--trace-shape-ids <shape_id1> <shape_id2> ...]
+
     where <county> is one of:
     - 'Bay Area' (entire 9-county region)
     - Individual county names: 'San Francisco', 'San Mateo', 'Santa Clara',
       'Alameda', 'Contra Costa', 'Solano', 'Napa', 'Sonoma', 'Marin'
 
 Example:
-    python create_mtc_network_from_OSM.py "San Francisco"
-    python create_mtc_network_from_OSM.py "Bay Area"
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet hyper
+    python create_mtc_network_from_OSM.py "Santa Clara" ../../511gtfs_2023-09 ../../output_from_OSM/SantaClara parquet --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
 """
 
 USAGE = __doc__
@@ -159,7 +159,7 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
     'San Mateo': [
         'SM', # SamTrans
         'BA', # BART
-        'CT', # Caltrain
+        # 'CT', # Caltrain
     ],
     'Santa Clara': [
         'MV', # Mountain View Go
@@ -275,24 +275,24 @@ def get_county_geodataframe(
 
 def get_county_bbox(
         counties: list[str],
-        output_dir: pathlib.Path,
+        base_output_dir: pathlib.Path,
 ) -> tuple[float, float, float, float]:
-    """    
+    """
     The coordinates are converted to WGS84 (EPSG:4326) if needed.
-    
+
     Args:
         counties: list of California counties to include.
-        output_dir: Base directory for output
+        base_output_dir: Base directory for shared resources (county shapefiles)
 
     Returns:
         tuple: Bounding box as (west, south, east, north) in decimal degrees.
                These are longitude/latitude coordinates in WGS84 projection.
-               
+
     Note:
         The returned tuple order (west, south, east, north) matches the format
         expected by osmnx.graph_from_bbox() function.
     """
-    county_gdf = get_county_geodataframe(output_dir, "CA")
+    county_gdf = get_county_geodataframe(base_output_dir, "CA")
     county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
 
     # Get the total bounds (bounding box) of all counties
@@ -1055,9 +1055,10 @@ def handle_links_with_duplicate_A_B(
 
 def stepa_standardize_attributes(
         g: networkx.MultiDiGraph,
-        county: str, 
+        county: str,
         prefix: str,
         output_dir: pathlib.Path,
+        base_output_dir: pathlib.Path,
         output_formats: list[str],
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
@@ -1134,11 +1135,11 @@ def stepa_standardize_attributes(
 
     # Check for cached roadway network -- just parquet for now
     try:
-        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_nodes.parquet")
-        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}{county_no_spaces}_links.parquet")
+        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}nodes.parquet")
+        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}links.parquet")
         WranglerLogger.info(f"Loaded cached roadway network from:")
-        WranglerLogger.info(f"  {output_dir / f'{prefix}{county_no_spaces}_nodes.parquet'}")
-        WranglerLogger.info(f"  {output_dir / f'{prefix}{county_no_spaces}_links.parquet'}")
+        WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.parquet'}")
+        WranglerLogger.info(f"  {output_dir / f'{prefix}links.parquet'}")
         return (cached_links_gdf, cached_nodes_gdf)
     except Exception as e:
         WranglerLogger.debug(f"Could not load cached roadway network: {e}")
@@ -1191,7 +1192,7 @@ def stepa_standardize_attributes(
     if county == "Bay Area":
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
-        county_gdf = get_county_geodataframe(output_dir, "CA")
+        county_gdf = get_county_geodataframe(base_output_dir, "CA")
         county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
         county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
         WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
@@ -1399,15 +1400,15 @@ def stepa_standardize_attributes(
     # If hyper format is specified, write to tableau hyper file
     if 'hyper' in output_formats:
         tableau_utils.write_geodataframe_as_tableau_hyper(
-            links_gdf, 
-            output_dir / f"{prefix}{county_no_spaces}_links.hyper", 
-            f"{county_no_spaces}_links"
+            links_gdf,
+            output_dir / f"{prefix}links.hyper",
+            f"{prefix}links"
         )
 
         tableau_utils.write_geodataframe_as_tableau_hyper(
-            nodes_gdf, 
-            output_dir / f"{prefix}{county_no_spaces}_nodes.hyper", 
-            f"{county_no_spaces}_nodes"
+            nodes_gdf,
+            output_dir / f"{prefix}nodes.hyper",
+            f"{prefix}nodes"
         )
 
     # write to other formats -- this requires simpler column types
@@ -1426,15 +1427,15 @@ def stepa_standardize_attributes(
     parquet_links_gdf['ref'] = parquet_links_gdf['ref'].astype(str)
     
     if 'parquet' in output_formats:
-        links_parquet_file = output_dir / f"{prefix}{county_no_spaces}_links.parquet"
+        links_parquet_file = output_dir / f"{prefix}links.parquet"
         parquet_links_gdf.to_parquet(links_parquet_file)
         WranglerLogger.info(f"Wrote {links_parquet_file}")
     if 'gpkg' in output_formats:
-        links_gpkg_file = output_dir / f"{prefix}{county_no_spaces}_links.gpkg"
+        links_gpkg_file = output_dir / f"{prefix}links.gpkg"
         parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {links_gpkg_file}")
     if 'geojson' in output_formats:
-        links_geojson_file = output_dir / f"{prefix}{county_no_spaces}_links.geojson"
+        links_geojson_file = output_dir / f"{prefix}links.geojson"
         parquet_links_gdf.to_file(links_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {links_geojson_file}")
 
@@ -1447,30 +1448,33 @@ def stepa_standardize_attributes(
     parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
 
     if 'parquet' in output_formats:
-        nodes_parquet_file = output_dir / f"{prefix}{county_no_spaces}_nodes.parquet"
+        nodes_parquet_file = output_dir / f"{prefix}nodes.parquet"
         parquet_nodes_gdf.to_parquet(nodes_parquet_file)
         WranglerLogger.info(f"Wrote {nodes_parquet_file}")
     if 'gpkg' in output_formats:
-        nodes_gpkg_file = output_dir / f"{prefix}{county_no_spaces}_nodes.gpkg"
+        nodes_gpkg_file = output_dir / f"{prefix}nodes.gpkg"
         parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
     if 'geojson' in output_formats:
-        nodes_geojson_file = output_dir / f"{prefix}{county_no_spaces}_nodes.geojson"
+        nodes_geojson_file = output_dir / f"{prefix}nodes.geojson"
         parquet_nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {nodes_geojson_file}")
 
     return (links_gdf, nodes_gdf)
 
-def get_travel_model_zones(output_dir: pathlib.Path,):
+def get_travel_model_zones(base_output_dir: pathlib.Path,):
     """Fetches travel model two zones -- MAZs and TAZs, and returns
     GeoDataFrames with shapes and centroids.
+
+    Args:
+        base_output_dir: Base directory for shared resources (zone files)
 
     Returns:
        dictionary with keys MAZ and TAZ, and values as GeoDataFrame with
        columns, MAZ (for MAZ only), TAZ, county, geometry, geometry_centroid
 
     """
-    ZONES_DIR = output_dir / "mtc_zones"
+    ZONES_DIR = base_output_dir / "mtc_zones"
     ZONES_DIR.mkdir(exist_ok=True)
 
     WranglerLogger.info(f"Looking for MTC zones files in {ZONES_DIR}")
@@ -1566,18 +1570,20 @@ def get_travel_model_zones(output_dir: pathlib.Path,):
 # =============================================================================
 
 def step1_download_osm_network(
-        county: str, output_dir: pathlib.Path
+        county: str, output_dir: pathlib.Path, base_output_dir: pathlib.Path
     ) -> networkx.MultiDiGraph:
     """
     Step 1: Downloads OSM network data for specified geography.
-    
+
     Downloads road network data from OpenStreetMap using OSMnx for either
     individual counties or the entire Bay Area. Uses caching to avoid
     repeated downloads.
-    
+
     Args:
         county: County name (e.g., "San Francisco") or "Bay Area"
-    
+        output_dir: County-specific output directory
+        base_output_dir: Base directory for shared resources
+
     Returns:
         NetworkX MultiDiGraph containing the raw OSM road network
     """
@@ -1592,9 +1598,9 @@ def step1_download_osm_network(
         
     county_no_spaces = county.replace(" ", "")
     OSM_network_type = "all"  # Include all road types
-    
+
     # Check for cached graph
-    initial_graph_file = output_dir / f"1_graph_OSM_{county_no_spaces}.pkl"
+    initial_graph_file = output_dir / "1_graph_OSM.pkl"
     
     if initial_graph_file.exists():
         try:
@@ -1609,7 +1615,7 @@ def step1_download_osm_network(
     # Download new graph
     if county == 'Bay Area':
         WranglerLogger.info("Downloading network for Bay Area using bounding box...")
-        bbox = get_county_bbox(BAY_AREA_COUNTIES, output_dir)
+        bbox = get_county_bbox(BAY_AREA_COUNTIES, base_output_dir)
         WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
@@ -1644,9 +1650,9 @@ def step2_simplify_network_topology(
         Simplified NetworkX MultiDiGraph
     """
     WranglerLogger.info(f"======= STEP 2: Simplify network topology for {county} =======")
-    
+
     county_no_spaces = county.replace(" ", "")
-    simplified_graph_file = output_dir / f"2_graph_OSM_{county_no_spaces}_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
+    simplified_graph_file = output_dir / f"2_graph_OSM_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
     
     # Check for cached simplified graph
     if simplified_graph_file.exists():
@@ -1748,29 +1754,31 @@ def step3_assign_county_node_link_numbering(
         nodes_gdf: gpd.GeoDataFrame,
         county: str,
         output_dir: pathlib.Path,
+        base_output_dir: pathlib.Path,
         output_formats: list[str],
 ) -> RoadwayNetwork:
     """
     Step 3: Assigns county-specific node/link numbering schemes.
-    
+
     Creates a RoadwayNetwork object with model-specific node and link IDs
     based on the county numbering system. This step is already integrated
     into step3_standardize_attributes.
-    
+
     Args:
         links_gdf: Links GeoDataFrame from step 3
         nodes_gdf: Nodes GeoDataFrame from step 3
         county: County name
-        output_dir: Base directory for output
+        output_dir: County-specific output directory
+        base_output_dir: Base directory for shared resources
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
 
     Returns:
         RoadwayNetwork object with county-specific numbering
     """
     WranglerLogger.info(f"======= STEP 3: Create roadway network with county numbering for {county} =======")
-    
+
     county_no_spaces = county.replace(" ", "")
-    roadway_net_file = f"3_roadway_network_{county_no_spaces}"
+    roadway_net_file = "3_roadway_network"
     
     # Check for cached roadway network
     try:
@@ -1836,6 +1844,7 @@ def step4_add_centroids_and_connectors(
         roadway_network: RoadwayNetwork,
         county: str,
         output_dir: pathlib.Path,
+        base_output_dir: pathlib.Path,
         output_formats: list[str],
 ):
     """
@@ -1844,16 +1853,17 @@ def step4_add_centroids_and_connectors(
     Args:
         roadway_network: RoadwayNetwork to modify
         county: County name
-        output_dir: Base directory for output
+        output_dir: County-specific output directory
+        base_output_dir: Base directory for shared resources (zone files)
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
-    
+
     Returns:
         RoadwayNetwork
     """
     WranglerLogger.info(f"======= STEP 4: Create centroids and centroid connectors for {county} =======")
 
     county_no_spaces = county.replace(" ", "")
-    roadway_net_file = f"4_roadway_network_{county_no_spaces}"
+    roadway_net_file = "4_roadway_network"
 
     # Check for cached roadway network
     try:
@@ -1866,8 +1876,8 @@ def step4_add_centroids_and_connectors(
     except Exception as e:
         WranglerLogger.debug(f"Could not load cached roadway network: {e}")
 
-    # Create centroid connectors -- fetch travel model zone daata
-    zones_gdf_dict = get_travel_model_zones(output_dir)
+    # Create centroid connectors -- fetch travel model zone data
+    zones_gdf_dict = get_travel_model_zones(base_output_dir)
 
     if county != "Bay Area":
         for zone_type in zones_gdf_dict.keys():
@@ -1936,27 +1946,30 @@ def step4_add_centroids_and_connectors(
     return roadway_network
 
 def step5_prepare_gtfs_transit_data(
-        county: str, 
+        county: str,
         input_gtfs: pathlib.Path,
-        output_dir: pathlib.Path
+        output_dir: pathlib.Path,
+        base_output_dir: pathlib.Path
 ) -> GtfsModel:
     """
     Step 5: Prepare GTFS transit data for integration: filter to service date and relevant operators
-    
+
     Loads and processes GTFS transit feed data, filtering to the specified
     geography and preparing for integration with the roadway network.
-    
+
     Args:
         county: County name
-        output_dir: Base directory for output
-        
+        input_gtfs: Path to input GTFS data
+        output_dir: County-specific output directory
+        base_output_dir: Base directory for shared resources (county shapefiles)
+
     Returns:
         Filtered GTFS model object
     """
     WranglerLogger.info(f"======= STEP 5: Preparing GTFS transit data for {county} =======")
-    
+
     county_no_spaces = county.replace(" ", "")
-    gtfs_model_dir = output_dir / f"5_gtfs_model_{county_no_spaces}"
+    gtfs_model_dir = output_dir / "5_gtfs_model"
     
     # Check for cached GTFS model
     if gtfs_model_dir.exists():
@@ -2000,9 +2013,9 @@ def step5_prepare_gtfs_transit_data(
                 drop_agencies.append(agency_id)
         WranglerLogger.info(f"Dropping agencies for {drop_agencies}")
         drop_transit_agency(gtfs_model, agency_id=drop_agencies)
-    
+
     # Filter by geographic boundary
-    county_gdf = get_county_geodataframe(output_dir, "CA")
+    county_gdf = get_county_geodataframe(base_output_dir, "CA")
     county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
     if county != "Bay Area":
         county_gdf = county_gdf.loc[county_gdf['NAME10'] == county]
@@ -2019,190 +2032,21 @@ def step5_prepare_gtfs_transit_data(
         gtfs_model.trips['trip_id'] == 'PE:t263-sl17-p182-r1A:20230930', 
         'direction_id'
     ] = 1
+
+    # trip_ids and shape_ids all end with ":20230930" -- let's remove tht
+    gtfs_model[]
     
     # Cache the filtered GTFS model
     gtfs_model_dir.mkdir(exist_ok=True)
     write_transit(
         gtfs_model,
         gtfs_model_dir,
-        prefix=f"gtfs_model_{county_no_spaces}",
+        prefix="gtfs_model",
         overwrite=True
     )
     
     WranglerLogger.info(f"Integrated GTFS data: {len(gtfs_model.routes)} routes, {len(gtfs_model.stops)} stops")
     return gtfs_model
-
-def hack_gtfs_shape_points(gtfs_model: GtfsModel):
-    """
-    Update shape points for routes that don't work well with stops.
-
-    Drop some shape points in the GtfsModel that are too close to
-    the wrong stops and messing things up.
-
-    Add some stops as shape points. Most of these problems come from routes
-    that double back on themselves a bunch.
-
-    TODO: This should be replaced with an algorithm improvement that walks the shape pts
-    TODO: and walks the stop pts and inserts stop pts along the shapes
-    """
-    # these incorrectly match to stop_sequence 3
-    mask = ((gtfs_model.shapes["shape_id"] == "WH:42265:20230930") &
-             gtfs_model.shapes["shape_pt_sequence"].isin([501,504,507]))
-    if mask.any():
-        # Log which rows will be dropped
-        WranglerLogger.debug(f"hack_gtfs_shape_points(): Dropping rows:\n{gtfs_model.shapes[mask]}")
-        # Filter out the masked rows (keep where mask is False)
-        gtfs_model.shapes = gtfs_model.shapes[~mask]
-
-    # these incorrectly match to stop_sequence 12
-    mask = ((gtfs_model.shapes["shape_id"] == "WH:42265:20230930") &
-             gtfs_model.shapes["shape_pt_sequence"].isin([192,195,198]))
-    if mask.any():
-        # Log which rows will be dropped
-        WranglerLogger.debug(f"hack_gtfs_shape_points(): Dropping rows:\n{gtfs_model.shapes[mask]}")
-        # Filter out the masked rows (keep where mask is False)
-        gtfs_model.shapes = gtfs_model.shapes[~mask]
-
-    # add these stop_ids as shape points
-    ADD_STOP_AS_SHAPE_PT = [
-        {"stop_id":"881753", "shape_id":"WH:42265:20230930", "shape_pt_sequence":423},
-        #----
-        {"stop_id":"880059", "shape_id":"WH:42277:20230930", "shape_pt_sequence":81},   # 2
-        {"stop_id":"881527", "shape_id":"WH:42277:20230930", "shape_pt_sequence":162},  # 4
-        {"stop_id":"881506", "shape_id":"WH:42277:20230930", "shape_pt_sequence":921},  # 18
-        {"stop_id":"881514", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1254}, # 29
-        {"stop_id":"882714", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1737}, # 36
-        {"stop_id":"881551", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1821}, # 39
-        {"stop_id":"881555", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1857}, # 40
-        {"stop_id":"882847", "shape_id":"WH:42277:20230930", "shape_pt_sequence":1858}, # 41
-        #----
-        {"stop_id":"881846", "shape_id":"WH:42352:20230930", "shape_pt_sequence":435}, # 5}
-        {"stop_id":"881852", "shape_id":"WH:42352:20230930", "shape_pt_sequence":2148}, # 27}
-        {"stop_id":"883114", "shape_id":"WH:42352:20230930", "shape_pt_sequence":2160}, # 28}
-        {"stop_id":"881862", "shape_id":"WH:42352:20230930", "shape_pt_sequence":3033}, # 38}
-        #----
-        {"stop_id":"881952", "shape_id":'WH:42352:20230930', "shape_pt_sequence":1410}, # 15
-        {"stop_id":"882631", "shape_id":'WH:42352:20230930', "shape_pt_sequence":2742}, # 34
-        #----
-        {"stop_id":"881745", "shape_id":'WH:42349:20230930', "shape_pt_sequence":276}, # 2
-        {"stop_id":"881742", "shape_id":'WH:42349:20230930', "shape_pt_sequence":6081}, # 5
-        #----
-        {"stop_id":"881911", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":402}, # 5
-        {"stop_id":"881903", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":1659}, # 15
-        {"stop_id":"882961", "shape_id":"WH:42285:20230930",  "shape_pt_sequence":1683}, # 16
-        #----
-        {"stop_id":"883118", "shape_id":"WH:42303:20230930",  "shape_pt_sequence":15}, # 1
-        #----
-        {"stop_id":"881799", "shape_id":"WH:42314:20230930",  "shape_pt_sequence":1194}, # 20
-        #----
-        {"stop_id":"881799", "shape_id":"WH:42315:20230930",  "shape_pt_sequence":1197}, # 20
-        #----
-        {"stop_id":"881799", "shape_id":"WH:42316:20230930",  "shape_pt_sequence":177}, # 3
-        #----
-        {"stop_id":"881799", "shape_id":"WH:42317:20230930",  "shape_pt_sequence":1311}, # 4
-        {"stop_id":"881874", "shape_id":"WH:42317:20230930",  "shape_pt_sequence":2193}, # 21
-        #----
-        {"stop_id":"882706", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1230}, # 17
-        {"stop_id":"882705", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1245}, # 18
-        {"stop_id":"882704", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1251}, # 19
-        {"stop_id":"882703", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1263}, # 20
-        {"stop_id":"882702", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1278}, # 21
-        {"stop_id":"882701", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1296}, # 22
-        {"stop_id":"882700", "shape_id":"WH:42324:20230930", "shape_pt_sequence":1305}, # 23
-        #-----
-        {"stop_id":"882706", "shape_id":"WH:42325:20230930", "shape_pt_sequence":801}, # 7
-        {"stop_id":"882705", "shape_id":"WH:42325:20230930", "shape_pt_sequence":816}, # 8
-        {"stop_id":"882704", "shape_id":"WH:42325:20230930", "shape_pt_sequence":822}, # 9
-        {"stop_id":"882703", "shape_id":"WH:42325:20230930", "shape_pt_sequence":834}, # 10
-        {"stop_id":"882702", "shape_id":"WH:42325:20230930", "shape_pt_sequence":849}, # 11
-        {"stop_id":"882701", "shape_id":"WH:42325:20230930", "shape_pt_sequence":867}, # 12
-        {"stop_id":"882700", "shape_id":"WH:42325:20230930", "shape_pt_sequence":876}, # 13
-        {"stop_id":"881871", "shape_id":"WH:42325:20230930", "shape_pt_sequence":981}, # 14
-        #-----
-        {"stop_id":"882706", "shape_id":"WH:42327:20230930", "shape_pt_sequence":801}, # 7
-        {"stop_id":"882705", "shape_id":"WH:42327:20230930", "shape_pt_sequence":816}, # 8
-        {"stop_id":"882704", "shape_id":"WH:42327:20230930", "shape_pt_sequence":822}, # 9
-        {"stop_id":"882703", "shape_id":"WH:42327:20230930", "shape_pt_sequence":834}, # 10
-        {"stop_id":"882702", "shape_id":"WH:42327:20230930", "shape_pt_sequence":849}, # 11
-        {"stop_id":"882701", "shape_id":"WH:42327:20230930", "shape_pt_sequence":867}, # 12
-        {"stop_id":"882700", "shape_id":"WH:42327:20230930", "shape_pt_sequence":876}, # 13
-        {"stop_id":"881871", "shape_id":"WH:42327:20230930", "shape_pt_sequence":981}, # 14
-        #----
-        {"stop_id":"882399", "shape_id":"WH:42331:20230930", "shape_pt_sequence":3}, # 1
-        {"stop_id":"882400", "shape_id":"WH:42331:20230930", "shape_pt_sequence":4}, # 2
-        #----
-        {"stop_id":"882399", "shape_id":"WH:42333:20230930", "shape_pt_sequence":3}, # 1
-        {"stop_id":"882400", "shape_id":"WH:42333:20230930", "shape_pt_sequence":4}, # 2
-        {"stop_id":"882492", "shape_id":"WH:42333:20230930", "shape_pt_sequence":876}, # 16
-        #----
-        {"stop_id":"882492", "shape_id":"WH:42334:20230930", "shape_pt_sequence":630}, # 9
-        #----
-        {"stop_id":"882237", "shape_id":"WH:42335:20230930", "shape_pt_sequence":66}, # 3
-        #----
-        {"stop_id":"882237", "shape_id":"WH:42336:20230930", "shape_pt_sequence":231}, # 7
-        {"stop_id":"882241", "shape_id":"WH:42336:20230930", "shape_pt_sequence":642}, # 15
-        #----
-        {"stop_id":"882382", "shape_id":"WH:42337:20230930", "shape_pt_sequence":159}, # 7
-        {"stop_id":"882343", "shape_id":"WH:42337:20230930", "shape_pt_sequence":186}, # 8
-        #----
-        {"stop_id":"882382", "shape_id":"WH:42338:20230930", "shape_pt_sequence":876}, # 12
-        {"stop_id":"882343", "shape_id":"WH:42338:20230930", "shape_pt_sequence":903}, # 13
-        #----
-        {"stop_id":"882706", "shape_id":"WH:42342:20230930", "shape_pt_sequence":360}, # 9
-        {"stop_id":"882705", "shape_id":"WH:42342:20230930", "shape_pt_sequence":375}, # 10
-        {"stop_id":"882704", "shape_id":"WH:42342:20230930", "shape_pt_sequence":381}, # 11
-        {"stop_id":"882703", "shape_id":"WH:42342:20230930", "shape_pt_sequence":390}, # 12
-        {"stop_id":"882702", "shape_id":"WH:42342:20230930", "shape_pt_sequence":405}, # 13
-        {"stop_id":"882701", "shape_id":"WH:42342:20230930", "shape_pt_sequence":420}, # 14
-        #----
-        {"stop_id":"882706", "shape_id":"WH:42343:20230930", "shape_pt_sequence":456}, # 8
-        {"stop_id":"882705", "shape_id":"WH:42343:20230930", "shape_pt_sequence":471}, # 9
-        {"stop_id":"882704", "shape_id":"WH:42343:20230930", "shape_pt_sequence":477}, # 10
-        {"stop_id":"882703", "shape_id":"WH:42343:20230930", "shape_pt_sequence":486}, # 11
-        {"stop_id":"882702", "shape_id":"WH:42343:20230930", "shape_pt_sequence":501}, # 12
-        {"stop_id":"882701", "shape_id":"WH:42343:20230930", "shape_pt_sequence":516}, # 13
-        #----
-        {"stop_id":"882392", "shape_id":"WH:42346:20230930", "shape_pt_sequence":1176}, # 13
-        #----
-        {"stop_id":"881745", "shape_id":'WH:42351:20230930', "shape_pt_sequence":279}, # 2
-        {"stop_id":"881742", "shape_id":'WH:42351:20230930', "shape_pt_sequence":6006}, # 5
-        #----
-        # {"stop_id":"", "shape_id":"WH:42324:20230930", "shape_pt_sequence":}, # 21
-    ]
-    for add_dict in ADD_STOP_AS_SHAPE_PT:
-        # sort/reindex
-        gtfs_model.shapes.sort_values(by=["shape_id","shape_pt_sequence"], inplace=True, ignore_index=True)
-
-        # insert this stop point as a shape point after this shape point
-        stop_pt_df = gtfs_model.stops.loc [ 
-            gtfs_model.stops["stop_id"] == add_dict["stop_id"]
-        ]
-        shape_pt_df = gtfs_model.shapes.loc [ 
-            (gtfs_model.shapes["shape_id"] == add_dict["shape_id"]) &
-            (gtfs_model.shapes["shape_pt_sequence"] == add_dict["shape_pt_sequence"] )
-        ]
-        if (len(stop_pt_df) != 1) or (len(shape_pt_df) != 1):
-            continue
-
-        insert_after_idx = int(shape_pt_df.index[0])
-        stop_pt_info = stop_pt_df.iloc[0]
-        WranglerLogger.debug(f"stop_pt_info:\n{stop_pt_info}")
-        WranglerLogger.debug(f"{insert_after_idx=} shape_pt_df:\n{shape_pt_df}")
-        new_row = pd.DataFrame({
-            "shape_id": [add_dict["shape_id"]],
-            "shape_pt_lat": [stop_pt_info["stop_lat"]],
-            "shape_pt_lon": [stop_pt_info["stop_lon"]],
-            "shape_pt_sequence": [add_dict["shape_pt_sequence"]+1],
-        })
-        gtfs_model.shapes = pd.concat([
-            gtfs_model.shapes.loc[:insert_after_idx],
-            new_row,
-            gtfs_model.shapes.loc[gtfs_model.shapes.index > insert_after_idx]
-        ]).reset_index(drop=True)
-
-        WranglerLogger.debug(
-            f"gtfs_model.shapes after:\n"
-            f"{gtfs_model.shapes.loc[ (gtfs_model.shapes.index > insert_after_idx-5) & (gtfs_model.shapes.index < insert_after_idx+5) ]}")
 
 def step6_create_transit_network(
         gtfs_model: GtfsModel,
@@ -2210,21 +2054,23 @@ def step6_create_transit_network(
         county: str,
         output_dir: pathlib.Path,
         output_formats: list[str],
+        trace_shape_ids: Optional[list[str]] = None,
 ) -> tuple[TransitNetwork, gpd.GeoDataFrame]:
     """
     Step 6: Create TransitNetwork by converting GtfsModel to Wrangler-flavored Feed object,
     integrating with RoadwayNetwork
-    
+
     Integrates GTFS transit data with the roadway network by creating transit
     stops and connecting them to the road network with appropriate links.
-    
+
     Args:
         gtfs_model: GTFS model from step 4
         roadway_network: RoadwayNetwork from step 3
         county: County name
-        output_dir: Base directory for output. 
+        output_dir: Base directory for output.
             Only used if an exception is thrown with debug data.
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
+        trace_shape_ids: Optional list of shape IDs to trace for debugging transit routing
 
     Returns:
         Tuple of (TransitNetwork with stops and links integrated, shape_links_gdf)
@@ -2241,8 +2087,6 @@ def step6_create_transit_network(
     }
 
     try:
-        hack_gtfs_shape_points(gtfs_model)
-
         feed = create_feed_from_gtfs_model(
             gtfs_model,
             roadway_network,
@@ -2253,15 +2097,7 @@ def step6_create_transit_network(
             default_frequency_for_onetime_route=180*60,  # 180 minutes
             add_stations_and_links=True,
             max_stop_distance = 0.10*FEET_PER_MILE,
-            trace_shape_ids=[
-                'CM:p_1433183:20230930',
-                # 'SF:366:20230930', # 1X bus
-                # 'SF:2808:20230930',  # 28 bus
-                # 'SF:1400:20230930',  # 14 bus
-                # 'SF:4502:20230930', # 45 bus
-                # 'SF:60:20230930',    # LOWL bus line
-                # 'SF:19800:20230930', # F line LRT
-            ],
+            trace_shape_ids=trace_shape_ids,
             # for 9-county Bay Area, ignore these - they're logged
             errors = "ignore"
         )
@@ -2282,19 +2118,19 @@ def step6_create_transit_network(
             if "hyper" in output_formats:
                 tableau_utils.write_geodataframe_as_tableau_hyper(
                     error_gdf,
-                    output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.hyper"),
+                    output_dir / error_gdf_name.replace("_gdf", ".hyper"),
                     error_gdf_name
                 )
             if "parquet" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.parquet")
+                debug_file = output_dir / error_gdf_name.replace("_gdf", ".parquet")
                 error_gdf.to_parquet(debug_file)
                 WranglerLogger.error(f"Wrote {debug_file}")
             if "gpkg" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.gpkg")
+                debug_file = output_dir / error_gdf_name.replace("_gdf", ".gpkg")
                 error_gdf.to_file(debug_file, driver="GPKG")
                 WranglerLogger.error(f"Wrote {debug_file}")
             if "geojson" in output_formats:
-                debug_file = output_dir / error_gdf_name.replace("_gdf",f"{county_no_spaces}.geojson")
+                debug_file = output_dir / error_gdf_name.replace("_gdf", ".geojson")
                 error_gdf.to_file(debug_file, driver="GeoJSON")
                 WranglerLogger.error(f"Wrote {debug_file}")
 
@@ -2302,7 +2138,7 @@ def step6_create_transit_network(
     
     # Write roadway network with transit
     county_no_spaces = county.replace(" ","")
-    roadway_net_file = f"6_roadway_network_inc_transit_{county_no_spaces}"
+    roadway_net_file = "6_roadway_network_inc_transit"
     for roadway_format in output_formats:
         if roadway_format == "hyper":
             tableau_utils.write_geodataframe_as_tableau_hyper(
@@ -2333,7 +2169,7 @@ def step6_create_transit_network(
     transit_network = load_transit(feed=feed)
     WranglerLogger.info(f"Created transit network:\n{transit_network}")
 
-    transit_network_dir = output_dir / f"6_transit_network_{county_no_spaces}"
+    transit_network_dir = output_dir / "6_transit_network"
     transit_network_dir.mkdir(exist_ok=True)
     write_transit(
         transit_network,
@@ -2422,7 +2258,7 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
-    pd.options.display.max_rows = 500 # number of rows to show before truncating
+    pd.options.display.max_rows = 1200 # number of rows to show before truncating
     pd.set_option('display.float_format', '{:.2f}'.format)
     # numpy
     np.set_printoptions(linewidth=500)
@@ -2435,19 +2271,26 @@ if __name__ == "__main__":
     parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
     parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
+    parser.add_argument("--trace-shape-ids", type=str, nargs='*', help="Optional shape IDs to trace for debugging transit routing", default=None)
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
-    output_dir = args.output_dir.resolve()
 
-    # Create output directory
+    # Set up output directories
+    # Base directory for shared resources (zones, county shapefiles)
+    base_output_dir = args.output_dir.resolve()
+    # County-specific subdirectory for network outputs
+    output_dir = base_output_dir / args.county_no_spaces
+
+    # Create output directories
+    base_output_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Note: pygris uses its own default cache location determined by appdirs
     # The cache=True parameter in pygris.counties() calls enables caching
     
     # Setup logging
-    INFO_LOG  = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.info.log"
-    DEBUG_LOG = output_dir / f"create_mtc_network_from_OSM_{args.county_no_spaces}.debug.log"
+    INFO_LOG  = output_dir / "create_mtc_network_from_OSM.info.log"
+    DEBUG_LOG = output_dir / "create_mtc_network_from_OSM.debug.log"
 
     network_wrangler.setup_logging(
         info_log_filename=INFO_LOG,
@@ -2469,32 +2312,32 @@ if __name__ == "__main__":
 
     try:
         # STEP 1: Download OSM network data
-        g = step1_download_osm_network(args.county, output_dir)
+        g = step1_download_osm_network(args.county, output_dir, base_output_dir)
 
         # STEP 1a: standardize attributes (and write)
         # Note: we don't keep the results of this, since we'll use version from the simplified graph
-        stepa_standardize_attributes(g, args.county, "1a_original_", output_dir, args.output_format)
-        
+        stepa_standardize_attributes(g, args.county, "1a_original_", output_dir, base_output_dir, args.output_format)
+
         # STEP 2: Simplify network topology
         simplified_g = step2_simplify_network_topology(g, args.county, output_dir)
 
         # STEP 2a: standardize attributes and write
-        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", output_dir, args.output_format)
-        
+        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", output_dir, base_output_dir, args.output_format)
+
         # STEP 3: Assign county-specific numbering and create RoadwayNetwork object
         # This also drops columns we're done with and writes the roadway network
-        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, args.output_format)
+        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, base_output_dir, args.output_format)
 
         # STEP 4: Add centroids and centroid connectors
-        roadway_network = step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, args.output_format)
-        
+        roadway_network = step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, base_output_dir, args.output_format)
+
         # STEP 5: Prepare GTFS transit data: Read and filter to service date, relevant operators. Creates GtfsModel object
         # This also writes the GtfsModel as GTFS
-        gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir)
-        
+        gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir)
+
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
         # This writes the RoadwayNetwork and TransitNetwork
-        transit_network, shape_links_gdf = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format)
+        transit_network, shape_links_gdf = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format, args.trace_shape_ids)
 
         # before doing this, convert list-columns to strings or writing the scenario will fail
         list_columns = ["link_names", "incoming_link_names", "outgoing_link_names"]
@@ -2513,7 +2356,7 @@ if __name__ == "__main__":
         )
     
         # write it to disk
-        scenario_dir = output_dir / f"7_scenario_{args.county_no_spaces}"
+        scenario_dir = output_dir / "7_scenario"
         scenario_dir.mkdir(exist_ok=True)
         my_scenario.write(
             path=scenario_dir,
