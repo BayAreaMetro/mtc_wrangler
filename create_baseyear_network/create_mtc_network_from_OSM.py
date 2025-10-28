@@ -2033,39 +2033,6 @@ def step5_prepare_gtfs_transit_data(
         'direction_id'
     ] = 1
 
-    # Remove ":20230930" suffix from trip_ids and shape_ids
-    suffix_to_remove = ":20230930"
-
-    # Update trips table: trip_id and shape_id
-    if 'trip_id' in gtfs_model.trips.columns:
-        gtfs_model.trips['trip_id'] = gtfs_model.trips['trip_id'].str.replace(
-            suffix_to_remove, '', regex=False
-        )
-    if 'shape_id' in gtfs_model.trips.columns:
-        gtfs_model.trips['shape_id'] = gtfs_model.trips['shape_id'].str.replace(
-            suffix_to_remove, '', regex=False
-        )
-
-    # Update stop_times table: trip_id
-    if hasattr(gtfs_model, 'stop_times') and 'trip_id' in gtfs_model.stop_times.columns:
-        gtfs_model.stop_times['trip_id'] = gtfs_model.stop_times['trip_id'].str.replace(
-            suffix_to_remove, '', regex=False
-        )
-
-    # Update shapes table: shape_id
-    if hasattr(gtfs_model, 'shapes') and 'shape_id' in gtfs_model.shapes.columns:
-        gtfs_model.shapes['shape_id'] = gtfs_model.shapes['shape_id'].str.replace(
-            suffix_to_remove, '', regex=False
-        )
-
-    # Update frequencies table: trip_id (if it exists)
-    if hasattr(gtfs_model, 'frequencies') and 'trip_id' in gtfs_model.frequencies.columns:
-        gtfs_model.frequencies['trip_id'] = gtfs_model.frequencies['trip_id'].str.replace(
-            suffix_to_remove, '', regex=False
-        )
-
-    WranglerLogger.info(f"Removed '{suffix_to_remove}' suffix from trip_ids and shape_ids")
-
     # Cache the filtered GTFS model
     gtfs_model_dir.mkdir(exist_ok=True)
     write_transit(
