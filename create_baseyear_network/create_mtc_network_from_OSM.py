@@ -2033,6 +2033,27 @@ def step5_prepare_gtfs_transit_data(
         'direction_id'
     ] = 1
 
+    # Check for and remove duplicate consecutive stops (same stop_id appearing twice in a row)
+    gtfs_model.stop_times = gtfs_model.stop_times.sort_values(['trip_id', 'stop_sequence'])
+    gtfs_model.stop_times['prev_stop_id'] = gtfs_model.stop_times.groupby('trip_id')['stop_id'].shift(1)
+    gtfs_model.stop_times['is_duplicate_consecutive'] = (
+        gtfs_model.stop_times['stop_id'] == gtfs_model.stop_times['prev_stop_id']
+    )
+
+    duplicate_consecutive = gtfs_model.stop_times[gtfs_model.stop_times['is_duplicate_consecutive'] == True]
+    if len(duplicate_consecutive) > 0:
+        WranglerLogger.warning(
+            f"Found {len(duplicate_consecutive)} consecutive duplicate stops. Removing them.\n"
+            f"Sample: {duplicate_consecutive[['trip_id', 'stop_id', 'stop_sequence']].head(10)}"
+        )
+        # Remove the duplicate consecutive stops
+        gtfs_model.stop_times = gtfs_model.stop_times[
+            gtfs_model.stop_times['is_duplicate_consecutive'] == False
+        ].copy()
+
+    # Clean up temporary columns
+    gtfs_model.stop_times.drop(columns=['prev_stop_id', 'is_duplicate_consecutive'], inplace=True)
+
     # Cache the filtered GTFS model
     gtfs_model_dir.mkdir(exist_ok=True)
     write_transit(
@@ -2255,7 +2276,7 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
-    pd.options.display.max_rows = 1200 # number of rows to show before truncating
+    pd.options.display.max_rows = 1600 # number of rows to show before truncating
     pd.set_option('display.float_format', '{:.2f}'.format)
     # numpy
     np.set_printoptions(linewidth=500)
