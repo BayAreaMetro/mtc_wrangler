@@ -2276,7 +2276,7 @@ if __name__ == "__main__":
     pd.options.display.max_columns = None
     pd.options.display.width = None
     pd.options.display.min_rows = 20 # number of rows to show in truncated view
-    pd.options.display.max_rows = 1600 # number of rows to show before truncating
+    pd.options.display.max_rows = 500 # number of rows to show before truncating
     pd.set_option('display.float_format', '{:.2f}'.format)
     # numpy
     np.set_printoptions(linewidth=500)
