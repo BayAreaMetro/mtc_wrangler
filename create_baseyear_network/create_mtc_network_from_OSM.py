@@ -1485,7 +1485,7 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
     gdfs = {}
 
     # Fetch the maz/taz/county mapping
-    county_mapping_file = f"mazs_tazs_county_{ZONE_VERSION.replace('_','.')}.csv"
+    county_mapping_file = f"mazs_tazs_county_tract_PUMA_{ZONE_VERSION.replace('_','.')}.csv"
     if (ZONES_DIR / county_mapping_file).exists() == False:
         try:
             url = f"{BASE_URL}/{county_mapping_file}"
@@ -1537,15 +1537,12 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
             ),
             axis=1
         )
-        # rename maz to MAZ and/or taz to TAZ
-        gdfs[zone_type].rename(columns={zone_type.lower() : zone_type}, inplace=True)
-        if zone_type == "MAZ":
-            gdfs[zone_type].rename(columns={"taz": "TAZ"}, inplace=True)
+        WranglerLogger.debug(f"gdfs[{zone_type}]:\n{gdfs[zone_type]}")
 
         # join to county_mapping_df
         gdfs[zone_type] = pd.merge(
             gdfs[zone_type],
-            right=county_mapping_df[[zone_type, "county_name"]].drop_duplicates(),
+            right=county_mapping_df[[f"{zone_type}_NODE", "county_name"]].drop_duplicates(),
             how='left',
             validate='one_to_one',
             indicator=True
@@ -1553,9 +1550,9 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
         assert (gdfs[zone_type]['_merge'] == 'both').all(), "Not all merge indicators are 'both'"
 
         # keep only relevant columns
-        keep_cols=[zone_type, "county_name", "geometry", "geometry_centroid"]
+        keep_cols=[f"{zone_type}_NODE", f"{zone_type}_SEQ", "county_name", "geometry", "geometry_centroid"]
         if zone_type == "MAZ":
-            keep_cols.insert(1, "TAZ")
+            keep_cols.insert(1, "TAZ_NODE")
         gdfs[zone_type] = gdfs[zone_type][keep_cols]
 
         # rename county_name to county
@@ -1885,10 +1882,10 @@ def step4_add_centroids_and_connectors(
             WranglerLogger.info(f"Filtered {zone_type} to {county}: {len(zones_gdf_dict[zone_type]):,} rows")
 
     # TAZ & TAZ drive connectors
-    add_centroid_nodes(roadway_network, zones_gdf_dict["TAZ"], "TAZ")
+    add_centroid_nodes(roadway_network, zones_gdf_dict["TAZ"], "TAZ_NODE")
     summary_gdf = add_centroid_connectors(
         roadway_network, 
-        zones_gdf_dict["TAZ"], "TAZ", 
+        zones_gdf_dict["TAZ"], "TAZ_NODE", 
         mode="drive", 
         local_crs=LOCAL_CRS_FEET,
         zone_buffer_distance=20,
@@ -1902,10 +1899,10 @@ def step4_add_centroids_and_connectors(
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
     # MAZ & MAZ walk/bike connectors
-    add_centroid_nodes(roadway_network, zones_gdf_dict["MAZ"], "MAZ")
+    add_centroid_nodes(roadway_network, zones_gdf_dict["MAZ"], "MAZ_NODE")
     summary_gdf = add_centroid_connectors(
         roadway_network, 
-        zones_gdf_dict["MAZ"], "MAZ", 
+        zones_gdf_dict["MAZ"], "MAZ_NODE", 
         mode="walk", 
         local_crs=LOCAL_CRS_FEET,
         zone_buffer_distance=20,
