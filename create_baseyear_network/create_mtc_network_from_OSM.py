@@ -472,6 +472,10 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     ################ bus ################
     # includes busway => busway
     links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and ('busway' in x)), 'highway'] = 'busway'
+    # if highway=='service' and bus=='designated' (Fairfield Transit Center)
+    # https://wiki.openstreetmap.org/wiki/Tag:bus=designated
+    links_gdf.loc[ (links_gdf.highway == 'service') & (links_gdf.bus == 'designated'), 'highway' ] = 'busway'
+
     # remove access for anything but buses
     links_gdf.loc[links_gdf.highway == 'busway', 'drive_access'] = False
     links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
