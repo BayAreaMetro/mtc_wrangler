@@ -23,20 +23,34 @@ print(f"Read {len(shape_gdf)} rows from {shapes_file}")
 print(shape_gdf.head())
 print(shape_gdf.dtypes)
 
-# duplicate links 
-key = ['id','fromIntersectionId','toIntersectionId']
-links_with_dupe_keys = link_df.loc[ link_df.duplicated(subset=key, keep=False) ]
-print(f"links with duplicate keys:\n{links_with_dupe_keys}")
-
+# Per Sijia (https://app.asana.com/1/11860278793487/task/1209256117977561?focus=true)
+# "For a two-way street, there are two link records and just one shape record.
+# The two link records share the shape id and have opposite fromIntersectionId and 
+# toIntersectionId values. The one shape record has shape id and only has
+# fromIntersectionId and toIntersectionId for one direction. This is how
+# SharedStreet coded things. We don't really use or update fromIntersectionId
+# and toIntersectionId fields in Network Wrangler. When new links are added in
+# Network Wrangler, we do generate a new shape id, but we do not bother with new
+# fromIntersectionId and toIntersectionId. Therefore, there are nulls values in the
+# fromIntersectionId and toIntersectionId fields, which is why the joining has 
+# duplicates."
 shape_gdf = pd.merge(
     left=shape_gdf,
     right=link_df,
-    on=['id','fromIntersectionId','toIntersectionId'],
+    on=['id'],
     how='outer',
     validate='one_to_many',
     indicator=True
 )
 print(f"shape_gdf['_merge'].value_counts():\n{shape_gdf['_merge'].value_counts()}")
+
+# project to crs in feet and add length
+LOCAL_CRS_FEET = "EPSG:2227"
+FEET_PER_MILE = 5280.0
+
+shape_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
+shape_gdf['length'] = shape_gdf.length
+shape_gdf['distance'] = shape_gdf['length']/FEET_PER_MILE
 
 print(f"shape_gdf has {len(shape_gdf.columns)} columns")
 shape_gdf.to_file(combined_file, driver="GeoJSON")
