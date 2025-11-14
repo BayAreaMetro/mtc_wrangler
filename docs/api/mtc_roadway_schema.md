@@ -1,17 +1,11 @@
 # MTC Roadway Schemas
 
-## MTCRoadLinksTable
-
-::: models.mtc_roadway_schema.MTCRoadLinksTable
+::: models.mtc_roadway_schema
     options:
-      show_root_heading: true
+      show_root_heading: false
       show_source: true
       members_order: source
-
-## MTCRoadNodesTable
-
-::: models.mtc_roadway_schema.MTCRoadNodesTable
-    options:
-      show_root_heading: true
-      show_source: true
-      members_order: source
+      show_bases: true
+      show_signature_annotations: true
+      members: true
+      show_if_no_docstring: true

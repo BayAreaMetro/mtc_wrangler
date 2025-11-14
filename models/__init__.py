@@ -7,6 +7,8 @@ Classes:
     MTCRoadwayNetwork: Roadway network with MTC-specific validation
     MTCRoadLinksTable: Schema for MTC roadway links
     MTCRoadNodesTable: Schema for MTC roadway nodes
+    MTCFacilityType: Enum for functional class (ft) codes
+    MTCUseClass: Enum for vehicle-class restrictions (useclass) codes
 
 Example:
     ```python
@@ -26,10 +28,27 @@ Example:
 """
 
 from .mtc_network import MTCRoadwayNetwork
-from .mtc_roadway_schema import MTCRoadLinksTable, MTCRoadNodesTable
+from .mtc_roadway_schema import (
+    MTCCounty,
+    MTC_COUNTIES,
+    COUNTY_NAME_TO_CENTROID_START_NUM,
+    COUNTY_NAME_TO_NODE_START_NUM,
+    COUNTY_NAME_TO_NUM,
+    MTCFacilityType,
+    MTCRoadLinksTable,
+    MTCRoadNodesTable,
+    MTCUseClass,
+)
 
 __all__ = [
     "MTCRoadwayNetwork",
     "MTCRoadLinksTable",
     "MTCRoadNodesTable",
+    "MTCCounty",
+    "MTC_COUNTIES",
+    "COUNTY_NAME_TO_CENTROID_START_NUM",
+    "COUNTY_NAME_TO_NODE_START_NUM",
+    "COUNTY_NAME_TO_NUM",
+    "MTCFacilityType",
+    "MTCUseClass",
 ]

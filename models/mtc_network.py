@@ -6,7 +6,8 @@ additional validation for MTC-required fields.
 from pathlib import Path
 from typing import Optional, Union
 
-from network_wrangler.roadway import RoadwayNetwork
+from network_wrangler import WranglerLogger
+from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.utils.models import validate_df_to_model
 
 from .mtc_roadway_schema import MTCRoadLinksTable, MTCRoadNodesTable
@@ -60,10 +61,24 @@ class MTCRoadwayNetwork(RoadwayNetwork):
 
         # Apply MTC-specific validation if requested
         if validate_mtc:
-            self._validate_mtc_schema()
+            self.validate()
 
-    def _validate_mtc_schema(self):
-        """Validate network against MTC-specific schemas."""
+    def validate(self):
+        """Validate network against MTC-specific schemas.
+
+        This method can be called explicitly to validate the network after
+        modifications have been made to the dataframes.
+
+        Example:
+            ```python
+            # Modify network
+            net.links_df['county'] = 'Alameda'
+
+            # Validate changes
+            net.validate()
+            ```
+        """
+        WranglerLogger.debug("MTCRoadwayNetwork.validate() called")
         self.links_df = validate_df_to_model(self.links_df, MTCRoadLinksTable)
         self.nodes_df = validate_df_to_model(self.nodes_df, MTCRoadNodesTable)
 
@@ -137,7 +152,7 @@ class MTCRoadwayNetwork(RoadwayNetwork):
         """
         # Validate before writing if requested
         if validate_mtc:
-            self._validate_mtc_schema()
+            self.validate()
 
         # Use parent write method
         super().write(out_dir=out_dir, **kwargs)

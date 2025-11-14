@@ -34,6 +34,15 @@ plugins:
             show_source: true
             members_order: source
             show_signature_annotations: true
+            show_bases: true
+            show_inheritance_diagram: false
+            members: true
+            show_object_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            filters:
+              - "!^_"
+            docstring_section_style: table
           paths: [.]
           import:
             - https://network-wrangler.github.io/network_wrangler/latest/objects.inv

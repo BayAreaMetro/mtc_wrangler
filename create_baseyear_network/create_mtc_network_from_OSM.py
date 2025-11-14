@@ -72,7 +72,15 @@ import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
-from network_wrangler.roadway.io import load_roadway_from_dataframes, write_roadway
+from network_wrangler.roadway.io import load_roadway_from_dataframes
+
+# Import MTC-specific models
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from models import MTCRoadwayNetwork, MTCCounty, \
+    MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
+
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
 from network_wrangler.utils.geo import add_direction_to_links
@@ -96,26 +104,6 @@ warnings.filterwarnings('ignore',
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-
-# Map county names to county network node start based on
-# https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
-COUNTY_NAME_TO_NODE_START_NUM = {
-    'San Francisco': 1_000_000,
-    'San Mateo'    : 1_500_000,
-    'Santa Clara'  : 2_000_000,
-    'Alameda'      : 2_500_000,
-    'Contra Costa' : 3_000_000,
-    'Solano'       : 3_500_000,
-    'Napa'         : 4_000_000,
-    'Sonoma'       : 4_500_000,
-    'Marin'        : 5_000_000,
-    'External'     : 900_001,
- }
-BAY_AREA_COUNTIES = list(COUNTY_NAME_TO_NODE_START_NUM.keys())
-BAY_AREA_COUNTIES.remove("External")
-
-COUNTY_NAME_TO_NUM = dict(zip(BAY_AREA_COUNTIES, range(1,len(BAY_AREA_COUNTIES)+1)))
-
 FEET_PER_MILE = 5280.0
 
 NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
@@ -124,7 +112,7 @@ LOCAL_CRS_FEET = "EPSG:2227"
 """ NAD83 / California zone 3 (ftUS) https://epsg.io/2227 """
 
 COUNTY_NAME_TO_GTFS_AGENCIES = {
-    'Alameda': [
+    MTCCounty.ALAMEDA.value: [
         'AC', # AC Transit
         'BA', # BART
         # 'AM', # Capital Corridor - remove this because it dips in and out of county
@@ -133,7 +121,7 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
         'WH', # LAVTA
         'UC', # Union City Transi
     ],
-    'Contra Costa': [
+    MTCCounty.CONTRA_COSTA.value: [
         'CC', # County Connection
         'FS', # FAST
         'RV', # Rio Vista Delta Breeze
@@ -141,34 +129,34 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
         'VC', # Vacaville City Coach
         'WC', # WestCat (Western Contra Costa)
     ],
-    'Marin': [
+    MTCCounty.MARIN.value: [
         'GG', # Golden Gate Transit
         'MA', # Marin Transit
         'SA', # SMART
     ],
-    'Napa': [
+    MTCCounty.NAPA.value: [
         'VN', # VINE Transit
     ],
-    'San Francisco': [
+    MTCCounty.SAN_FRANCISCO.value: [
         'SF', # SF Muni
         'BA', # BART
         # 'GG', # Golden Gate Transit
         'CT', # Caltrain
         'MB', # Mission Bay TMA
     ],
-    'San Mateo': [
+    MTCCounty.SAN_MATEO.value: [
         'SM', # SamTrans
         'BA', # BART
         # 'CT', # Caltrain
     ],
-    'Santa Clara': [
+    MTCCounty.SANTA_CLARA.value: [
         'MV', # Mountain View Go
         'SC', # VTA
     ],
-    'Solano': [
+    MTCCounty.SOLANO.value: [
         'ST', # SolTrans
     ],
-    'Sonoma': [
+    MTCCounty.SONOMA.value: [
         'PE', # Petaluma
         'SR', # Santa Rosa CityBus
         'SO', # Sonoma County Transit
@@ -1197,7 +1185,7 @@ def stepa_standardize_attributes(
         # Read the county shapefile for spatial joins
         WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
         county_gdf = get_county_geodataframe(base_output_dir, "CA")
-        county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
+        county_gdf = county_gdf[county_gdf['NAME10'].isin(MTC_COUNTIES)].copy()
         county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
         WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
                 
@@ -1328,7 +1316,7 @@ def stepa_standardize_attributes(
     links_gdf['A'] = links_gdf['A'].map(osmid_to_model_id)
     links_gdf['B'] = links_gdf['B'].map(osmid_to_model_id)
 
-    # create model_link_id based on COUNTY_NAME_TO_NUM, assuming 100,000
+    # create model_link_id based on COUNTY_NAME_TO_NODE_START_NUM, assuming 100,000
     links_gdf = links_gdf.sort_values('county').reset_index(drop=True)
     links_gdf['model_link_id'] = 0  # Initialize
         
@@ -1616,7 +1604,7 @@ def step1_download_osm_network(
     # Download new graph
     if county == 'Bay Area':
         WranglerLogger.info("Downloading network for Bay Area using bounding box...")
-        bbox = get_county_bbox(BAY_AREA_COUNTIES, base_output_dir)
+        bbox = get_county_bbox(MTC_COUNTIES, base_output_dir)
         WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
@@ -1757,7 +1745,7 @@ def step3_assign_county_node_link_numbering(
         output_dir: pathlib.Path,
         base_output_dir: pathlib.Path,
         output_formats: list[str],
-) -> RoadwayNetwork:
+) -> MTCRoadwayNetwork:
     """
     Step 3: Assigns county-specific node/link numbering schemes.
 
@@ -1786,7 +1774,18 @@ def step3_assign_county_node_link_numbering(
         cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
         cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
         shapes_gdf = cached_links_gdf.copy()
-        roadway_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        WranglerLogger.debug(f"cached_links_gdf.dtypes\n:{cached_links_gdf.dtypes}")
+        # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
+        base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        WranglerLogger.debug(f"base_network.links_df.dtypes\n:{base_network.links_df.dtypes}")
+        roadway_network = MTCRoadwayNetwork(
+            nodes_df=base_network.nodes_df,
+            links_df=base_network.links_df,
+            shapes_df=base_network.shapes_df,
+            validate_mtc=False  # Skip validation for cached data
+        )
+        WranglerLogger.debug(f"roadway_network.links_df.dtypes\n:{roadway_network.links_df.dtypes}")
+
         WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
         return roadway_network
     except Exception as e:
@@ -1807,10 +1806,20 @@ def step3_assign_county_node_link_numbering(
     clean_nodes_gdf = nodes_gdf[NODE_COLS].copy()
     
     # Create roadway network
-    roadway_network = network_wrangler.load_roadway_from_dataframes(
+    base_network = network_wrangler.load_roadway_from_dataframes(
         links_df=clean_links_gdf,
         nodes_df=clean_nodes_gdf,
         shapes_df=clean_links_gdf
+    )
+    # centroid nodes and links haven't been added yet
+    base_network.nodes_df['taz_centroid'] = False
+    base_network.nodes_df['maz_centroid'] = False
+
+    roadway_network = MTCRoadwayNetwork(
+        nodes_df=base_network.nodes_df,
+        links_df=base_network.links_df,
+        shapes_df=base_network.shapes_df,
+        validate_mtc=True  # Skip validation during network creation
     )
 
     # filter nodes to links
@@ -1826,15 +1835,18 @@ def step3_assign_county_node_link_numbering(
     for roadway_format in output_formats:
         if roadway_format == "hyper": continue
         try:
-            write_roadway(
-                roadway_network,
+            roadway_network.write(
                 out_dir=output_dir,
                 prefix=roadway_net_file,
                 file_format=roadway_format,
                 overwrite=True,
                 true_shape=True
             )
-            WranglerLogger.info(f"Saved roadway network in {roadway_format} format")
+            WranglerLogger.info(
+                f"Saved roadway network in {roadway_format} format "
+                f"({len(roadway_network.links_df):,} links, "
+                f"{len(roadway_network.nodes_df):,} nodes)"
+            )
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
     
@@ -1871,7 +1883,14 @@ def step4_add_centroids_and_connectors(
         cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
         cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
         shapes_gdf = cached_links_gdf.copy()
-        roadway_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
+        base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        roadway_network = MTCRoadwayNetwork(
+            nodes_df=base_network.nodes_df,
+            links_df=base_network.links_df,
+            shapes_df=base_network.shapes_df,
+            validate_mtc=False  # Skip validation for cached data
+        )
         WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
         return roadway_network
     except Exception as e:
@@ -1916,6 +1935,37 @@ def step4_add_centroids_and_connectors(
     )
     WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
 
+    # Set county attribute for centroid connector links based on centroid node IDs
+    # Links with name="node to [TAZ,MAZ]_NODE" have centroid as A node
+    # Links with name="[TAZ,MAZ]_NODE to node" have centroid as B node
+    for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
+        # For "X_NODE to node" pattern, centroid is B node
+        mask_b = (roadway_network.links_df['name'].str.startswith('TAZ_NODE to', na=False) |
+                  roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False))
+        mask_b &= roadway_network.links_df['B'].between(node_start+1, node_start + 99_999)
+        roadway_network.links_df.loc[mask_b, 'county'] = county_name
+
+        # For "node to X_NODE" pattern, centroid is A node
+        mask_a = (roadway_network.links_df['name'].str.endswith('to TAZ_NODE', na=False) |
+                  roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False))
+        mask_a &= roadway_network.links_df['A'].between(node_start+1, node_start + 99_999)
+        roadway_network.links_df.loc[mask_a, 'county'] = county_name
+
+    # Set county and centroid flags for TAZ and MAZ centroid nodes
+    for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
+        # Set taz_centroid and maz_centroid flags based on node name
+        # First 10k: TAZ
+        taz_mask = roadway_network.nodes_df['model_node_id'].between(node_start+1, node_start + 9_999)
+        roadway_network.nodes_df.loc[taz_mask, 'county'] = county_name
+        roadway_network.nodes_df.loc[taz_mask, 'taz_centroid'] = True
+        roadway_network.nodes_df.loc[taz_mask, 'maz_centroid'] = False
+
+        # Remainder: MAZ
+        maz_mask = roadway_network.nodes_df['model_node_id'].between(node_start+10_001, node_start + 99_999)
+        roadway_network.nodes_df.loc[maz_mask, 'county'] = county_name
+        roadway_network.nodes_df.loc[maz_mask, 'taz_centroid'] = False
+        roadway_network.nodes_df.loc[maz_mask, 'maz_centroid'] = True
+
     # Write roadway network to cache
     for roadway_format in output_formats:
         if roadway_format == "hyper":
@@ -1932,15 +1982,18 @@ def step4_add_centroids_and_connectors(
             continue
 
         try:
-            write_roadway(
-                roadway_network,
+            roadway_network.write(
                 out_dir=output_dir,
                 prefix=roadway_net_file,
                 file_format=roadway_format,
                 overwrite=True,
                 true_shape=True
             )
-            WranglerLogger.info(f"Saved roadway network in {roadway_format} format")
+            WranglerLogger.info(
+                f"Saved roadway network in {roadway_format} format "
+                f"({len(roadway_network.links_df):,} links, "
+                f"{len(roadway_network.nodes_df):,} nodes)"
+            )
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
@@ -2017,7 +2070,7 @@ def step5_prepare_gtfs_transit_data(
 
     # Filter by geographic boundary
     county_gdf = get_county_geodataframe(base_output_dir, "CA")
-    county_gdf = county_gdf[county_gdf['NAME10'].isin(BAY_AREA_COUNTIES)].copy()
+    county_gdf = county_gdf[county_gdf['NAME10'].isin(MTC_COUNTIES)].copy()
     if county != "Bay Area":
         county_gdf = county_gdf.loc[county_gdf['NAME10'] == county]
         assert len(county_gdf) == 1
@@ -2286,7 +2339,7 @@ if __name__ == "__main__":
     pd.options.mode.chained_assignment = 'raise'
 
     parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
-    parser.add_argument("county", type=str, choices=['Bay Area'] + BAY_AREA_COUNTIES)
+    parser.add_argument("county", type=str, choices=['Bay Area'] + list(MTC_COUNTIES))
     parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
     parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
@@ -2343,7 +2396,7 @@ if __name__ == "__main__":
         # STEP 2a: standardize attributes and write
         (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", output_dir, base_output_dir, args.output_format)
 
-        # STEP 3: Assign county-specific numbering and create RoadwayNetwork object
+        # STEP 3: Assign county-specific numbering and create MTCRoadwayNetwork object
         # This also drops columns we're done with and writes the roadway network
         roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, base_output_dir, args.output_format)
 
