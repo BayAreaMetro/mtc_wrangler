@@ -80,6 +80,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import MTCRoadwayNetwork, MTCCounty, \
     MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
+from models.mtc_roadway_schema import MTCFacilityType
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -232,7 +233,6 @@ HIGHWAY_HIERARCHY = [
     'residential',    # residential street
     'living_street',  # pedestrian-focused residential
     'service',        # vehicle access to building, parking lot, etc.
-    'track',          # minor land-access roads
 ]
 
 def get_county_geodataframe(
@@ -370,7 +370,6 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     - trunk            highway, not quite motorway (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk)
     - trunk_link       highway ramps (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrunk_link)
     - unclassified     minor public roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dunclassified)
-    - track            minor land-access roads (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dtrack)
     - living_street    more pedestrian focused than residential, e.g. woonerf (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dliving_street)
 
     Standardized values - non-auto (drive_access=False):
@@ -446,6 +445,48 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # includes pedestrian => footway
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
 
+    # convert bridleway to footway
+    links_gdf.loc[links_gdf.highway == 'bridleway', 'highway'] = 'footway'
+
+    # includes bridleway => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('bridleway' in x)), 'highway'] = 'footway'
+
+    # Convert track based on name
+    # if names all end in 'Trail' or 'Fire Road', convert to footway
+    # otherwise, convert to service
+    def is_trail_or_fire_road(name):
+        """Check if name (string or list) ends with 'Trail' or 'Fire Road'."""
+        # Handle None or NaN - check type first before using pd.isna
+        if name is None:
+            return False
+        # Handle list of names - check if all end with Trail or Fire Road
+        if isinstance(name, list):
+            if len(name) == 0:
+                return False
+            return all(isinstance(n, str) and (n.endswith('Trail') or n.endswith('Fire Road')) for n in name)
+        # Handle single string
+        if isinstance(name, str):
+            return name.endswith('Trail') or name.endswith('Fire Road')
+        # For any other type (including NaN float), return False
+        return False
+
+    track_mask = links_gdf['highway'] == 'track'
+    if track_mask.any():
+        WranglerLogger.info(f"Found {track_mask.sum()} track links to convert")
+        trail_mask = track_mask & links_gdf['name'].apply(is_trail_or_fire_road)
+        WranglerLogger.info(f"Converting {trail_mask.sum()} track links to footway (Trail/Fire Road)")
+        links_gdf.loc[trail_mask, 'highway'] = 'footway'
+
+        service_mask = track_mask & ~trail_mask
+        WranglerLogger.info(f"Converting {service_mask.sum()} track links to service")
+        links_gdf.loc[service_mask, 'highway'] = 'service'
+
+        # Verify no tracks remain
+        remaining_tracks = (links_gdf['highway'] == 'track').sum()
+        if remaining_tracks > 0:
+            WranglerLogger.warning(f"WARNING: {remaining_tracks} track links remain after conversion!")
+            WranglerLogger.debug(f"Remaining tracks:\n{links_gdf[links_gdf['highway'] == 'track'][['highway', 'name']]}")
+
     # includes cycleway => cycleway
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('cycleway' in x)), 'highway'] = 'cycleway'
 
@@ -475,6 +516,26 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # go from highest to lowest and choose highest
     for highway_type in HIGHWAY_HIERARCHY:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
+
+    # Handle any remaining lists by taking the first element
+    list_mask = links_gdf['highway'].apply(lambda x: isinstance(x, list))
+    if list_mask.any():
+        WranglerLogger.warning(f"Found {list_mask.sum()} highway values still as lists - converting to first element")
+
+        # Get unique list values by converting to tuples (hashable)
+        remaining_lists = links_gdf.loc[list_mask, 'highway'].apply(tuple).unique()
+        WranglerLogger.debug(f"Remaining list values:\n{remaining_lists}")
+
+        # Log which values in the lists are not in HIGHWAY_HIERARCHY
+        unknown_types = set()
+        for highway_tuple in remaining_lists:
+            for highway_type in highway_tuple:
+                if highway_type not in HIGHWAY_HIERARCHY:
+                    unknown_types.add(highway_type)
+        if unknown_types:
+            WranglerLogger.warning(f"Highway types not in HIGHWAY_HIERARCHY: {sorted(unknown_types)}")
+
+        links_gdf.loc[list_mask, 'highway'] = links_gdf.loc[list_mask, 'highway'].apply(lambda x: x[0] if len(x) > 0 else 'unclassified')
 
     WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
 
@@ -841,6 +902,77 @@ def standardize_lanes_value(
     WranglerLogger.info(f"buslanes:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
     return links_gdf
 
+def add_facility_type(
+    links_gdf: gpd.GeoDataFrame
+):
+    """Adds MTC facility type (ft) field to links based on OSM highway classification.
+
+    Maps OSM highway types to MTC facility type codes as defined in MTCFacilityType enum.
+
+    Args:
+        links_gdf: The links GeoDataFrame to add ft field to
+
+    Returns:
+        Nothing; links_gdf is modified in place with 'ft' column added
+
+    Notes:
+        - Freeway (1): motorway, motorway_link
+        - Expressway (2): trunk
+        - Ramp (3): trunk_link, motorway_link
+        - Divided Arterial (4): primary with divider/multiple lanes
+        - Undivided Arterial (5): primary, secondary
+        - Collector (6): tertiary, primary_link, secondary_link, tertiary_link
+        - Local (7): residential, unclassified, living_street
+        - Connector (8): centroid connectors (set elsewhere)
+        - Not Assigned (99): service, footway, cycleway, path, etc.
+    """
+    WranglerLogger.debug(f"add_facility_type(): highway value counts:\n{links_gdf['highway'].value_counts()}")
+
+    # Initialize ft field with NOT_ASSIGNED as default
+    links_gdf['ft'] = MTCFacilityType.NOT_ASSIGNED
+
+    # Freeway: motorway
+    freeway_mask = links_gdf['highway'] == 'motorway'
+    links_gdf.loc[freeway_mask, 'ft'] = MTCFacilityType.FREEWAY
+
+    # Expressway: trunk (major divided highways that aren't freeways)
+    expressway_mask = links_gdf['highway'] == 'trunk'
+    links_gdf.loc[expressway_mask, 'ft'] = MTCFacilityType.EXPRESSWAY
+
+    # Ramp: motorway_link and trunk_link
+    ramp_mask = links_gdf['highway'].isin(['motorway_link', 'trunk_link'])
+    links_gdf.loc[ramp_mask, 'ft'] = MTCFacilityType.RAMP
+
+    # Arterials: primary and secondary roads
+    # Divided arterial: oneway=True (one direction roadway, typically separated)
+    # Undivided arterial: oneway=False (bidirectional roadway)
+    primary_divided_mask = (links_gdf['highway'] == 'primary') & (links_gdf['oneway'] == True)
+    links_gdf.loc[primary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
+
+    primary_undivided_mask = (links_gdf['highway'] == 'primary') & (links_gdf['oneway'] == False)
+    links_gdf.loc[primary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
+
+    secondary_divided_mask = (links_gdf['highway'] == 'secondary') & (links_gdf['oneway'] == True)
+    links_gdf.loc[secondary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
+
+    secondary_undivided_mask = (links_gdf['highway'] == 'secondary') & (links_gdf['oneway'] == False)
+    links_gdf.loc[secondary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
+
+    # Collector: tertiary roads, primary_link, secondary_link, tertiary_link
+    collector_mask = links_gdf['highway'].isin(['tertiary','primary_link','secondary_link','tertiary_link'])
+    links_gdf.loc[collector_mask, 'ft'] = MTCFacilityType.COLLECTOR
+
+    # Local: residential, service, unclassified, living_street
+    local_mask = links_gdf['highway'].isin(['residential', 'service', 'unclassified', 'living_street'])
+    links_gdf.loc[local_mask, 'ft'] = MTCFacilityType.LOCAL
+
+    # Log the facility type distribution
+    WranglerLogger.info(f"Facility type distribution:\n{links_gdf['ft'].value_counts().sort_index()}")
+
+    # Convert to nullable int to allow NaN if needed
+    links_gdf['ft'] = links_gdf['ft'].astype('Int64')
+
+
 def create_managed_lanes_fields(
     links_gdf: gpd.GeoDataFrame
 ):
@@ -848,7 +980,7 @@ def create_managed_lanes_fields(
 
     Args:
         links_gdf: The links to be used to create a RoadwayNetwork
-    
+
     Returns:
         Nothing; links_gdf is modified in place
     """
@@ -1382,6 +1514,9 @@ def stepa_standardize_attributes(
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
+    # Add MTC facility type field based on OSM highway classification
+    add_facility_type(links_gdf)
+
     # Create managed lanes fields: access, ML_access, ML_lanes, etc
     # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
     create_managed_lanes_fields(links_gdf)
@@ -1412,7 +1547,7 @@ def stepa_standardize_attributes(
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_only',
         'lanes','ML_lanes','length','distance','county','model_link_id','shape_id',
-        'access','ML_access'
+        'access','ML_access','ft'
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
@@ -1795,8 +1930,8 @@ def step3_assign_county_node_link_numbering(
     LINK_COLS = [
         'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
         'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id', 
-        'drive_centroid_fit', 'walk_centroid_fit', 'direction'
+        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id',
+        'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft'
     ]
     NODE_COLS = [
         'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
@@ -1939,17 +2074,19 @@ def step4_add_centroids_and_connectors(
     # Links with name="node to [TAZ,MAZ]_NODE" have centroid as A node
     # Links with name="[TAZ,MAZ]_NODE to node" have centroid as B node
     for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
-        # For "X_NODE to node" pattern, centroid is B node
-        mask_b = (roadway_network.links_df['name'].str.startswith('TAZ_NODE to', na=False) |
+        # For "X_NODE to node" pattern, centroid is A node
+        mask_a = (roadway_network.links_df['name'].str.startswith('TAZ_NODE to', na=False) |
                   roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False))
-        mask_b &= roadway_network.links_df['B'].between(node_start+1, node_start + 99_999)
-        roadway_network.links_df.loc[mask_b, 'county'] = county_name
-
-        # For "node to X_NODE" pattern, centroid is A node
-        mask_a = (roadway_network.links_df['name'].str.endswith('to TAZ_NODE', na=False) |
-                  roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False))
         mask_a &= roadway_network.links_df['A'].between(node_start+1, node_start + 99_999)
         roadway_network.links_df.loc[mask_a, 'county'] = county_name
+        roadway_network.links_df.loc[mask_a, 'ft'] = MTCFacilityType.CONNECTOR
+
+        # For "node to X_NODE" pattern, centroid is B node
+        mask_b = (roadway_network.links_df['name'].str.endswith('to TAZ_NODE', na=False) |
+                  roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False))
+        mask_b &= roadway_network.links_df['B'].between(node_start+1, node_start + 99_999)
+        roadway_network.links_df.loc[mask_b, 'county'] = county_name
+        roadway_network.links_df.loc[mask_b, 'ft'] = MTCFacilityType.CONNECTOR
 
     # Set county and centroid flags for TAZ and MAZ centroid nodes
     for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
