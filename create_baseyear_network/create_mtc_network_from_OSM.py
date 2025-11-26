@@ -1193,12 +1193,14 @@ def create_managed_lanes_fields_v2(
                 ]
             },
             "ML_access": {
+                "set": "all",  # default access outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov2"},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov2"},
                 ]
             },
             "ML_price": {
+                "set": 0.0,  # default price outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": 3.0},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
@@ -1229,12 +1231,14 @@ def create_managed_lanes_fields_v2(
                 ]
             },
             "ML_access": {
+                "set": "all",  # default access outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov3"},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov3"},
                 ]
             },
             "ML_price": {
+                "set": 0.0,  # default price outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": 3.0},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
@@ -1265,6 +1269,7 @@ def create_managed_lanes_fields_v2(
                 ]
             },
             "ML_access": {
+                "set": "all",  # default access outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov3"},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov3"},
@@ -1295,6 +1300,7 @@ def create_managed_lanes_fields_v2(
                 ]
             },
             "ML_access": {
+                "set": "all",  # default access outside HOV times
                 "scoped": [
                     {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov2"},
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov2"},
