@@ -73,6 +73,8 @@ from network_wrangler import WranglerLogger
 from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes
+from network_wrangler.roadway.projects.edit_property import apply_roadway_property_change
+from network_wrangler.roadway.selection import RoadwayLinkSelection
 
 # Import MTC-specific models
 import sys
@@ -1092,6 +1094,237 @@ def create_managed_lanes_fields(
     WranglerLogger.debug(f"links_gdf['sc_ML_price'].value_counts(dropna=False):\n{links_gdf['sc_ML_price'].value_counts(dropna=False)}")
 
 
+def create_managed_lanes_fields_v2(
+    roadway_net: RoadwayNetwork
+) -> RoadwayNetwork:
+    """Converts buslanes/HOV to managed lanes using apply_roadway_property_change().
+
+    This version uses the network_wrangler apply_roadway_property_change() API
+    which operates on a RoadwayNetwork object with proper selection and validation.
+
+    Expects columns: buslanes, hov:minimum, toll:hov (initialized in stepa_standardize_attributes)
+
+    Args:
+        roadway_net: RoadwayNetwork to modify
+
+    Returns:
+        Modified RoadwayNetwork with managed lane fields set
+    """
+    links_df = roadway_net.links_df
+    WranglerLogger.debug(f"create_managed_lanes_fields_v2():\n{links_df[['lanes']].value_counts()}")
+
+    # default HOV times: 5-10a, 3-7p
+    DEFAULT_HOV_TIME_AM = ['05:00', '10:00']
+    DEFAULT_HOV_TIME_PM = ['15:00', '19:00']
+
+    # =========== Bus lanes with GP lanes ===========
+    # When both buslanes and GP lanes exist, create managed lane for buses
+    mask_both = (links_df["buslanes"] > 0) & (links_df["lanes"] > 0)
+    if mask_both.any():
+        buslane_values = links_df.loc[mask_both, "buslanes"]
+        # For links with same buslane count, batch them together
+        for buslane_count in buslane_values.unique():
+            batch_mask = mask_both & (links_df["buslanes"] == buslane_count)
+            link_ids = links_df.loc[batch_mask, "model_link_id"].tolist()
+
+            selection = RoadwayLinkSelection(
+                roadway_net,
+                {"links": {"model_link_id": link_ids}}
+            )
+            property_changes = {
+                "ML_access": {"set": "bus"},
+                "ML_lanes": {"set": int(buslane_count)},
+            }
+            roadway_net = apply_roadway_property_change(
+                roadway_net, selection, property_changes, project_name="buslanes_with_gp"
+            )
+
+    # =========== Bus lanes only (no GP lanes) ===========
+    # When only buslanes exist, make the main link bus-only
+    mask_bus_only = (links_df["buslanes"] > 0) & (links_df["lanes"] == 0)
+    if mask_bus_only.any():
+        link_ids = links_df.loc[mask_bus_only, "model_link_id"].tolist()
+        selection = RoadwayLinkSelection(
+            roadway_net,
+            {"links": {"model_link_id": link_ids}}
+        )
+        # Set access to bus-only on the main link and copy buslanes to lanes
+        property_changes = {
+            "access": {"set": "bus"},
+            "bus_only": {"set": 1},
+        }
+        roadway_net = apply_roadway_property_change(
+            roadway_net, selection, property_changes, project_name="bus_only_lanes"
+        )
+        # Copy buslanes to lanes - need to do this per unique buslane count
+        for buslane_count in links_df.loc[mask_bus_only, "buslanes"].unique():
+            batch_mask = mask_bus_only & (links_df["buslanes"] == buslane_count)
+            link_ids = links_df.loc[batch_mask, "model_link_id"].tolist()
+            selection = RoadwayLinkSelection(
+                roadway_net,
+                {"links": {"model_link_id": link_ids}}
+            )
+            roadway_net = apply_roadway_property_change(
+                roadway_net, selection, {"lanes": {"set": int(buslane_count)}},
+                project_name="bus_only_lanes"
+            )
+
+    # Re-fetch links_df after modifications
+    links_df = roadway_net.links_df
+
+    WranglerLogger.debug(f"hov:minimum\n{links_df['hov:minimum'].apply(str).value_counts(dropna=False)}")
+    WranglerLogger.debug(f"toll:hov\n{links_df['toll:hov'].apply(str).value_counts(dropna=False)}")
+
+    # =========== HOV2/Express lanes ===========
+    # 'toll:hov' is more reliable; 'hov:minimum' isn't always set for express lanes
+    mask_exp2 = (links_df['toll:hov'] == 'no')
+    if mask_exp2.any():
+        link_ids = links_df.loc[mask_exp2, "model_link_id"].tolist()
+        selection = RoadwayLinkSelection(
+            roadway_net,
+            {"links": {"model_link_id": link_ids}}
+        )
+        property_changes = {
+            "ML_lanes": {
+                "set": 1,
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 1},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 1},
+                ]
+            },
+            "ML_access": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov2"},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov2"},
+                ]
+            },
+            "ML_price": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 3.0},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
+                ]
+            },
+        }
+        roadway_net = apply_roadway_property_change(
+            roadway_net, selection, property_changes, project_name="hov2_express"
+        )
+
+    # Re-fetch links_df after modifications
+    links_df = roadway_net.links_df
+
+    # =========== HOV3/Express lanes ===========
+    mask_exp3 = (links_df['toll:hov'] == 'no') & (links_df['hov:minimum'] == 3)
+    if mask_exp3.any():
+        link_ids = links_df.loc[mask_exp3, "model_link_id"].tolist()
+        selection = RoadwayLinkSelection(
+            roadway_net,
+            {"links": {"model_link_id": link_ids}}
+        )
+        property_changes = {
+            "ML_lanes": {
+                "set": 1,
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 1},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 1},
+                ]
+            },
+            "ML_access": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov3"},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov3"},
+                ]
+            },
+            "ML_price": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 3.0},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
+                ]
+            },
+        }
+        roadway_net = apply_roadway_property_change(
+            roadway_net, selection, property_changes, project_name="hov3_express"
+        )
+
+    # Re-fetch links_df after modifications
+    links_df = roadway_net.links_df
+
+    # =========== HOV3 (no toll) ===========
+    mask_hov3 = (links_df['hov:minimum'] == 3) & (links_df['toll:hov'] != 'no')
+    if mask_hov3.any():
+        link_ids = links_df.loc[mask_hov3, "model_link_id"].tolist()
+        selection = RoadwayLinkSelection(
+            roadway_net,
+            {"links": {"model_link_id": link_ids}}
+        )
+        property_changes = {
+            "ML_lanes": {
+                "set": 1,
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 1},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 1},
+                ]
+            },
+            "ML_access": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov3"},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov3"},
+                ]
+            },
+        }
+        roadway_net = apply_roadway_property_change(
+            roadway_net, selection, property_changes, project_name="hov3"
+        )
+
+    # Re-fetch links_df after modifications
+    links_df = roadway_net.links_df
+
+    # =========== HOV2 (no toll) ===========
+    mask_hov2 = (links_df['hov:minimum'] == 2) & (links_df['toll:hov'] != 'no')
+    if mask_hov2.any():
+        link_ids = links_df.loc[mask_hov2, "model_link_id"].tolist()
+        selection = RoadwayLinkSelection(
+            roadway_net,
+            {"links": {"model_link_id": link_ids}}
+        )
+        property_changes = {
+            "ML_lanes": {
+                "set": 1,
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": 1},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": 1},
+                ]
+            },
+            "ML_access": {
+                "scoped": [
+                    {"timespan": DEFAULT_HOV_TIME_AM, "set": "hov2"},
+                    {"timespan": DEFAULT_HOV_TIME_PM, "set": "hov2"},
+                ]
+            },
+        }
+        roadway_net = apply_roadway_property_change(
+            roadway_net, selection, property_changes, project_name="hov2"
+        )
+
+    # Log final state
+    links_df = roadway_net.links_df
+    if 'access' in links_df.columns:
+        WranglerLogger.debug(f"links_df['access'].value_counts(dropna=False):\n{links_df['access'].value_counts(dropna=False)}")
+    if 'ML_access' in links_df.columns:
+        WranglerLogger.debug(f"links_df['ML_access'].value_counts(dropna=False):\n{links_df['ML_access'].value_counts(dropna=False)}")
+    if 'sc_ML_access' in links_df.columns:
+        WranglerLogger.debug(f"links_df['sc_ML_access'].value_counts(dropna=False):\n{links_df['sc_ML_access'].value_counts(dropna=False)}")
+
+    WranglerLogger.debug(f"links_df['lanes'].value_counts(dropna=False):\n{links_df['lanes'].value_counts(dropna=False)}")
+    if 'ML_lanes' in links_df.columns:
+        WranglerLogger.debug(f"links_df['ML_lanes'].value_counts(dropna=False):\n{links_df['ML_lanes'].value_counts(dropna=False)}")
+    if 'sc_ML_lanes' in links_df.columns:
+        WranglerLogger.debug(f"links_df['sc_ML_lanes'].value_counts(dropna=False):\n{links_df['sc_ML_lanes'].value_counts(dropna=False)}")
+    if 'sc_ML_price' in links_df.columns:
+        WranglerLogger.debug(f"links_df['sc_ML_price'].value_counts(dropna=False):\n{links_df['sc_ML_price'].value_counts(dropna=False)}")
+
+    return roadway_net
+
+
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
     """
     Extract a single highway value from potentially multiple OSM values.
@@ -1611,9 +1844,21 @@ def stepa_standardize_attributes(
     # Add MTC facility type field based on OSM highway classification
     add_facility_type(links_gdf)
 
-    # Create managed lanes fields: access, ML_access, ML_lanes, etc
-    # https://network-wrangler.github.io/network_wrangler/latest/networks/#road-links
-    create_managed_lanes_fields(links_gdf)
+    # NOTE: Managed lanes fields are now created in step3 after RoadwayNetwork creation
+    # using create_managed_lanes_fields_v2() which uses apply_roadway_property_change()
+    # Initialize columns needed by create_managed_lanes_fields_v2 if they don't exist
+    if 'hov:minimum' not in links_gdf.columns:
+        links_gdf['hov:minimum'] = None
+    if 'toll:hov' not in links_gdf.columns:
+        links_gdf['toll:hov'] = None
+    if 'buslanes' not in links_gdf.columns:
+        links_gdf['buslanes'] = 0
+
+    # Convert hov:minimum=[2,3] to max value so it's a scalar column
+    hovmin_is_list = links_gdf['hov:minimum'].apply(lambda x: isinstance(x, list))
+    if hovmin_is_list.any():
+        WranglerLogger.debug(f"Found {hovmin_is_list.sum()} links with hov:minimum as list, setting to max")
+        links_gdf.loc[hovmin_is_list, 'hov:minimum'] = links_gdf.loc[hovmin_is_list, 'hov:minimum'].apply(max)
 
     # Add direction to links
     links_gdf = add_direction_to_links(links_gdf, cardinal_only = False)
@@ -1636,12 +1881,13 @@ def stepa_standardize_attributes(
     # Outputs depending on specified OUTPUT_FORMAT
     
     # Subset the links columns and convert name, ref to strings
+    # Note: ML_lanes, access, ML_access are now created in step3 by create_managed_lanes_fields_v2
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
         'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_only',
-        'lanes','ML_lanes','length','distance','county','model_link_id','shape_id',
-        'access','ML_access','ft'
+        'lanes','length','distance','county','model_link_id','shape_id','ft',
+        'buslanes', 'hov:minimum', 'toll:hov'  # Kept for step3 processing
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
@@ -2038,11 +2284,14 @@ def step3_assign_county_node_link_numbering(
         WranglerLogger.debug(f"Could not load cached roadway network: {e}")
     
     # Prepare data for roadway network creation
+    # Note: ML_access, ML_lanes, sc_ML_access, sc_ML_lanes, sc_ML_price are created by
+    # create_managed_lanes_fields_v2() after the network is created
     LINK_COLS = [
         'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
-        'access','ML_access','sc_ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-        'lanes','ML_lanes','sc_ML_lanes','sc_ML_price','distance', 'county', 'model_link_id', 'shape_id',
-        'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft'
+        'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
+        'lanes','distance', 'county', 'model_link_id', 'shape_id',
+        'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft',
+        'buslanes', 'hov:minimum', 'toll:hov'  # Needed for create_managed_lanes_fields_v2
     ]
     NODE_COLS = [
         'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
@@ -2076,6 +2325,9 @@ def step3_assign_county_node_link_numbering(
 
     # Apply node name hacks for specific locations
     hack_rename_nodes(roadway_network)
+
+    # Create managed lanes fields using the network_wrangler API
+    roadway_network = create_managed_lanes_fields_v2(roadway_network)
 
     # Write roadway network to cache
     for roadway_format in output_formats:
