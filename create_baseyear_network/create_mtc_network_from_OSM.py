@@ -1024,9 +1024,9 @@ def create_managed_lanes_fields(
         WranglerLogger.debug(f"Found {hovmin_is_list.sum()} links with hov:minimum as list, setting to max")
         links_gdf.loc[hovmin_is_list, 'hov:minimum'] = links_gdf.loc[hovmin_is_list, 'hov:minimum'].apply(max)
 
-
     # =========== HOV2/Express lanes ===========
-    mask_exp2 = (links_gdf['hov:minimum'] == 2) & (links_gdf['toll:hov']=='no')
+    # 'toll:hov' is more reliable and 'hov:minimum' isn't always set for express lanes
+    mask_exp2 = (links_gdf['toll:hov']=='no') # & (links_gdf['hov:minimum'] == 2)
     managed_lanes = {
         'sc_ML_lanes': [
             {'timespan': DEFAULT_HOV_TIME_AM, 'value': 1},
@@ -1049,7 +1049,7 @@ def create_managed_lanes_fields(
     links_gdf.loc[mask_exp2, 'managed'] = 1
 
     # =========== HOV3/Express lanes ===========
-    mask_exp3 = (links_gdf['hov:minimum'] == 3) & (links_gdf['toll:hov']=='no')
+    mask_exp3 = (links_gdf['toll:hov']=='no') & (links_gdf['hov:minimum'] == 3)
     managed_lanes['sc_ML_access'] = [
         {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov3')},
         {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov3')},
@@ -1653,11 +1653,11 @@ def stepa_standardize_attributes(
         WranglerLogger.info(f"Wrote {links_parquet_file}")
     if 'gpkg' in output_formats:
         links_gpkg_file = output_dir / f"{prefix}links.gpkg"
-        parquet_links_gdf.to_file(links_gpkg_file, driver='GPKG')
+        links_gdf.to_file(links_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {links_gpkg_file}")
     if 'geojson' in output_formats:
         links_geojson_file = output_dir / f"{prefix}links.geojson"
-        parquet_links_gdf.to_file(links_geojson_file, driver='GeoJSON')
+        links_gdf.to_file(links_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {links_geojson_file}")
 
     # Subset the nodes columns
@@ -1674,11 +1674,11 @@ def stepa_standardize_attributes(
         WranglerLogger.info(f"Wrote {nodes_parquet_file}")
     if 'gpkg' in output_formats:
         nodes_gpkg_file = output_dir / f"{prefix}nodes.gpkg"
-        parquet_nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
+        nodes_gdf.to_file(nodes_gpkg_file, driver='GPKG')
         WranglerLogger.info(f"Wrote {nodes_gpkg_file}")
     if 'geojson' in output_formats:
         nodes_geojson_file = output_dir / f"{prefix}nodes.geojson"
-        parquet_nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
+        nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {nodes_geojson_file}")
 
     return (links_gdf, nodes_gdf)
@@ -2040,8 +2040,8 @@ def step3_assign_county_node_link_numbering(
     # Prepare data for roadway network creation
     LINK_COLS = [
         'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
-        'access','ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
-        'lanes','ML_lanes','distance', 'county', 'model_link_id', 'shape_id',
+        'access','ML_access','sc_ML_access','drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
+        'lanes','ML_lanes','sc_ML_lanes','sc_ML_price','distance', 'county', 'model_link_id', 'shape_id',
         'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft'
     ]
     NODE_COLS = [
