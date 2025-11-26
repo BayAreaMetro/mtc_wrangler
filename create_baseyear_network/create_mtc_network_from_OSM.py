@@ -1351,8 +1351,8 @@ def stepa_standardize_attributes(
             return (cached_links_gdf, cached_nodes_gdf)
         geojson_file = output_dir / f"{prefix}nodes.geojson"
         if geojson_file.exists():
-            cached_nodes_gdf = gpd.read_file(path=output_dir / f"{prefix}nodes.geojson")
-            cached_links_gdf = gpd.read_file(path=output_dir / f"{prefix}links.geojson")
+            cached_nodes_gdf = gpd.read_file(output_dir / f"{prefix}nodes.geojson")
+            cached_links_gdf = gpd.read_file(output_dir / f"{prefix}links.geojson")
             WranglerLogger.info(f"Loaded cached roadway network from:")
             WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.geojson'}")
             WranglerLogger.info(f"  {output_dir / f'{prefix}links.geojson'}")
@@ -2000,10 +2000,27 @@ def step3_assign_county_node_link_numbering(
     
     # Check for cached roadway network
     try:
-        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
-        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
+        parquet_file = output_dir / f"{roadway_net_file}_node.parquet"
+        geojson_file = output_dir / f"{roadway_net_file}_node.geojson"
+        if parquet_file.exists():
+            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
+            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.parquet'}")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.parquet'}")
+        
+        elif geojson_file.exists():
+            cached_nodes_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_node.geojson")
+            cached_links_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_link.geojson")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.geojson'}")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.geojson'}")
+        
+        else:
+            raise Exception(f"Couldn't find parquet or geojson file for {roadway_net_file}")
+
         shapes_gdf = cached_links_gdf.copy()
-        WranglerLogger.debug(f"cached_links_gdf.dtypes\n:{cached_links_gdf.dtypes}")
+        WranglerLogger.debug(f"cached_links_gdf.dtypes\n:{cached_links_gdf.dtypes}")            
         # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
         WranglerLogger.debug(f"base_network.links_df.dtypes\n:{base_network.links_df.dtypes}")
@@ -2109,8 +2126,25 @@ def step4_add_centroids_and_connectors(
 
     # Check for cached roadway network
     try:
-        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
-        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
+        parquet_file = output_dir / f"{roadway_net_file}_node.parquet"
+        geojson_file = output_dir / f"{roadway_net_file}_node.geojson"
+        if parquet_file.exists():
+            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
+            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.parquet'}")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.parquet'}")
+        
+        elif geojson_file.exists():
+            cached_nodes_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_node.geojson")
+            cached_links_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_link.geojson")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.geojson'}")
+            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.geojson'}")
+        
+        else:
+            raise Exception(f"Couldn't find parquet or geojson file for {roadway_net_file}")
+
         shapes_gdf = cached_links_gdf.copy()
         # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
