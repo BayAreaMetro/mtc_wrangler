@@ -28,7 +28,7 @@ Tested in July-September 2025 with:
   * GTFS feed from 511 Bay Area (September 2023)
 
 References:
-  * Asana: GMNS+ / NetworkWrangler2 > Build 2023 network using existing tools 
+  * Asana: GMNS+ / NetworkWrangler2 > Build 2023 network from scratch
     https://app.asana.com/1/11860278793487/project/15119358130897/task/1210468893117122
   * MTC Year 2023 Network Creation Steps Google Doc
     https://docs.google.com/document/d/1TU0nsUHmyKfYZDbwjeCFiW09w53fyWu7X3XcRlNyf2o/edit
@@ -197,6 +197,8 @@ OSM_WAY_TAGS = {
     'lanes:bus:backward' : TAG_NUMERIC,  # https://wiki.openstreetmap.org/wiki/Key:lanes:psv
     'hov'                : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:hov
     'hov:lanes'          : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:hov
+    'hov:lanes:conditional': TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:hov
+    'hov:minimum'        : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:hov
     'taxi'               : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:taxi
     'lanes:hov'          : TAG_NUMERIC,  # https://wiki.openstreetmap.org/wiki/Key:hov
     'shoulder'           : TAG_STRING,   # https://wiki.openstreetmap.org/wiki/Key:shoulder
@@ -398,7 +400,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
             - bike_access: Boolean for bicycle access
             - walk_access: Boolean for pedestrian access
             - truck_access: Boolean for truck access
-            - bus_only: Boolean for bus access
+            - bus_only: Boolean for bus only
     
     Notes:
         - Processes highway values according to a hierarchy
@@ -413,7 +415,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     links_gdf['bike_access']  = True
     links_gdf['walk_access']  = True
     links_gdf['truck_access'] = True
-    links_gdf['bus_only']     = True
+    links_gdf['bus_only']     = False
 
     ################ non-auto ################
     # make steps an attribute
@@ -988,6 +990,8 @@ def create_managed_lanes_fields(
     
     # default - all access
     links_gdf['access'] = None
+    # this is supposed to be set by network_wrangler but since we're not using roadway.links.edit, we'll set it
+    links_gdf['managed'] = 0
     # this one is a bit odd, but I think parquet doesn't like the mixed types
     links_gdf['ML_access'] = None
     links_gdf['ML_lanes'] = 0
@@ -996,19 +1000,97 @@ def create_managed_lanes_fields(
     mask_both = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] > 0)
     links_gdf.loc[mask_both, 'ML_access'] = 'bus'
     links_gdf.loc[mask_both, 'ML_lanes'] = links_gdf.loc[mask_both, "buslanes"].values
+    links_gdf.loc[mask_both, 'managed'] = 1
 
     # for buslanes only: 
     mask_bus_only = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] == 0)
     links_gdf.loc[mask_bus_only, 'access'] = 'bus'
+    links_gdf.loc[mask_bus_only, 'bus_only'] = 1
     links_gdf.loc[mask_bus_only, 'lanes'] = links_gdf.loc[mask_bus_only, "buslanes"].values
-
-    WranglerLogger.debug(f"links_gdf['access'].value_counts(dropna=False):\n{links_gdf['access'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['ML_access'].value_counts(dropna=False):\n{links_gdf['ML_access'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['lanes'].value_counts(dropna=False):\n{links_gdf['lanes'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['ML_lanes'].value_counts(dropna=False):\n{links_gdf['ML_lanes'].value_counts(dropna=False)}")
+    links_gdf.loc[mask_bus_only, 'managed'] = 1
 
     # drop buslanes column
     links_gdf.drop(columns=['buslanes'], inplace=True)
+
+    # default HOV times: 5-10a, 3-7p
+    DEFAULT_HOV_TIME_AM = ['05:00','10:00']
+    DEFAULT_HOV_TIME_PM = ['15:00','19:00']
+
+    WranglerLogger.debug(f"hov:minimum\n{links_gdf['hov:minimum'].apply(str).value_counts(dropna=False)}")
+    WranglerLogger.debug(f"toll:hov\n{links_gdf['toll:hov'].apply(str).value_counts(dropna=False)}")
+    # convert hov:minimum=[2,3] to hov:minimum==2
+    hovmin_is_list = links_gdf['hov:minimum'].apply(lambda x: isinstance(x, list))
+    if hovmin_is_list.any():
+        WranglerLogger.debug(f"Found {hovmin_is_list.sum()} links with hov:minimum as list, setting to max")
+        links_gdf.loc[hovmin_is_list, 'hov:minimum'] = links_gdf.loc[hovmin_is_list, 'hov:minimum'].apply(max)
+
+
+    # =========== HOV2/Express lanes ===========
+    mask_exp2 = (links_gdf['hov:minimum'] == 2) & (links_gdf['toll:hov']=='no')
+    managed_lanes = {
+        'sc_ML_lanes': [
+            {'timespan': DEFAULT_HOV_TIME_AM, 'value': 1},
+            {'timespan': DEFAULT_HOV_TIME_PM, 'value': 1},
+        ],
+        'sc_ML_access': [
+            {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov2')},
+            {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov2')},
+        ],
+        'sc_ML_price': [
+            {'timespan':DEFAULT_HOV_TIME_AM, 'value': 3.0 },
+            {'timespan':DEFAULT_HOV_TIME_PM, 'value': 3.0 },
+        ]
+    }
+    # set it
+    for ml_key in managed_lanes.keys():
+        links_gdf.loc[mask_exp2, ml_key] = links_gdf.loc[mask_exp2].apply(
+            lambda x: managed_lanes[ml_key], axis=1
+        )
+    links_gdf.loc[mask_exp2, 'managed'] = 1
+
+    # =========== HOV3/Express lanes ===========
+    mask_exp3 = (links_gdf['hov:minimum'] == 3) & (links_gdf['toll:hov']=='no')
+    managed_lanes['sc_ML_access'] = [
+        {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov3')},
+        {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov3')},
+    ]
+    for ml_key in managed_lanes.keys():
+        links_gdf.loc[mask_exp3, ml_key] = links_gdf.loc[mask_exp3].apply(
+            lambda x: managed_lanes[ml_key], axis=1
+        )
+    links_gdf.loc[mask_exp3, 'managed'] = 1
+
+    # =========== HOV3 ===========
+    mask_hov3 = (links_gdf['hov:minimum'] == 3)
+    del managed_lanes['sc_ML_price']
+    for ml_key in managed_lanes.keys():
+        links_gdf.loc[mask_hov3, ml_key] = links_gdf.loc[mask_hov3].apply(
+            lambda x: managed_lanes[ml_key], axis=1
+        )
+    links_gdf.loc[mask_hov3, 'managed'] = 1
+
+    # =========== HOV2 ===========
+    mask_hov2 = (links_gdf['hov:minimum'] == 2)
+    managed_lanes['sc_ML_access'] = [
+        {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov2')},
+        {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov2')},
+    ]    
+    for ml_key in managed_lanes.keys():
+        links_gdf.loc[mask_hov2, ml_key] = links_gdf.loc[mask_hov2].apply(
+            lambda x: managed_lanes[ml_key], axis=1
+        )
+    links_gdf.loc[mask_hov2, 'managed'] = 1
+ 
+    WranglerLogger.debug(f"links_gdf['access'].value_counts(dropna=False):\n{links_gdf['access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_access'].value_counts(dropna=False):\n{links_gdf['ML_access'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['sc_ML_access'].value_counts(dropna=False):\n{links_gdf['sc_ML_access'].value_counts(dropna=False)}")
+
+    WranglerLogger.debug(f"links_gdf['lanes'].value_counts(dropna=False):\n{links_gdf['lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['ML_lanes'].value_counts(dropna=False):\n{links_gdf['ML_lanes'].value_counts(dropna=False)}")
+    WranglerLogger.debug(f"links_gdf['sc_ML_lanes'].value_counts(dropna=False):\n{links_gdf['sc_ML_lanes'].value_counts(dropna=False)}")
+
+    WranglerLogger.debug(f"links_gdf['sc_ML_price'].value_counts(dropna=False):\n{links_gdf['sc_ML_price'].value_counts(dropna=False)}")
+
 
 def get_roadway_value(highway: Union[str, list[str]]) -> str:
     """
@@ -1259,12 +1341,24 @@ def stepa_standardize_attributes(
 
     # Check for cached roadway network -- just parquet for now
     try:
-        cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}nodes.parquet")
-        cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}links.parquet")
-        WranglerLogger.info(f"Loaded cached roadway network from:")
-        WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.parquet'}")
-        WranglerLogger.info(f"  {output_dir / f'{prefix}links.parquet'}")
-        return (cached_links_gdf, cached_nodes_gdf)
+        parquet_file = output_dir / f"{prefix}nodes.parquet"
+        if parquet_file.exists():
+            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}nodes.parquet")
+            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}links.parquet")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.parquet'}")
+            WranglerLogger.info(f"  {output_dir / f'{prefix}links.parquet'}")
+            return (cached_links_gdf, cached_nodes_gdf)
+        geojson_file = output_dir / f"{prefix}nodes.geojson"
+        if geojson_file.exists():
+            cached_nodes_gdf = gpd.read_file(path=output_dir / f"{prefix}nodes.geojson")
+            cached_links_gdf = gpd.read_file(path=output_dir / f"{prefix}links.geojson")
+            WranglerLogger.info(f"Loaded cached roadway network from:")
+            WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.geojson'}")
+            WranglerLogger.info(f"  {output_dir / f'{prefix}links.geojson'}")
+            return (cached_links_gdf, cached_nodes_gdf)
+        raise Exception(f"Couldn't find parquet or geojson file for {prefix}")
+
     except Exception as e:
         WranglerLogger.debug(f"Could not load cached roadway network: {e}")
 
@@ -2311,6 +2405,13 @@ def step6_create_transit_network(
             errors = "ignore"
         )
         WranglerLogger.info(f"Created transit Feed object with stops and links integrated")
+
+        # set drive_access to true for centroid connectors
+        # these were temporarily turned off so buses wouldn't route through them
+        roadway_network.links_df.loc[ roadway_network.links_df['highway'] == 'TAZ_NODE', 'drive_access'] = 1
+        roadway_network.links_df.loc[ roadway_network.links_df['highway'] == 'MAZ_NODE', 'drive_access'] = 1
+        # assign new transit links to FT=99
+        roadway_network.links_df.loc [ roadway_network.links_df['highway'] == 'transit', 'ft'] = MTCFacilityType.NOT_ASSIGNED
         
     except Exception as e:
         WranglerLogger.error(f"Error creating transit stops and links: {e}")
@@ -2498,8 +2599,8 @@ if __name__ == "__main__":
     # The cache=True parameter in pygris.counties() calls enables caching
     
     # Setup logging
-    INFO_LOG  = output_dir / "create_mtc_network_from_OSM.info.log"
-    DEBUG_LOG = output_dir / "create_mtc_network_from_OSM.debug.log"
+    INFO_LOG  = output_dir / f"create_mtc_network_from_OSM_{NOW}.info.log"
+    DEBUG_LOG = output_dir / f"create_mtc_network_from_OSM_{NOW}.debug.log"
 
     network_wrangler.setup_logging(
         info_log_filename=INFO_LOG,
