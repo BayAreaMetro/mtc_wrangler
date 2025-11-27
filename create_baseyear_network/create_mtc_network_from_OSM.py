@@ -69,7 +69,7 @@ import shapely.geometry
 
 import tableau_utils
 import network_wrangler
-from network_wrangler import WranglerLogger
+from network_wrangler import WranglerLogger, write_roadway
 from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.roadway.io import load_roadway_from_dataframes
@@ -1523,20 +1523,9 @@ def stepa_standardize_attributes(
     6. For Bay Area: performs spatial join to assign county to each link/node
     7. Assigns model-specific node and link IDs based on county numbering system
     8. Removes unnamed service roads to simplify network
-    9. Creates managed lanes fields (via create_managed_lanes_fields())
-    10. Writes outputs in multiple formats for different use cases
+    9. Writes outputs in multiple formats for different use cases
     
-    County numbering system:
-    - San Francisco: nodes 1,000,000+, links 1,000,000+
-    - San Mateo: nodes 1,500,000+, links 2,000,000+
-    - Santa Clara: nodes 2,000,000+, links 3,000,000+
-    - Alameda: nodes 2,500,000+, links 4,000,000+
-    - Contra Costa: nodes 3,000,000+, links 5,000,000+
-    - Solano: nodes 3,500,000+, links 6,000,000+
-    - Napa: nodes 4,000,000+, links 7,000,000+
-    - Sonoma: nodes 4,500,000+, links 8,000,000+
-    - Marin: nodes 5,000,000+, links 9,000,000+
-    - External: nodes 900,001+, links 0+
+    See ..\models\mtc_roadway_schema.py for county numbering system
     
     Args:
         g: NetworkX MultiDiGraph from OSMnx containing the road network.
@@ -1577,29 +1566,6 @@ def stepa_standardize_attributes(
     """
     WranglerLogger.info(f"======= STEP {prefix[:2]}: Standardize attributes for {county} =======")
     county_no_spaces = county.replace(" ","")
-
-    # Check for cached roadway network -- just parquet for now
-    try:
-        parquet_file = output_dir / f"{prefix}nodes.parquet"
-        if parquet_file.exists():
-            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{prefix}nodes.parquet")
-            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{prefix}links.parquet")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.parquet'}")
-            WranglerLogger.info(f"  {output_dir / f'{prefix}links.parquet'}")
-            return (cached_links_gdf, cached_nodes_gdf)
-        geojson_file = output_dir / f"{prefix}nodes.geojson"
-        if geojson_file.exists():
-            cached_nodes_gdf = gpd.read_file(output_dir / f"{prefix}nodes.geojson")
-            cached_links_gdf = gpd.read_file(output_dir / f"{prefix}links.geojson")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{prefix}nodes.geojson'}")
-            WranglerLogger.info(f"  {output_dir / f'{prefix}links.geojson'}")
-            return (cached_links_gdf, cached_nodes_gdf)
-        raise Exception(f"Couldn't find parquet or geojson file for {prefix}")
-
-    except Exception as e:
-        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
 
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
@@ -2813,6 +2779,10 @@ def step6_create_transit_network(
         ), crs=roadnet_shapes_gdf.crs
     )
     WranglerLogger.debug(f"shape_roadnet_links_gdf['_merge'].value_counts():\n{shape_roadnet_links_gdf['_merge'].value_counts()}")
+    WranglerLogger.debug(f"shape_roadnet_links_gdf.dtypes:\n{shape_roadnet_links_gdf.dtypes}")
+    # prevent error: GeoDataFrame contains multiple geometry columns but GeoDataFrame.to_file supports only a single geometry column
+    if 'ML_geometry' in shape_roadnet_links_gdf.columns:
+        shape_roadnet_links_gdf.drop(columns=['ML_geometry'], inplace=True)
     # write it
     shape_roadnet_links_name = "6_transit_road_links_gdf"
     if "hyper" in output_formats:
