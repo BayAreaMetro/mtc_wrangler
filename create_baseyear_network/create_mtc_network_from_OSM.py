@@ -6,7 +6,7 @@ Bay Area as a unified network.
 
 Main Features:
 - Fetches road network data from OpenStreetMap using OSMnx
-- Standardizes network attributes (highway types, lanes, access permissions)
+- Standardizes network attributes (roadway types, lanes, access permissions)
 - Integrates GTFS transit data from 511 Bay Area feed
 - Creates compatible networks for travel demand models
 - Outputs in multiple formats (Parquet, GeoJSON, Tableau Hyper)
@@ -14,7 +14,7 @@ Main Features:
 The script performs the following workflow:
 1. Downloads OSM network data for specified geography
 2. Simplifies network topology while preserving connectivity
-3. Standardizes attributes (highway types, lanes, access modes)
+3. Standardizes attributes (roadway types, lanes, access modes)
 4. Assigns county-specific node/link numbering schemes
 5. Integrates GTFS transit data
 6. Creates transit stops and links on the roadway network
@@ -221,7 +221,7 @@ OSM_WAY_TAGS = {
 }
 
 # from biggest to smallest
-HIGHWAY_HIERARCHY = [
+ROADWAY_HIERARCHY = [
     'motorway',       # freeways or express-ways
     'motorway_link',  # on- and off-ramps
     'trunk',          # highway, not quite motorway
@@ -358,7 +358,8 @@ def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int
     return lane
 
 def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
-    """Standardize the highway value in the links GeoDataFrame and set access permissions.
+    """Standardize the highway value in the links GeoDataFrame and set access permissions,
+    and rename to network_wrangler version: 'roadway'
 
     Standardized values - drive:
     - residential      residential street (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dresidential)
@@ -392,7 +393,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
             - Other OSM tags as columns
     
     Returns:
-        None (modifies links_gdf in place)
+        None (modifies links_gdf in place, including renaming highway to roadway)
     
     Side Effects:
         Adds the following columns to links_gdf:
@@ -518,7 +519,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     ################ auto ################
 
     # go from highest to lowest and choose highest
-    for highway_type in HIGHWAY_HIERARCHY:
+    for highway_type in ROADWAY_HIERARCHY:
         links_gdf.loc[ links_gdf.highway.apply(lambda x: isinstance(x, list) and highway_type in x), 'highway'] = highway_type
 
     # Handle any remaining lists by taking the first element
@@ -530,14 +531,14 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
         remaining_lists = links_gdf.loc[list_mask, 'highway'].apply(tuple).unique()
         WranglerLogger.debug(f"Remaining list values:\n{remaining_lists}")
 
-        # Log which values in the lists are not in HIGHWAY_HIERARCHY
+        # Log which values in the lists are not in ROADWAY_HIERARCHY
         unknown_types = set()
         for highway_tuple in remaining_lists:
             for highway_type in highway_tuple:
-                if highway_type not in HIGHWAY_HIERARCHY:
+                if highway_type not in ROADWAY_HIERARCHY:
                     unknown_types.add(highway_type)
         if unknown_types:
-            WranglerLogger.warning(f"Highway types not in HIGHWAY_HIERARCHY: {sorted(unknown_types)}")
+            WranglerLogger.warning(f"Highway types not in ROADWAY_HIERARCHY: {sorted(unknown_types)}")
 
         links_gdf.loc[list_mask, 'highway'] = links_gdf.loc[list_mask, 'highway'].apply(lambda x: x[0] if len(x) > 0 else 'unclassified')
 
@@ -547,7 +548,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # for centroid connectors, assess fit for centroid connectors based on highway value
     centroid_dict = {"drive":{}, "walk":{}} # mode -> highway -> fitness
     current_fit = FitForCentroidConnection.DO_NOT_USE # start with this for freeways
-    for highway in HIGHWAY_HIERARCHY:
+    for highway in ROADWAY_HIERARCHY:
         # special values
         if highway in ["busway","living_street","track"]:
             centroid_dict["drive"][highway] = FitForCentroidConnection.DO_NOT_USE
@@ -582,6 +583,7 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
         links_gdf[f"{mode}_centroid_fit"] = links_gdf[f"{mode}_centroid_fit"].astype(int)
         WranglerLogger.debug(f"{mode}_centroid_fit:\n{links_gdf[f'{mode}_centroid_fit'].value_counts(dropna=False)}")
 
+    links_gdf.rename(columns={'highway':'roadway'}, inplace=True)
     return
 
 def standardize_lanes_value(
@@ -596,14 +598,14 @@ def standardize_lanes_value(
     - Directional lane tagging (lanes:forward, lanes:backward)
     - Bus-only lanes (lanes:bus, lanes:bus:forward, lanes:bus:backward)
     - Bidirectional links represented as forward/reverse pairs
-    - Missing lane values filled based on highway type statistics
+    - Missing lane values filled based on roadway type statistics
     
     The function performs several key operations:
     1. Resolves list-valued attributes from OSM (using min/median logic)
     2. Matches forward/reverse link pairs to combine directional attributes
     3. Calculates directional lanes from total lanes for two-way streets
     4. Extracts bus lanes separately from general traffic lanes
-    5. Fills missing values using highway type statistics
+    5. Fills missing values using roadway type statistics
     
     Args:
         links_gdf: GeoDataFrame containing OSM link data with columns:
@@ -616,7 +618,7 @@ def standardize_lanes_value(
             - lanes:backward: Number of backward lanes (optional)
             - lanes:both_ways: Lanes shared by both directions (optional)
             - lanes:bus*: Various bus lane attributes (optional)
-            - highway: OSM highway type classification
+            - roadway: OSM highway type classification
         trace_tuple: Optional tuple of (A,B) node IDs to trace for debugging
     
     Returns:
@@ -633,8 +635,8 @@ def standardize_lanes_value(
     
     Notes:
         - Two-way streets have lanes divided equally between directions
-        - Bus-only facilities (highway='busway') get lanes=0, buslanes=1
-        - Missing values filled using mode of lanes by highway type
+        - Bus-only facilities (roadway='busway') get lanes=0, buslanes=1
+        - Missing values filled using mode of lanes by roadway type
         - Default assumption is 1 lane if no information available
     """
     WranglerLogger.debug(f"standardize_lanes_value() for {len(links_gdf):,} links")
@@ -805,14 +807,14 @@ def standardize_lanes_value(
     links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes_rev']==-1) & (links_gdf_wide['oneway']==False), 'buslanes_rev'] = links_gdf_wide['lanes:bus']
     links_gdf_wide.loc[ links_gdf_wide['lanes:bus'].notna() & (links_gdf_wide['buslanes_rev']==-1) & (links_gdf_wide['oneway']==True ), 'buslanes_rev'] = np.floor(0.5*links_gdf_wide['lanes:bus'])
 
-    # if highway=='busway' set buslanes to 1, lanes to 0
-    links_gdf_wide.loc[ links_gdf_wide['highway']     == 'busway', 'buslanes'] = 1
-    links_gdf_wide.loc[ links_gdf_wide['highway']     == 'busway', 'lanes'   ] = 0
-    links_gdf_wide.loc[ links_gdf_wide['highway_rev'] == 'busway', 'buslanes_rev'] = 1
-    links_gdf_wide.loc[ links_gdf_wide['highway_rev'] == 'busway', 'lanes_rev'   ] = 0
+    # if roadway=='busway' set buslanes to 1, lanes to 0
+    links_gdf_wide.loc[ links_gdf_wide['roadway']     == 'busway', 'buslanes'] = 1
+    links_gdf_wide.loc[ links_gdf_wide['roadway']     == 'busway', 'lanes'   ] = 0
+    links_gdf_wide.loc[ links_gdf_wide['roadway_rev'] == 'busway', 'buslanes_rev'] = 1
+    links_gdf_wide.loc[ links_gdf_wide['roadway_rev'] == 'busway', 'lanes_rev'   ] = 0
 
     WranglerLogger.debug(f"links_gdf_wide:\n{links_gdf_wide[LANES_COLS + LANES_COLS_REV]}")
-    WranglerLogger.debug(f"links_gdf_wide for busway:\n{links_gdf_wide.loc[links_gdf_wide.highway=='busway', LANES_COLS]}")
+    WranglerLogger.debug(f"links_gdf_wide for busway:\n{links_gdf_wide.loc[links_gdf_wide.roadway=='busway', LANES_COLS]}")
 
     WranglerLogger.debug(f"links_gdf_wide.buslanes    .value_counts():\n{links_gdf_wide['buslanes'    ].value_counts(dropna=False)}")
     WranglerLogger.debug(f"links_gdf_wide.buslanes_rev.value_counts():\n{links_gdf_wide['buslanes_rev'].value_counts(dropna=False)}")
@@ -858,49 +860,49 @@ def standardize_lanes_value(
             f"{links_gdf.loc[ ((links_gdf.A==trace_tuple[0]) & (links_gdf.B==trace_tuple[1])) | ((links_gdf.A==trace_tuple[1]) & (links_gdf.B==trace_tuple[0]))]}"
         )
 
-    # Create a mapping from highway value -> most common number of lanes for that value
+    # Create a mapping from roadway value -> most common number of lanes for that value
     # and use that to assign the remaining unset lanes
     
     # First, get links that have valid lane counts (not -1)
     links_with_lanes = links_gdf[links_gdf['lanes'] >= 0].copy()
     
     if len(links_with_lanes) > 0:
-        # Calculate the most common (mode) number of lanes for each highway type
-        highway_lanes_mode = links_with_lanes.groupby('highway')['lanes'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.median())
-        highway_lanes_mode = highway_lanes_mode.astype(int)
-        highway_to_lanes = highway_lanes_mode.to_dict()
+        # Calculate the most common (mode) number of lanes for each roadway type
+        roadway_lanes_mode = links_with_lanes.groupby('roadway')['lanes'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.median())
+        roadway_lanes_mode = roadway_lanes_mode.astype(int)
+        roadway_to_lanes = roadway_lanes_mode.to_dict()
         # override these since lanes are vehicle lanes
-        highway_to_lanes['cycleway'] = 0
-        highway_to_lanes['footway'] = 0
+        roadway_to_lanes['cycleway'] = 0
+        roadway_to_lanes['footway'] = 0
         
-        WranglerLogger.debug(f"Highway to lanes mapping based on mode:\n{pprint.pformat(highway_to_lanes)}")
+        WranglerLogger.debug(f"roadway to lanes mapping based on mode:\n{pprint.pformat(roadway_to_lanes)}")
 
         # Apply the mapping to links with missing lanes (-1)
         links_missing_lanes = links_gdf['lanes'] == -1
         missing_count = links_missing_lanes.sum()
         
         if missing_count > 0:
-            WranglerLogger.info(f"Filling {missing_count:,} links with missing lane counts using highway type mapping")
+            WranglerLogger.info(f"Filling {missing_count:,} links with missing lane counts using roadway type mapping")
             
             # Apply the mapping
-            for highway, default_lanes in highway_to_lanes.items():
-                mask = links_missing_lanes & (links_gdf['highway'] == highway)
+            for roadway, default_lanes in roadway_to_lanes.items():
+                mask = links_missing_lanes & (links_gdf['roadway'] == roadway)
                 if mask.any():
                     links_gdf.loc[mask, 'lanes'] = default_lanes
-                    WranglerLogger.debug(f"  Set {mask.sum()} {highway} links to {default_lanes} lanes")
+                    WranglerLogger.debug(f"  Set {mask.sum()} {roadway} links to {default_lanes} lanes")
             
             # Check how many are still missing
             still_missing = (links_gdf['lanes'] == -1).sum()
             if still_missing > 0:
-                # For any highway types not in our mapping, set to 1
+                # For any roadway types not in our mapping, set to 1
                 WranglerLogger.info(f"Found {still_missing:,} links with missing lanes, assuming 1 lane")
                 WranglerLogger.debug(f"\n{links_gdf.loc[links_gdf['lanes'] == -1]})")
                 links_gdf.loc[links_gdf['lanes'] == -1, 'lanes'] = 1
                 
             links_gdf['lanes'] = links_gdf['lanes'].astype(int)
     else:
-        WranglerLogger.warning("No links with valid lane counts found, cannot create highway to lanes mapping")
-        highway_to_lanes = {}
+        WranglerLogger.warning("No links with valid lane counts found, cannot create roadway to lanes mapping")
+        roadway_to_lanes = {}
 
     WranglerLogger.info(f"After standardize_lanes_value:\n{links_gdf['lanes'].value_counts(dropna=False)}")
     WranglerLogger.info(f"buslanes:\n{links_gdf['buslanes'].value_counts(dropna=False)}")
@@ -909,7 +911,7 @@ def standardize_lanes_value(
 def add_facility_type(
     links_gdf: gpd.GeoDataFrame
 ):
-    """Adds MTC facility type (ft) field to links based on OSM highway classification.
+    """Adds MTC facility type (ft) field to links based on OSM roadway classification.
 
     Maps OSM highway types to MTC facility type codes as defined in MTCFacilityType enum.
 
@@ -930,44 +932,44 @@ def add_facility_type(
         - Connector (8): centroid connectors (set elsewhere)
         - Not Assigned (99): service, footway, cycleway, path, etc.
     """
-    WranglerLogger.debug(f"add_facility_type(): highway value counts:\n{links_gdf['highway'].value_counts()}")
+    WranglerLogger.debug(f"add_facility_type(): roadway value counts:\n{links_gdf['roadway'].value_counts()}")
 
     # Initialize ft field with NOT_ASSIGNED as default
     links_gdf['ft'] = MTCFacilityType.NOT_ASSIGNED
 
     # Freeway: motorway
-    freeway_mask = links_gdf['highway'] == 'motorway'
+    freeway_mask = links_gdf['roadway'] == 'motorway'
     links_gdf.loc[freeway_mask, 'ft'] = MTCFacilityType.FREEWAY
 
     # Expressway: trunk (major divided highways that aren't freeways)
-    expressway_mask = links_gdf['highway'] == 'trunk'
+    expressway_mask = links_gdf['roadway'] == 'trunk'
     links_gdf.loc[expressway_mask, 'ft'] = MTCFacilityType.EXPRESSWAY
 
     # Ramp: motorway_link and trunk_link
-    ramp_mask = links_gdf['highway'].isin(['motorway_link', 'trunk_link'])
+    ramp_mask = links_gdf['roadway'].isin(['motorway_link', 'trunk_link'])
     links_gdf.loc[ramp_mask, 'ft'] = MTCFacilityType.RAMP
 
     # Arterials: primary and secondary roads
     # Divided arterial: oneway=True (one direction roadway, typically separated)
     # Undivided arterial: oneway=False (bidirectional roadway)
-    primary_divided_mask = (links_gdf['highway'] == 'primary') & (links_gdf['oneway'] == True)
+    primary_divided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == True)
     links_gdf.loc[primary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
 
-    primary_undivided_mask = (links_gdf['highway'] == 'primary') & (links_gdf['oneway'] == False)
+    primary_undivided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == False)
     links_gdf.loc[primary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
 
-    secondary_divided_mask = (links_gdf['highway'] == 'secondary') & (links_gdf['oneway'] == True)
+    secondary_divided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == True)
     links_gdf.loc[secondary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
 
-    secondary_undivided_mask = (links_gdf['highway'] == 'secondary') & (links_gdf['oneway'] == False)
+    secondary_undivided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == False)
     links_gdf.loc[secondary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
 
     # Collector: tertiary roads, primary_link, secondary_link, tertiary_link
-    collector_mask = links_gdf['highway'].isin(['tertiary','primary_link','secondary_link','tertiary_link'])
+    collector_mask = links_gdf['roadway'].isin(['tertiary','primary_link','secondary_link','tertiary_link'])
     links_gdf.loc[collector_mask, 'ft'] = MTCFacilityType.COLLECTOR
 
     # Local: residential, service, unclassified, living_street
-    local_mask = links_gdf['highway'].isin(['residential', 'service', 'unclassified', 'living_street'])
+    local_mask = links_gdf['roadway'].isin(['residential', 'service', 'unclassified', 'living_street'])
     links_gdf.loc[local_mask, 'ft'] = MTCFacilityType.LOCAL
 
     # Log the facility type distribution
@@ -1372,7 +1374,7 @@ def handle_links_with_duplicate_A_B(
     Multiple OSM ways can connect the same two nodes (parallel edges), representing
     different types of infrastructure (e.g., a freeway and a parallel frontage road).
     This function resolves these duplicates by:
-    1. Prioritizing based on highway hierarchy (motorway > primary > residential)
+    1. Prioritizing based on roadway hierarchy (motorway > primary > residential)
     2. Aggregating lanes from matching infrastructure (same name or unnamed)
     3. Preserving bus lanes from bus-only facilities
     
@@ -1381,38 +1383,38 @@ def handle_links_with_duplicate_A_B(
     
     Args:
         links_gdf: GeoDataFrame with a 'dupe_A_B' column marking duplicate links.
-                  Must contain columns: A, B, key, highway, name, lanes, buslanes
+                  Must contain columns: A, B, key, roadway, name, lanes, buslanes
     
     Returns:
         GeoDataFrame with duplicates resolved. Each A-B pair appears exactly once.
         The 'dupe_A_B' column is set to False for all remaining links.
     
     Algorithm:
-        1. Sort duplicates by highway hierarchy (highest priority first)
+        1. Sort duplicates by roadway hierarchy (highest priority first)
         2. Keep the highest priority link for each A-B pair
         3. Aggregate lanes from links with matching/empty names to the kept link
         4. Aggregate bus lanes from busway facilities to the kept link
     """
     WranglerLogger.info("Handling links with duplicate (A,B)")
 
-    debug_cols = ['A','B','key','highway','oneway','reversed','name','ref','length','lanes','buslanes']
+    debug_cols = ['A','B','key','roadway','oneway','reversed','name','ref','length','lanes','buslanes']
     WranglerLogger.debug(f"links to fix:\n{links_gdf.loc[ links_gdf.dupe_A_B, debug_cols]}")
 
     # Vectorized processing of duplicate links
     dupe_links = links_gdf.loc[links_gdf.dupe_A_B].copy()
     WranglerLogger.debug(f"Processing {len(dupe_links)} duplicate links")
     
-    # Create highway hierarchy mapping
-    highway_level_map = {hw: i for i, hw in enumerate(HIGHWAY_HIERARCHY)}
-    dupe_links['highway_level'] = dupe_links['highway'].map(highway_level_map).fillna(100)
-    dupe_links['highway_level'] = dupe_links['highway_level'].astype(int)
-    debug_cols.insert( debug_cols.index('oneway'), 'highway_level')
-    WranglerLogger.debug(f"Highway level mapping applied:\n{dupe_links[debug_cols]}")
+    # Create roadway hierarchy mapping
+    roadway_level_map = {hw: i for i, hw in enumerate(ROADWAY_HIERARCHY)}
+    dupe_links['roadway_level'] = dupe_links['roadway'].map(roadway_level_map).fillna(100)
+    dupe_links['roadway_level'] = dupe_links['roadway_level'].astype(int)
+    debug_cols.insert( debug_cols.index('oneway'), 'roadway_level')
+    WranglerLogger.debug(f"Roadway level mapping applied:\n{dupe_links[debug_cols]}")
     
-    # Sort by A, B, and highway_level to get highest priority first
-    dupe_links = dupe_links.sort_values(['A', 'B', 'highway_level'])
+    # Sort by A, B, and roadway_level to get highest priority first
+    dupe_links = dupe_links.sort_values(['A', 'B', 'roadway_level'])
     WranglerLogger.debug(
-        f"Sorted duplicate links by A, B, highway_level:\n"
+        f"Sorted duplicate links by A, B, roadway_level:\n"
         f"{dupe_links[debug_cols]}"
     )
     
@@ -1422,7 +1424,7 @@ def handle_links_with_duplicate_A_B(
     WranglerLogger.debug(f"Group ranks assigned:\n{dupe_links[debug_cols]}")
     
     # Aggregate busway buslanes to first row in each group
-    busway_links = dupe_links[dupe_links['highway'] == 'busway']
+    busway_links = dupe_links[dupe_links['roadway'] == 'busway']
     WranglerLogger.debug(f"Found {len(busway_links)} busway links")
     busway_buslanes = busway_links.groupby(['A', 'B'])['buslanes'].first()
     if not busway_buslanes.empty:
@@ -1480,7 +1482,7 @@ def handle_links_with_duplicate_A_B(
         unduped_df = unduped_df.drop(columns=['lanes_new'])
 
     # Drop temporary columns
-    unduped_df = unduped_df.drop(columns=['highway_level', 'group_rank'])
+    unduped_df = unduped_df.drop(columns=['roadway_level', 'group_rank'])
     WranglerLogger.debug(f"Final unduped_df has {len(unduped_df)} links")
 
     # put it back together
@@ -1801,19 +1803,19 @@ def stepa_standardize_attributes(
     links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # additional simplifications
-    # Delete links with highway=='service' and no name
+    # Delete links with roadway=='service' and no name
     nameless_service_links_gdf = links_gdf.loc[ 
-        (links_gdf['highway']=='service') & 
+        (links_gdf['roadway']=='service') & 
         (links_gdf['name'].isna() |
          (links_gdf['name']=='')) ]
     WranglerLogger.info(f"Removing {len(nameless_service_links_gdf):,} nameless service links")
     WranglerLogger.debug(f"nameless_service_links_gdf:\n{nameless_service_links_gdf}")
     links_gdf = links_gdf.loc[
-        (links_gdf['highway']!='service') |
+        (links_gdf['roadway']!='service') |
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
 
-    # Add MTC facility type field based on OSM highway classification
+    # Add MTC facility type field based on OSM roadway classification
     add_facility_type(links_gdf)
 
     # NOTE: Managed lanes fields are now created in step3 after RoadwayNetwork creation
@@ -1856,7 +1858,7 @@ def stepa_standardize_attributes(
     # Note: ML_lanes, access, ML_access are now created in step3 by create_managed_lanes_fields_v2
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
-        'A','B','key','dupe_A_B','highway','oneway','name','ref','geometry',
+        'A','B','key','dupe_A_B','roadway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_only',
         'lanes','length','distance','county','model_link_id','shape_id','ft',
         'buslanes', 'hov:minimum', 'toll:hov'  # Kept for step3 processing
@@ -2259,7 +2261,7 @@ def step3_assign_county_node_link_numbering(
     # Note: ML_access, ML_lanes, sc_ML_access, sc_ML_lanes, sc_ML_price are created by
     # create_managed_lanes_fields_v2() after the network is created
     LINK_COLS = [
-        'A', 'B','osm_link_id','highway','name','ref','oneway','reversed','length','geometry',
+        'A', 'B','osm_link_id','roadway','name','ref','oneway','reversed','length','geometry',
         'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
         'lanes','distance', 'county', 'model_link_id', 'shape_id',
         'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft',
@@ -2666,10 +2668,10 @@ def step6_create_transit_network(
 
         # set drive_access to true for centroid connectors
         # these were temporarily turned off so buses wouldn't route through them
-        roadway_network.links_df.loc[ roadway_network.links_df['highway'] == 'TAZ_NODE', 'drive_access'] = 1
-        roadway_network.links_df.loc[ roadway_network.links_df['highway'] == 'MAZ_NODE', 'drive_access'] = 1
+        roadway_network.links_df.loc[ roadway_network.links_df['roadway'] == 'TAZ_NODE', 'drive_access'] = 1
+        roadway_network.links_df.loc[ roadway_network.links_df['roadway'] == 'MAZ_NODE', 'drive_access'] = 1
         # assign new transit links to FT=99
-        roadway_network.links_df.loc [ roadway_network.links_df['highway'] == 'transit', 'ft'] = MTCFacilityType.NOT_ASSIGNED
+        roadway_network.links_df.loc [ roadway_network.links_df['roadway'] == 'transit', 'ft'] = MTCFacilityType.NOT_ASSIGNED
         
     except Exception as e:
         WranglerLogger.error(f"Error creating transit stops and links: {e}")
