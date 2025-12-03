@@ -107,12 +107,7 @@ warnings.filterwarnings('ignore',
 
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-FEET_PER_MILE = 5280.0
-
 NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
-
-LOCAL_CRS_FEET = "EPSG:2227"
-""" NAD83 / California zone 3 (ftUS) https://epsg.io/2227 """
 
 COUNTY_NAME_TO_GTFS_AGENCIES = {
     MTCCounty.ALAMEDA.value: [
@@ -979,123 +974,6 @@ def add_facility_type(
     links_gdf['ft'] = links_gdf['ft'].astype('Int64')
 
 
-def create_managed_lanes_fields(
-    links_gdf: gpd.GeoDataFrame
-):
-    """Converts buslanes to managed lanes per Wrangler format.
-
-    Args:
-        links_gdf: The links to be used to create a RoadwayNetwork
-
-    Returns:
-        Nothing; links_gdf is modified in place
-    """
-    WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_gdf[['lanes','buslanes']].value_counts()}")
-    
-    # default - all access
-    links_gdf['access'] = None
-    # this is supposed to be set by network_wrangler but since we're not using roadway.links.edit, we'll set it
-    links_gdf['managed'] = 0
-    # this one is a bit odd, but I think parquet doesn't like the mixed types
-    links_gdf['ML_access'] = None
-    links_gdf['ML_lanes'] = 0
-
-    # for buslanes & GP lanes both:
-    mask_both = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] > 0)
-    links_gdf.loc[mask_both, 'ML_access'] = 'bus'
-    links_gdf.loc[mask_both, 'ML_lanes'] = links_gdf.loc[mask_both, "buslanes"].values
-    links_gdf.loc[mask_both, 'managed'] = 1
-
-    # for buslanes only: 
-    mask_bus_only = (links_gdf["buslanes"] > 0) & (links_gdf["lanes"] == 0)
-    links_gdf.loc[mask_bus_only, 'access'] = 'bus'
-    links_gdf.loc[mask_bus_only, 'bus_only'] = 1
-    links_gdf.loc[mask_bus_only, 'lanes'] = links_gdf.loc[mask_bus_only, "buslanes"].values
-    links_gdf.loc[mask_bus_only, 'managed'] = 1
-
-    # drop buslanes column
-    links_gdf.drop(columns=['buslanes'], inplace=True)
-
-    # default HOV times: 5-10a, 3-7p
-    DEFAULT_HOV_TIME_AM = ['05:00','10:00']
-    DEFAULT_HOV_TIME_PM = ['15:00','19:00']
-
-    WranglerLogger.debug(f"hov:minimum\n{links_gdf['hov:minimum'].apply(str).value_counts(dropna=False)}")
-    WranglerLogger.debug(f"toll:hov\n{links_gdf['toll:hov'].apply(str).value_counts(dropna=False)}")
-    # convert hov:minimum=[2,3] to hov:minimum==2
-    hovmin_is_list = links_gdf['hov:minimum'].apply(lambda x: isinstance(x, list))
-    if hovmin_is_list.any():
-        WranglerLogger.debug(f"Found {hovmin_is_list.sum()} links with hov:minimum as list, setting to max")
-        links_gdf.loc[hovmin_is_list, 'hov:minimum'] = links_gdf.loc[hovmin_is_list, 'hov:minimum'].apply(max)
-
-    # =========== HOV2/Express lanes ===========
-    # 'toll:hov' is more reliable and 'hov:minimum' isn't always set for express lanes
-    mask_exp2 = (links_gdf['toll:hov']=='no') # & (links_gdf['hov:minimum'] == 2)
-    managed_lanes = {
-        'sc_ML_lanes': [
-            {'timespan': DEFAULT_HOV_TIME_AM, 'value': 1},
-            {'timespan': DEFAULT_HOV_TIME_PM, 'value': 1},
-        ],
-        'sc_ML_access': [
-            {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov2')},
-            {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov2')},
-        ],
-        'sc_ML_price': [
-            {'timespan':DEFAULT_HOV_TIME_AM, 'value': 3.0 },
-            {'timespan':DEFAULT_HOV_TIME_PM, 'value': 3.0 },
-        ]
-    }
-    # set it
-    for ml_key in managed_lanes.keys():
-        links_gdf.loc[mask_exp2, ml_key] = links_gdf.loc[mask_exp2].apply(
-            lambda x: managed_lanes[ml_key], axis=1
-        )
-    links_gdf.loc[mask_exp2, 'managed'] = 1
-
-    # =========== HOV3/Express lanes ===========
-    mask_exp3 = (links_gdf['toll:hov']=='no') & (links_gdf['hov:minimum'] == 3)
-    managed_lanes['sc_ML_access'] = [
-        {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov3')},
-        {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov3')},
-    ]
-    for ml_key in managed_lanes.keys():
-        links_gdf.loc[mask_exp3, ml_key] = links_gdf.loc[mask_exp3].apply(
-            lambda x: managed_lanes[ml_key], axis=1
-        )
-    links_gdf.loc[mask_exp3, 'managed'] = 1
-
-    # =========== HOV3 ===========
-    mask_hov3 = (links_gdf['hov:minimum'] == 3)
-    del managed_lanes['sc_ML_price']
-    for ml_key in managed_lanes.keys():
-        links_gdf.loc[mask_hov3, ml_key] = links_gdf.loc[mask_hov3].apply(
-            lambda x: managed_lanes[ml_key], axis=1
-        )
-    links_gdf.loc[mask_hov3, 'managed'] = 1
-
-    # =========== HOV2 ===========
-    mask_hov2 = (links_gdf['hov:minimum'] == 2)
-    managed_lanes['sc_ML_access'] = [
-        {'timespan':DEFAULT_HOV_TIME_AM, 'value': ('hov2')},
-        {'timespan':DEFAULT_HOV_TIME_PM, 'value': ('hov2')},
-    ]    
-    for ml_key in managed_lanes.keys():
-        links_gdf.loc[mask_hov2, ml_key] = links_gdf.loc[mask_hov2].apply(
-            lambda x: managed_lanes[ml_key], axis=1
-        )
-    links_gdf.loc[mask_hov2, 'managed'] = 1
- 
-    WranglerLogger.debug(f"links_gdf['access'].value_counts(dropna=False):\n{links_gdf['access'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['ML_access'].value_counts(dropna=False):\n{links_gdf['ML_access'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['sc_ML_access'].value_counts(dropna=False):\n{links_gdf['sc_ML_access'].value_counts(dropna=False)}")
-
-    WranglerLogger.debug(f"links_gdf['lanes'].value_counts(dropna=False):\n{links_gdf['lanes'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['ML_lanes'].value_counts(dropna=False):\n{links_gdf['ML_lanes'].value_counts(dropna=False)}")
-    WranglerLogger.debug(f"links_gdf['sc_ML_lanes'].value_counts(dropna=False):\n{links_gdf['sc_ML_lanes'].value_counts(dropna=False)}")
-
-    WranglerLogger.debug(f"links_gdf['sc_ML_price'].value_counts(dropna=False):\n{links_gdf['sc_ML_price'].value_counts(dropna=False)}")
-
-
 def create_managed_lanes_fields_v2(
     roadway_net: RoadwayNetwork
 ) -> RoadwayNetwork:
@@ -1329,6 +1207,9 @@ def create_managed_lanes_fields_v2(
         WranglerLogger.debug(f"links_df['sc_ML_lanes'].value_counts(dropna=False):\n{links_df['sc_ML_lanes'].value_counts(dropna=False)}")
     if 'sc_ML_price' in links_df.columns:
         WranglerLogger.debug(f"links_df['sc_ML_price'].value_counts(dropna=False):\n{links_df['sc_ML_price'].value_counts(dropna=False)}")
+
+    # we're done with these; drop them
+    roadway_net.links_df.drop(columns=['buslanes', 'hov:minimum', 'toll:hov'], inplace=True)
 
     return roadway_net
 
@@ -2406,7 +2287,9 @@ def step4_add_centroids_and_connectors(
         default_link_attribute_dict = {
             "lanes":7, "oneway":False,
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
-            "drive_access": False
+            "drive_access": False,
+            "roadway": "centroid connector",
+            "ft": MTCFacilityType.CONNECTOR,
         }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -2420,7 +2303,13 @@ def step4_add_centroids_and_connectors(
         zone_buffer_distance=20,
         num_centroid_connectors=2,
         max_mode_graph_degrees=8, # make this larger because more footway links are oks
-        default_link_attribute_dict = {"lanes":1, "oneway":False, "bike_access":True}
+        default_link_attribute_dict = {
+            "lanes":7, "oneway":False, 
+            # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
+            "drive_access": False,
+            "roadway": "centroid connector",
+            "ft": MTCFacilityType.CONNECTOR,
+        }
     )
     WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
 
@@ -2433,14 +2322,12 @@ def step4_add_centroids_and_connectors(
                   roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False))
         mask_a &= roadway_network.links_df['A'].between(node_start+1, node_start + 99_999)
         roadway_network.links_df.loc[mask_a, 'county'] = county_name
-        roadway_network.links_df.loc[mask_a, 'ft'] = MTCFacilityType.CONNECTOR
 
         # For "node to X_NODE" pattern, centroid is B node
         mask_b = (roadway_network.links_df['name'].str.endswith('to TAZ_NODE', na=False) |
                   roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False))
         mask_b &= roadway_network.links_df['B'].between(node_start+1, node_start + 99_999)
         roadway_network.links_df.loc[mask_b, 'county'] = county_name
-        roadway_network.links_df.loc[mask_b, 'ft'] = MTCFacilityType.CONNECTOR
 
     # Set county and centroid flags for TAZ and MAZ centroid nodes
     for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
