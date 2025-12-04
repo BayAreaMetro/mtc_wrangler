@@ -83,6 +83,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import MTCRoadwayNetwork, MTCCounty, \
     MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
 from models.mtc_roadway_schema import MTCFacilityType
+from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -2814,6 +2815,7 @@ if __name__ == "__main__":
                 "applied_projects": [],
                 "conflicts": {}
             },
+            name='mtc_baseyear_from_OSM'
         )
     
         # write it to disk
