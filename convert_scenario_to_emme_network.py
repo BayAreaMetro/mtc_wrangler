@@ -144,11 +144,6 @@ if __name__ == "__main__":
     mtc_scenario.road_net._shapes_df = mtc_scenario.road_net.links_df
     WranglerLogger.debug(f"mtc_scenario:\n{mtc_scenario}")
 
-    # test
-    managed_links_df = mtc_scenario.road_net.links_df.of_type.managed
-    WranglerLogger.debug(f"managed_links_df:\n{managed_links_df}")
-    WranglerLogger.debug(f"managed\n{mtc_scenario.road_net.links_df['managed'].value_counts(dropna=False)}")
-
     # create ModelRoadwayNetwork instance
     mtc_scenario.road_net.config.MODEL_ROADWAY.ADDITIONAL_COPY_FROM_GP_TO_ML = [
         # these are in the mtc_roadway_schema: MTCRoadLinksTable
@@ -158,10 +153,21 @@ if __name__ == "__main__":
         "length", # network_wrangler uses distance
     ]
 
+    WranglerLogger.debug(f"{mtc_scenario.road_net.links_df.crs=}")
     model_roadway_net = mtc_scenario.road_net.model_net
-    # put in local projection, in feet
-    model_roadway_net.nodes_df.to_crs(crs=models.mtc_network.LOCAL_CRS_FEET, inplace=True)
-    model_roadway_net.links_df.to_crs(crs=models.mtc_network.LOCAL_CRS_FEET, inplace=True)
+
+    # debug:
+    # new parallel links have managed = 1
+    WranglerLogger.debug(
+        f"managed lane links:\n"
+        f"{model_roadway_net.links_df.loc[model_roadway_net.links_df.managed ==1]}"
+    )
+    # access/egress links for managed lanes
+    # new parallel links have managed = 1
+    WranglerLogger.debug(
+        f"managed access/egress lane links:\n"
+        f"{model_roadway_net.links_df.loc[model_roadway_net.links_df['roadway'].isin(['ml_access_point','ml_egress_point'])]}"
+    )
 
     # fill in missing fields in the model_roadway_net dataframes (and make the dtypes more reasonable)
     fix_missing_fields(model_roadway_net)
@@ -169,6 +175,21 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"model_roadway_net type={type(model_roadway_net)}:\n{model_roadway_net}")
     model_roadway_net.write(output_dir, overwrite=True, true_shape=True)
     WranglerLogger.info(f"Wrote model_roadway_net to {output_dir}")
+    
+    # Convert to local projection, in feet
+    # JSON doesn't support CRS, so we need to do this after writing the model network in that format
+    model_roadway_net.nodes_df.to_crs(crs=models.mtc_network.LOCAL_CRS_FEET, inplace=True)
+    model_roadway_net.links_df.to_crs(crs=models.mtc_network.LOCAL_CRS_FEET, inplace=True)
+    WranglerLogger.debug(f"{model_roadway_net.nodes_df.crs=}")
+    WranglerLogger.debug(f"{model_roadway_net.links_df.crs=}")
+
+    WranglerLogger.debug(f"model nodes:\n{model_roadway_net.nodes_df}")
+    # check ML link nodes
+    WranglerLogger.debug(
+        f"managed link nodes:\n"
+        f"{model_roadway_net.nodes_df.loc[pd.notnull(model_roadway_net.nodes_df['GP_model_node_id'])]}"
+    )
+
 
     # create EMME Project from scratch
     # tm2_config.emme.project_path is a relative path
@@ -188,7 +209,7 @@ if __name__ == "__main__":
     )
     WranglerLogger.debug(f"emme_app has type {type(emme_app)}")
     WranglerLogger.info(f"Started emme_app returning project: {emme_app.project}")
-    WranglerLogger.debug(f"emme_app.project.spatial_reference_file: {emme_app.project.spatial_reference_file}")
+    # set the spatial referenve to the file we created, which matches LOCAL_CRS_FEET
     emme_app.project.spatial_reference_file = str(proj_spatial_file)
     WranglerLogger.debug(f"emme_app.project.spatial_reference_file: {emme_app.project.spatial_reference_file}")
     emme_app.project.name = mtc_scenario.name
@@ -384,6 +405,11 @@ if __name__ == "__main__":
         emme_link['length']        = row['distance'] # distance is in miles so use this
         emme_link['type']          = 1 # what is this?
         emme_link['num_lanes']     = row['lanes']
+        # set intermediate coordinates, if there are any
+        link_coords = list(row['geometry'].coords)
+        if len(link_coords) > 2: 
+            link_coords = link_coords[1:-1]
+            emme_link.vertices = link_coords
         # set additional attributes
         emme_link['#a_node']       = row['A']
         emme_link['#b_node']       = row['B']
