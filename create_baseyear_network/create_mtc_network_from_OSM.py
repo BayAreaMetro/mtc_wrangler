@@ -57,14 +57,12 @@ import requests
 import statistics
 import sys
 from typing import Any, Optional, Tuple, Union
-import us
 
 import networkx
 import osmnx
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-import pygris
 import shapely.geometry
 
 import tableau_utils
@@ -83,7 +81,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import MTCRoadwayNetwork, MTCCounty, \
     MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
 from models.mtc_roadway_schema import MTCFacilityType
-from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE
+from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, get_county_geodataframe, get_county_bbox
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -235,74 +233,6 @@ ROADWAY_HIERARCHY = [
     'service',        # vehicle access to building, parking lot, etc.
 ]
 
-def get_county_geodataframe(
-        output_dir: pathlib.Path,
-        state: str
-) -> gpd.GeoDataFrame:
-    """
-    Fetch the US Census TIGER shapefile for 2010 county shapes using pygris,
-    or uses cached version if available.
-
-    Saves to output_dir / tl_2010_us_county10 / tl_2010_us_county10.shp
-    """
-    county_shapefile = output_dir / "tl_2010_us_county10" / "tl_2010_us_county10.shp"
-    if county_shapefile.exists():
-        county_gdf = gpd.read_file(county_shapefile)
-        WranglerLogger.info(f"Read {county_shapefile}")
-    else:
-        WranglerLogger.info(f"Fetching California 2010 county shapes using pygris")
-        county_gdf = pygris.counties(state = 'CA', cache = True, year = 2010)
-        # save it to the cache dir
-        county_shapefile.parent.mkdir(exist_ok=True)
-        county_gdf.to_file(county_shapefile)
-
-    my_state = us.states.lookup(state)
-    county_gdf = county_gdf.loc[ county_gdf["STATEFP10"] == my_state.fips]
-    WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
-    return county_gdf
-
-def get_county_bbox(
-        counties: list[str],
-        base_output_dir: pathlib.Path,
-) -> tuple[float, float, float, float]:
-    """
-    The coordinates are converted to WGS84 (EPSG:4326) if needed.
-
-    Args:
-        counties: list of California counties to include.
-        base_output_dir: Base directory for shared resources (county shapefiles)
-
-    Returns:
-        tuple: Bounding box as (west, south, east, north) in decimal degrees.
-               These are longitude/latitude coordinates in WGS84 projection.
-
-    Note:
-        The returned tuple order (west, south, east, north) matches the format
-        expected by osmnx.graph_from_bbox() function.
-    """
-    county_gdf = get_county_geodataframe(base_output_dir, "CA")
-    county_gdf = county_gdf[county_gdf['NAME10'].isin(counties)].copy()
-
-    # Get the total bounds (bounding box) of all counties
-    # Returns (minx, miny, maxx, maxy)
-    bbox = county_gdf.total_bounds
-    WranglerLogger.info(f"Bounding box for Bay Area counties: minx={bbox[0]:.6f}, miny={bbox[1]:.6f}, maxx={bbox[2]:.6f}, maxy={bbox[3]:.6f}")
-    
-    # Convert to WGS84 (EPSG:4326) if not already
-    if county_gdf.crs != LAT_LON_CRS:
-        WranglerLogger.info(f"Converting from {county_gdf.crs} to {LAT_LON_CRS}")
-        county_gdf_wgs84 = county_gdf.to_crs(LAT_LON_CRS)
-        bbox = county_gdf_wgs84.total_bounds
-        WranglerLogger.info(f"Bounding box in WGS84: minx={bbox[0]:.6f}, miny={bbox[1]:.6f}, maxx={bbox[2]:.6f}, maxy={bbox[3]:.6f}")
-    
-    # OSMnx expects (left, bottom, right, top) which is (west, south, east, north)
-    # bbox is currently (minx, miny, maxx, maxy) which is (west, south, east, north)
-    west = bbox[0]
-    south = bbox[1]
-    east = bbox[2]
-    north = bbox[3]
-    
-    return (west, south, east, north)
 
 def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int:
     """
@@ -539,6 +469,11 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
         links_gdf.loc[list_mask, 'highway'] = links_gdf.loc[list_mask, 'highway'].apply(lambda x: x[0] if len(x) > 0 else 'unclassified')
 
     WranglerLogger.debug(f"After standardize_highway_value():\n{links_gdf.highway.value_counts(dropna=False)}")
+
+    # remove walk and bike access for auto-only roads
+    auto_only_roadways = ['motorway','motorway_link']
+    links_gdf.loc[ links_gdf['highway'].isin(auto_only_roadways), 'bike_access'] = False
+    links_gdf.loc[ links_gdf['highway'].isin(auto_only_roadways), 'walk_access'] = False
 
     ################ set drive_centroid_fit, walk_centroid_fit ################
     # for centroid connectors, assess fit for centroid connectors based on highway value
