@@ -103,6 +103,256 @@ def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     WranglerLogger.debug(f"model_roadway_net.links_df.ft:\n{model_roadway_net.links_df['ft'].value_counts(dropna=False)}")
 
 
+def create_emmebank_network(
+        network_mode: str,
+        mtc_scenario: network_wrangler.Scenario,
+        model_roadway_net: ModelRoadwayNetwork,
+        tm2_config: Configuration,
+        emme_app: _app
+):
+    """_summary_
+
+    Args:
+        network_mode (str): One of 'drive', 'transit', active_north', 'active_south'
+        mtc_scenario (network_wrangler.Scenario): The Scenario including roadway and transit networks
+        model_roadway_net (ModelRoadwayNetwork): A model version of the roadway network, in case
+          custom preprocessing is done
+        tm2py_config (tm2py.config.Configuration): MTC TM2 configuration
+        emme_app (inro.emme.desktop.app): The EMME app instance; it should have the project open
+          for which we'll add the networks.
+    """
+    # drive and transit have a scenario per timeperiod
+    # active mode networks have one scenario, but may need to be split into pieces due to node/link limitations
+
+    # Per EMME Help:
+    # Network fields are editable, per-scenario attributes. They are useful to store text attributes on network
+    # elements such as street names, labels, region names, etc. They are also useful to store values such as numbers
+    # with double precision, alternate IDs (IDs from another source), etc. Compared to data tables and DBF attributes
+    # which are static, they are always in sync with the current state of the network.
+    # 
+    # They are available for all network domains: modes, nodes, links, turns, transit vehicles, transit lines,
+    # and transit segments.
+    # 
+    # They play a role similar to Extra attributes, but while extra attributes can only contain numeric values and
+    # are saved in the EMME database, network fields can be of several types (string, integer, real or boolean) 
+    # and are saved in an external file associated with the scenario (scenario_id.db) in the Database folder of
+    # the project.
+    #
+    # *Database network attributes*
+    #
+    # Standard attributes are part of the basic network data. These attributes have predefined names, and
+    # most of them have a special meaning (for example, link length or node coordinates). Adding a network
+    # element, for example a link, implies specifying the values of its standard attributes. These values
+    # may then be modified when the element is edited, made available to EMME modelling procedures, and
+    # displayed in Desktop, for instance.
+    #
+    # The standard attributes include three user data items for each node, link, turn and transit line
+    # (and for transit segments, if this is requested at database creation time). The contents of these data
+    # items are defined by the user, but must be numeric. These items are referred to by using predefined
+    # names such as ul3 (link user data 3), ui2 (node user data 2), etc.
+    #
+    # *Extra attributes* are user-defined attributes that can be associated with nodes, links, turns, transit lines
+    # and segments. When creating an extra attribute, the user gives the attribute a name (of the form @laa...a), 
+    # a description and a default value. When an element is added to a scenario, all its extra attributes are
+    # initialized to their respective default values. When an extra attribute is created, it is tagged with the
+    # creation time. This time stamp is updated whenever the attribute is modified. (Timestamps on extra attributes
+    # may be consulted in Desktop Attribute list windows.)
+    # 
+    # Both user data items and extra attributes are useful for storing observed values, data derived from
+    # calculations, etc. They can both be used as input or output for EMME procedures or for user-specific models
+    # and analyses. Extra attributes cannot be used as keywords in functions but they can be accessed in
+    # volume-delay and turn penalty functions through the extra function parameters (see Set extra function
+    # parameters tool).
+    #
+    # create emmebank database for project
+    # TODO: these should come from the network
+    # starting with versions from E:\TM2\emme_project\Database_highway\emmebank
+    emme_emmebank_dimensions = {
+        'scenarios'             : 6 if network_mode in ['drive','transit'] else 1, # all day, plus one per time period
+        'centroids'             : 5_000,
+        'regular_nodes'         : 994_999,
+        'links'                 : 2_000_000,
+        'transit_vehicles'      : 600,
+        'transit_lines'         : 40_000,
+        'transit_segments'      : 2_000_000,
+        'turn_entries'          : 3_000_000,
+        'full_matrices'         : 9999, # what is this?
+        'origin_matrices'       : 999,  # what is this?
+        'destination_matrices'  : 999,  # what is this?
+        'scalar_matrices'       : 999,  # what is this?
+        'extra_attribute_values': 100_000_000, # what is this?
+        'functions'             : 99,   # what is this?
+        'operators'             : 5000, # what is this?
+        'sola_analyses'         : 240   # what is this?
+    }
+    if network_mode == 'drive':
+        DB_PATH = output_dir / tm2_config.emme.highway_database_path
+    elif network_mode == 'transit':
+        DB_PATH = output_dir / tm2_config.emme.transit_database_path
+    elif network_mode == 'active_north':
+        DB_PATH = output_dir / tm2_config.emme.active_north_database_path
+    elif network_mode == 'active_south':
+        DB_PATH = output_dir / tm2_config.emme.active_south_database_path
+    else:
+        raise ValueError(f"Invalid value for network_mode:'{network_mode}'")
+
+    WranglerLogger.info(f"Creating {DB_PATH.parent}")
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    emme_emmebank = _emmebank.create(DB_PATH, emme_emmebank_dimensions)
+    emme_emmebank.unit_of_length='mi'
+    emme_emmebank.coord_unit_length=1.0/5280.0  # coord_unit = feet
+    emme_emmebank.title = f"{network_mode}_network"
+    WranglerLogger.info(f"Created emme_emmebank {emme_emmebank}")
+    WranglerLogger.info(f"{emme_emmebank.unit_of_length=}")
+    WranglerLogger.info(f"{emme_emmebank.coord_unit_length=}")
+    WranglerLogger.info(f"{emme_emmebank.dimensions=}")
+
+    # create emme Scenario object
+    emme_scenario = emme_emmebank.create_scenario(tm2_config.emme.all_day_scenario_id)
+    emme_scenario.title = f"{network_mode}, all day"
+
+    # add emmebank to project
+    WranglerLogger.debug(f"emme_emmebank.path: {emme_emmebank.path}")
+    emme_db = emme_app.data_explorer().add_database(emme_emmebank.path)
+    emme_db.open()
+    emme_app.refresh_data()
+
+    # get scenario ready for network creation
+
+    # add network_wrangler standard fields
+    # TODO: this should move to emme_wrangler since it's not MTC-specific
+    # from RoadNodesTable
+    emme_scenario.create_network_field('NODE', '#model_node_id', 'INTEGER32')
+    emme_scenario.create_network_field('NODE', '#osm_node_id',   'STRING')
+    # from RoadLinksTable
+    emme_scenario.create_network_field('LINK', '#a_node',       'INTEGER32') # #A was an error
+    emme_scenario.create_network_field('LINK', '#b_node',       'INTEGER32')
+    emme_scenario.create_network_field('LINK', '#name',         'STRING')
+    emme_scenario.create_network_field('LINK', '#rail_only',    'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#bus_only',     'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#ferry_only',   'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#drive_access', 'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#bike_access',  'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#walk_access',  'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#roadway',      'STRING')
+    emme_scenario.create_network_field('LINK', '#projects',     'STRING')
+    emme_scenario.create_network_field('LINK', '#managed',      'INTEGER32')
+    emme_scenario.create_network_field('LINK', '#ref',          'STRING')
+
+    # add mtc standard fields (see mtc_roadway_schema.py)
+    emme_scenario.create_network_field('NODE', '#node_county',  'STRING') # must be unique, across tables (link, node, etc)
+    emme_scenario.create_network_field('NODE', '#taz_centroid', 'BOOLEAN')
+    emme_scenario.create_network_field('NODE', '#maz_centroid', 'BOOLEAN')
+    emme_scenario.create_network_field('LINK', '#link_county',  'STRING')
+    emme_scenario.create_network_field('LINK', '#ft',           'INTEGER32')
+
+    # get Network object from scenario
+    emme_network = emme_scenario.get_network()
+
+    # create modes
+    # general drive
+    # TODO: update for network_mode
+    emme_network.create_mode('AUTO', tm2_config.highway.generic_highway_mode_code)
+    emme_network.mode(tm2_config.highway.generic_highway_mode_code).description = "car"
+
+    for transit_mode_config in tm2_config.transit.modes:
+        # WranglerLogger.debug(f"transit_mode_config: {transit_mode_config}")
+        if transit_mode_config.description in ['drive_acc','knrdummy','pnrdummy']:
+            emme_network.create_mode(transit_mode_config.assign_type, transit_mode_config.mode_id)
+            emme_network.mode(transit_mode_config.mode_id).description = transit_mode_config.description
+            WranglerLogger.debug(
+                f"Added drive mode with type='{transit_mode_config.assign_type}' "
+                f"id='{transit_mode_config.mode_id}' "
+                f"description='{transit_mode_config.description}'"
+            )
+
+    # Network.create_node() for centroids and nodes
+    # TAZs and then MAZs and then all other nodes
+    model_node_id_to_emme_id = {}
+    for index, row in model_roadway_net.nodes_df.iterrows():
+        # WranglerLogger.debug(f"Processing node {index}: row=\n{row}")
+        # id is a string
+        emme_node = emme_network.create_node(
+            id=index+1, 
+            is_centroid=row['taz_centroid'] | row['maz_centroid']
+        )
+        # set standard attributes
+        emme_node['x'] = row['geometry'].x
+        emme_node['y'] = row['geometry'].y
+        # set additional attributes
+        emme_node['#model_node_id'] = row['model_node_id']
+        emme_node['#osm_node_id']   = row['osm_node_id']
+        # set mtc-specific attributes
+        emme_node['#node_county']   = row['county']
+        emme_node['#taz_centroid']  = row['taz_centroid']
+        emme_node['#maz_centroid']  = row['maz_centroid']
+
+        # save mapping from model_node_id to emme id
+        model_node_id_to_emme_id[row['model_node_id']] = emme_node.number
+    WranglerLogger.info(f"Created {len(model_node_id_to_emme_id):,} emme nodes")
+
+    # create dataframe for model_node_id_to_emme_id
+    model_node_id_to_emme_id_df = pd.DataFrame(
+        {'emme_node_id':model_node_id_to_emme_id.values()},
+        index=model_node_id_to_emme_id.keys()
+    )
+    model_node_id_to_emme_id_df.index.name = 'model_node_id'
+    WranglerLogger.debug(f"model_node_id_to_emme_id_df:\n{model_node_id_to_emme_id_df}")
+    # save it
+    if network_mode == 'drive':
+        xwalk_file = output_dir / tm2_config.highway.model_to_emme_node_id_xwalk
+        model_node_id_to_emme_id_df.to_csv(xwalk_file, header=True, index=True)
+        WranglerLogger.info(f"Wrote {xwalk_file}")
+
+    # Network.create_link() for links
+    default_modes = tm2_config.highway.generic_highway_mode_code
+    for index, row in model_roadway_net.links_df.iterrows():
+
+        # don't include irrelevant links
+        if network_mode == 'drive':
+            if not row['drive_access']: continue
+        if network_mode == 'transit':
+            if not row['drive_access'] and not row['rail_only'] and not row['bus_only'] and not row['ferry_only']: continue
+        if network_mode.startswith('active'):
+            if not row['bike_access'] and not row['walk_access']: continue
+        
+        emme_link = emme_network.create_link(
+            i_node_id=model_node_id_to_emme_id[row['A']],
+            j_node_id=model_node_id_to_emme_id[row['B']],
+            modes=default_modes
+        )
+        # set standard attributes
+        emme_link['length']        = row['distance'] # distance is in miles so use this
+        emme_link['type']          = 1 # what is this?
+        emme_link['num_lanes']     = row['lanes']
+        # set intermediate coordinates, if there are any
+        link_coords = list(row['geometry'].coords)
+        if len(link_coords) > 2: 
+            link_coords = link_coords[1:-1]
+            emme_link.vertices = link_coords
+        # set additional attributes
+        emme_link['#a_node']       = row['A']
+        emme_link['#b_node']       = row['B']
+        emme_link['#name']         = row['name']
+        emme_link['#rail_only']    = row['rail_only']
+        emme_link['#bus_only']     = row['bus_only']
+        emme_link['#ferry_only']   = row['ferry_only']
+        emme_link['#drive_access'] = row['drive_access']
+        emme_link['#bike_access']  = row['bike_access']
+        emme_link['#walk_access']  = row['walk_access']
+        emme_link['#roadway']      = row['roadway']
+        emme_link['#projects']     = row['projects']
+        emme_link['#managed']      = row['managed']
+        emme_link['#ref']          = row['ref']
+        # set mtc-specific attributes
+        emme_link['#link_county']  = row['county']
+        emme_link['#ft']           = row['ft']
+
+    # Scenario.publish_network
+    emme_scenario.publish_network(emme_network)
+    WranglerLogger.info(f"Published scenario network for {network_mode}")
+    
+
 if __name__ == "__main__":
     # Setup pandas display options
     pd.options.display.max_columns = None
@@ -216,221 +466,10 @@ if __name__ == "__main__":
 
     # we're going to create emmebank databases by mode:
     # drive, transit, active
-    # drive and transit have a scenario per timeperiod
-    # active mode networks have one scenario, but may need to be split into pieces due to node/link limitations
 
-    # Per EMME Help:
-    # Network fields are editable, per-scenario attributes. They are useful to store text attributes on network
-    # elements such as street names, labels, region names, etc. They are also useful to store values such as numbers
-    # with double precision, alternate IDs (IDs from another source), etc. Compared to data tables and DBF attributes
-    # which are static, they are always in sync with the current state of the network.
-    # 
-    # They are available for all network domains: modes, nodes, links, turns, transit vehicles, transit lines,
-    # and transit segments.
-    # 
-    # They play a role similar to Extra attributes, but while extra attributes can only contain numeric values and
-    # are saved in the EMME database, network fields can be of several types (string, integer, real or boolean) 
-    # and are saved in an external file associated with the scenario (scenario_id.db) in the Database folder of
-    # the project.
-    #
-    # *Database network attributes*
-    #
-    # Standard attributes are part of the basic network data. These attributes have predefined names, and
-    # most of them have a special meaning (for example, link length or node coordinates). Adding a network
-    # element, for example a link, implies specifying the values of its standard attributes. These values
-    # may then be modified when the element is edited, made available to EMME modelling procedures, and
-    # displayed in Desktop, for instance.
-    #
-    # The standard attributes include three user data items for each node, link, turn and transit line
-    # (and for transit segments, if this is requested at database creation time). The contents of these data
-    # items are defined by the user, but must be numeric. These items are referred to by using predefined
-    # names such as ul3 (link user data 3), ui2 (node user data 2), etc.
-    #
-    # *Extra attributes* are user-defined attributes that can be associated with nodes, links, turns, transit lines
-    # and segments. When creating an extra attribute, the user gives the attribute a name (of the form @laa...a), 
-    # a description and a default value. When an element is added to a scenario, all its extra attributes are
-    # initialized to their respective default values. When an extra attribute is created, it is tagged with the
-    # creation time. This time stamp is updated whenever the attribute is modified. (Timestamps on extra attributes
-    # may be consulted in Desktop Attribute list windows.)
-    # 
-    # Both user data items and extra attributes are useful for storing observed values, data derived from
-    # calculations, etc. They can both be used as input or output for EMME procedures or for user-specific models
-    # and analyses. Extra attributes cannot be used as keywords in functions but they can be accessed in
-    # volume-delay and turn penalty functions through the extra function parameters (see Set extra function
-    # parameters tool).
-    #
-    # *Assignment result attributes* are automatically written to the network, depending on the procedure used.
-    # They include auto volumes on links and turns, transit volumes on line segments, etc. Assignment result
-    # attributes become available once an assignment procedure has been performed, and may be lost following
-    # certain database modifications. See the traffic and transit assignment tool descriptions for specifics
-    # on which assignment result attributes are used.
-
-    # create emmebank database for project
-    # TODO: these should come from the network?
-    # starting with versions from E:\TM2\emme_project\Database_highway\emmebank
-    emme_emmebank_dimensions = {
-        'scenarios'             : 6,
-        'centroids'             : 5_000,
-        'regular_nodes'         : 994_999,
-        'links'                 : 2_000_000,
-        'transit_vehicles'      : 600,
-        'transit_lines'         : 40_000,
-        'transit_segments'      : 2_000_000,
-        'turn_entries'          : 3_000_000,
-        'full_matrices'         : 9999,
-        'origin_matrices'       : 999,
-        'destination_matrices'  : 999,
-        'scalar_matrices'       : 999,
-        'extra_attribute_values': 100_000_000,
-        # don't know what these are
-        'functions'             : 99,
-        'operators'             : 5000,
-        'sola_analyses'         : 240
-    }
-    DB_DIR = output_dir / tm2_config.emme.highway_database_path.parent
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    WranglerLogger.info(f"Creating {DB_DIR}")
-    emme_emmebank = _emmebank.create(output_dir / tm2_config.emme.highway_database_path, emme_emmebank_dimensions)
-    emme_emmebank.unit_of_length='mi'
-    emme_emmebank.coord_unit_length=1.0/5280.0  # coord_unit = feet
-    emme_emmebank.title = "drive_network"
-    WranglerLogger.info(f"Created emme_emmebank {emme_emmebank}")
-    WranglerLogger.info(f"{emme_emmebank.unit_of_length=}")
-    WranglerLogger.info(f"{emme_emmebank.coord_unit_length=}")
-    WranglerLogger.info(f"{emme_emmebank.dimensions=}")
-
-    # create emme Scenario object
-    drive_scenario = emme_emmebank.create_scenario(tm2_config.emme.all_day_scenario_id)
-    drive_scenario.title = "Drive, all day"
-
-    # add emmebank to project
-    WranglerLogger.debug(f"emme_emmebank.path: {emme_emmebank.path}")
-    emme_db = emme_app.data_explorer().add_database(emme_emmebank.path)
-    emme_db.open()
-    emme_app.refresh_data()
-
-    # get scenario ready for network creation
-
-    # add network_wrangler standard fields
-    # TODO: this should move to emme_wrangler since it's not MTC-specific
-    # from RoadNodesTable
-    drive_scenario.create_network_field('NODE', '#model_node_id', 'INTEGER32')
-    drive_scenario.create_network_field('NODE', '#osm_node_id',   'STRING')
-    # from RoadLinksTable
-    drive_scenario.create_network_field('LINK', '#a_node',       'INTEGER32') # #A was an error
-    drive_scenario.create_network_field('LINK', '#b_node',       'INTEGER32')
-    drive_scenario.create_network_field('LINK', '#name',         'STRING')
-    drive_scenario.create_network_field('LINK', '#rail_only',    'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#bus_only',     'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#ferry_only',   'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#drive_access', 'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#bike_access',  'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#walk_access',  'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#roadway',      'STRING')
-    drive_scenario.create_network_field('LINK', '#projects',     'STRING')
-    drive_scenario.create_network_field('LINK', '#managed',      'INTEGER32')
-    drive_scenario.create_network_field('LINK', '#ref',          'STRING')
-
-    # add mtc standard fields (see mtc_roadway_schema.py)
-    drive_scenario.create_network_field('NODE', '#node_county',  'STRING') # must be unique, across tables (link, node, etc)
-    drive_scenario.create_network_field('NODE', '#taz_centroid', 'BOOLEAN')
-    drive_scenario.create_network_field('NODE', '#maz_centroid', 'BOOLEAN')
-    drive_scenario.create_network_field('LINK', '#link_county',  'STRING')
-    drive_scenario.create_network_field('LINK', '#ft',           'INTEGER32')
-
-    # get Network object from scenario
-    drive_network = drive_scenario.get_network()
-
-    # create modes
-    # general drive
-    drive_network.create_mode('AUTO', tm2_config.highway.generic_highway_mode_code)
-    drive_network.mode(tm2_config.highway.generic_highway_mode_code).description = "car"
-
-    for transit_mode_config in tm2_config.transit.modes:
-        # WranglerLogger.debug(f"transit_mode_config: {transit_mode_config}")
-        if transit_mode_config.description in ['drive_acc','knrdummy','pnrdummy']:
-            drive_network.create_mode(transit_mode_config.assign_type, transit_mode_config.mode_id)
-            drive_network.mode(transit_mode_config.mode_id).description = transit_mode_config.description
-            WranglerLogger.debug(f"Added drive mode with type='{transit_mode_config.assign_type}' "
-                                 f"id='{transit_mode_config.mode_id}' "
-                                 f"description='{transit_mode_config.description}'")
-
-    # Network.create_node() for centroids and nodes
-    # TAZs and then MAZs and then all other nodes
-    model_node_id_to_emme_id = {}
-    for index, row in model_roadway_net.nodes_df.iterrows():
-        # WranglerLogger.debug(f"Processing node {index}: row=\n{row}")
-        # id is a string
-        emme_node = drive_network.create_node(
-            id=index+1, 
-            is_centroid=row['taz_centroid'] | row['maz_centroid']
-        )
-        # set standard attributes
-        emme_node['x'] = row['geometry'].x
-        emme_node['y'] = row['geometry'].y
-        # set additional attributes
-        emme_node['#model_node_id'] = row['model_node_id']
-        emme_node['#osm_node_id']   = row['osm_node_id']
-        # set mtc-specific attributes
-        emme_node['#node_county']   = row['county']
-        emme_node['#taz_centroid']  = row['taz_centroid']
-        emme_node['#maz_centroid']  = row['maz_centroid']
-
-        # save mapping from model_node_id to emme id
-        model_node_id_to_emme_id[row['model_node_id']] = emme_node.number
-    WranglerLogger.info(f"Created {len(model_node_id_to_emme_id):,} emme nodes")
-
-    # create dataframe for model_node_id_to_emme_id
-    model_node_id_to_emme_id_df = pd.DataFrame(
-        {'emme_node_id':model_node_id_to_emme_id.values()},
-        index=model_node_id_to_emme_id.keys()
-    )
-    model_node_id_to_emme_id_df.index.name = 'model_node_id'
-    WranglerLogger.debug(f"model_node_id_to_emme_id_df:\n{model_node_id_to_emme_id_df}")
-    # save it
-    xwalk_file = output_dir / tm2_config.highway.model_to_emme_node_id_xwalk
-    model_node_id_to_emme_id_df.to_csv(xwalk_file, header=True, index=True)
-    WranglerLogger.info(f"Wrote {xwalk_file}")
-
-    # Network.create_link() for links
-    default_modes = tm2_config.highway.generic_highway_mode_code
-    # TODO: what about the other modes?
-    for index, row in model_roadway_net.links_df.iterrows():
-        emme_link = drive_network.create_link(
-            i_node_id=model_node_id_to_emme_id[row['A']],
-            j_node_id=model_node_id_to_emme_id[row['B']],
-            modes=default_modes
-        )
-        # set standard attributes
-        emme_link['length']        = row['distance'] # distance is in miles so use this
-        emme_link['type']          = 1 # what is this?
-        emme_link['num_lanes']     = row['lanes']
-        # set intermediate coordinates, if there are any
-        link_coords = list(row['geometry'].coords)
-        if len(link_coords) > 2: 
-            link_coords = link_coords[1:-1]
-            emme_link.vertices = link_coords
-        # set additional attributes
-        emme_link['#a_node']       = row['A']
-        emme_link['#b_node']       = row['B']
-        emme_link['#name']         = row['name']
-        emme_link['#rail_only']    = row['rail_only']
-        emme_link['#bus_only']     = row['bus_only']
-        emme_link['#ferry_only']   = row['ferry_only']
-        emme_link['#drive_access'] = row['drive_access']
-        emme_link['#bike_access']  = row['bike_access']
-        emme_link['#walk_access']  = row['walk_access']
-        emme_link['#roadway']      = row['roadway']
-        emme_link['#projects']     = row['projects']
-        emme_link['#managed']      = row['managed']
-        emme_link['#ref']          = row['ref']
-        # set mtc-specific attributes
-        emme_link['#link_county']  = row['county']
-        emme_link['#ft']           = row['ft']
-
-    # Scenario.publish_network
-    drive_scenario.publish_network(drive_network)
-    WranglerLogger.info("Published drive_scenario network")
+    # active mode networks are too big so get split into two
+    for network_mode in ['drive','transit','active_north','active_south']:
+        create_emmebank_network(network_mode, mtc_scenario, model_roadway_net, tm2_config, emme_app)
 
     # list project databases
     for db in emme_app.project.databases:
