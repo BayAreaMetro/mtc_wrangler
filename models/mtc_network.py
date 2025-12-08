@@ -10,11 +10,14 @@ import geopandas as gpd
 import pygris
 import us
 
+import pandas as pd
+
 from network_wrangler import WranglerLogger
+from network_wrangler.params import LAT_LON_CRS
 from network_wrangler.roadway.network import RoadwayNetwork
 from network_wrangler.utils.models import validate_df_to_model
 
-from .mtc_roadway_schema import MTCRoadLinksTable, MTCRoadNodesTable
+from .mtc_roadway_schema import MTC_COUNTIES, MTCRoadLinksTable, MTCRoadNodesTable
 
 FEET_PER_MILE = 5280.0
 
@@ -91,6 +94,164 @@ def get_county_bbox(
     north = bbox[3]
     
     return (west, south, east, north)
+
+
+def assign_county_to_geodataframes(
+    links_gdf: gpd.GeoDataFrame,
+    nodes_gdf: gpd.GeoDataFrame,
+    base_output_dir: pathlib.Path,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Assign county attribute to links and nodes geodataframes via spatial join.
+
+    Performs spatial joins to assign county based on geometry.
+    Links that span multiple counties are assigned to the county with the longest
+    intersection length.
+
+    If a 'county' column already exists, only null or empty values will be overwritten.
+
+    Args:
+        links_gdf: GeoDataFrame of links with geometry
+        nodes_gdf: GeoDataFrame of nodes with geometry
+        base_output_dir: path for get_county_geodataframe()
+    Returns:
+        Tuple of (links_gdf, nodes_gdf) with 'county' column assigned.
+    """
+    WranglerLogger.info("Performing spatial join to assign counties...")
+
+    # Read the county shapefile for spatial joins
+    county_gdf = get_county_geodataframe(base_output_dir, "CA")
+    county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
+    WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
+    
+    # Check if county column already exists and preserve non-null/non-empty values
+    links_has_county = 'county' in links_gdf.columns
+    nodes_has_county = 'county' in nodes_gdf.columns
+
+    if links_has_county:
+        links_gdf = links_gdf.rename(columns={'county': 'county_existing'})
+    if nodes_has_county:
+        nodes_gdf = nodes_gdf.rename(columns={'county': 'county_existing'})
+
+    # Ensure all are in the same CRS (LOCAL_CRS_FEET)
+    county_gdf = county_gdf.to_crs(LOCAL_CRS_FEET)
+    links_gdf = links_gdf.to_crs(LOCAL_CRS_FEET)
+    nodes_gdf = nodes_gdf.to_crs(LOCAL_CRS_FEET)
+
+    # Dissolve counties to one region shape and create convex hull
+    region_shape = county_gdf.loc[ county_gdf['county'].isin(MTC_COUNTIES)].dissolve().convex_hull.iloc[0]
+
+    # Filter to links that intersect with region
+    links_gdf = links_gdf[links_gdf.intersects(region_shape)].copy()
+    WranglerLogger.info(f"Filtered to {len(links_gdf):,} links intersecting region")
+
+    # Filter nodes to only those referenced in the filtered links
+    used_nodes = pd.concat([links_gdf['A'], links_gdf['B']]).unique()
+    nodes_gdf = nodes_gdf[nodes_gdf['osmid'].isin(used_nodes)]
+    WranglerLogger.info(f"Filtered to {len(nodes_gdf):,} nodes that are referenced in links")
+
+    # Store expected counts after filtering (spatial joins should not change these)
+    expected_links_count = len(links_gdf)
+    expected_nodes_count = len(nodes_gdf)
+
+    # Spatial join for nodes - use point geometry
+    nodes_gdf = gpd.sjoin(
+        nodes_gdf,
+        county_gdf[['geometry', 'county']],
+        how='left',
+        predicate='within'
+    )
+    # Use "External" for nodes outside counties
+    nodes_gdf['county'] = nodes_gdf['county'].fillna('External')
+
+    # Merge back existing county values (only overwrite null/empty)
+    if nodes_has_county:
+        # Use existing value if it's not null and not empty string
+        mask = nodes_gdf['county_existing'].notna() & (nodes_gdf['county_existing'] != '')
+        nodes_gdf.loc[mask, 'county'] = nodes_gdf.loc[mask, 'county_existing']
+        nodes_gdf = nodes_gdf.drop(columns=['county_existing'])
+
+    # First, do a spatial join to find all intersecting counties
+    WranglerLogger.info(f"Before joining links to counties, {len(links_gdf)=:,}")
+    links_gdf = gpd.sjoin(
+        links_gdf,
+        county_gdf[['geometry', 'county']],
+        how='left',
+        predicate='intersects'
+    )
+    WranglerLogger.debug(f"{len(links_gdf)=:,}")
+    WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
+
+    # Use "External" for links outside counties
+    links_gdf['county'] = links_gdf['county'].fillna('External')
+    WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
+
+    # The only links to adjust are those that matched to multiple counties
+    multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)].copy()
+    WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
+
+    if len(multicounty_links_gdf) > 0:
+        # Calculate intersection lengths for multi-county links
+        WranglerLogger.info(f"Found {len(multicounty_links_gdf):,} links in multicounty_links_gdf")
+
+        # Calculate intersection length for each link-county pair
+        multicounty_links_gdf['intersection_length'] = multicounty_links_gdf.apply(
+            lambda row: row.geometry.intersection(
+                county_gdf[county_gdf['county'] == row['county']].iloc[0].geometry
+            ).length if not pd.isna(row['county']) else 0,
+            axis=1
+        )
+
+        # Sorting by index (ascending), intersection_length (descending)
+        multicounty_links_gdf.sort_values(
+            by=['A','B','key','intersection_length'],
+            ascending=[True, True, True, False],
+            inplace=True)
+        WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
+        # drop duplicates now, keeping first
+        multicounty_links_gdf.drop_duplicates(subset=['A','B','key'], keep='first', inplace=True)
+        WranglerLogger.debug(f"After dropping duplicates: multicounty_links_gdf:\n{multicounty_links_gdf}")
+
+        # put them back together
+        links_gdf = pd.concat([
+            links_gdf.drop_duplicates(subset=['A','B','key'], keep=False), # single-county links
+            multicounty_links_gdf
+        ])
+        # verify that each link is only represented once
+        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)]
+        assert(len(multicounty_links_gdf)==0)
+
+        # drop temporary columns
+        links_gdf.drop(columns=['index_right','intersection_length'], inplace=True)
+        links_gdf.reset_index(drop=True, inplace=True)
+
+    # Drop the extra columns from spatial join
+    links_gdf = links_gdf.drop(columns=['index_right'], errors='ignore')
+
+    # Merge back existing county values (only overwrite null/empty)
+    if links_has_county:
+        # Use existing value if it's not null and not empty string
+        mask = links_gdf['county_existing'].notna() & (links_gdf['county_existing'] != '')
+        links_gdf.loc[mask, 'county'] = links_gdf.loc[mask, 'county_existing']
+        links_gdf = links_gdf.drop(columns=['county_existing'])
+
+    WranglerLogger.debug(f"links_gdf with one county per link:\n{links_gdf}")
+
+    # Sort nodes by county for consistent numbering
+    nodes_gdf = nodes_gdf.sort_values('county').reset_index(drop=True)
+    WranglerLogger.debug(f"nodes_gdf:\n{nodes_gdf}")
+
+    # revert to LAT_LON_CRS
+    links_gdf = links_gdf.to_crs(LAT_LON_CRS)
+    nodes_gdf = nodes_gdf.to_crs(LAT_LON_CRS)
+
+    # Verify no duplicates were created
+    assert len(links_gdf) == expected_links_count, \
+        f"Links count changed: expected {expected_links_count}, got {len(links_gdf)}"
+    assert len(nodes_gdf) == expected_nodes_count, \
+        f"Nodes count changed: expected {expected_nodes_count}, got {len(nodes_gdf)}"
+
+    return links_gdf, nodes_gdf
+
 
 class MTCRoadwayNetwork(RoadwayNetwork):
     """MTC-specific roadway network with additional validation.

@@ -81,7 +81,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import MTCRoadwayNetwork, MTCCounty, \
     MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
 from models.mtc_roadway_schema import MTCFacilityType
-from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, get_county_geodataframe, get_county_bbox
+from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, get_county_geodataframe, get_county_bbox, assign_county_to_geodataframes
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -1432,108 +1432,10 @@ def stepa_standardize_attributes(
 
     # Handle county assignment
     if county == "Bay Area":
-        # Read the county shapefile for spatial joins
-        WranglerLogger.info("Performing spatial join to assign counties for Bay Area network...")
-        county_gdf = get_county_geodataframe(base_output_dir, "CA")
-        county_gdf = county_gdf[county_gdf['NAME10'].isin(MTC_COUNTIES)].copy()
-        county_gdf = county_gdf.rename(columns={'NAME10': 'county'})
-        WranglerLogger.debug(f"county_gdf:\n{county_gdf}")
-                
-        # Ensure both are in the same CRS (LOCAL_CRS_FEET)
-        county_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
-        links_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
-        nodes_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
-
-        # Dissolve counties to one region shape and create convex hull
-        region_shape = county_gdf.dissolve().convex_hull.iloc[0]
-        region_gdf = gpd.GeoDataFrame([{'geometry': region_shape, 'region': 'Bay Area'}], crs=county_gdf.crs)
-        
-        # Filter to links that intersect with region
-        links_gdf = links_gdf[links_gdf.intersects(region_shape)].copy()
-        WranglerLogger.info(f"Filtered to {len(links_gdf):,} links intersecting Bay Area region")
-        
-        # Filter nodes to only those referenced in the filtered links
-        used_nodes = pd.concat([links_gdf['A'], links_gdf['B']]).unique()
-        nodes_gdf = nodes_gdf[nodes_gdf['osmid'].isin(used_nodes)]
-        WranglerLogger.info(f"Filtered to {len(nodes_gdf):,} nodes that are referenced in links")
-
-        # Spatial join for nodes - use point geometry
-        nodes_gdf = gpd.sjoin(
-            nodes_gdf, 
-            county_gdf[['geometry', 'county']], 
-            how='left', 
-            predicate='within'
-        )
-        # Use "External" for nodes outside counties
-        nodes_gdf['county'] = nodes_gdf['county'].fillna('External')
-        
-        # First, do a spatial join to find all intersecting counties
-        WranglerLogger.info(f"Before joining links to counties, {len(links_gdf)=:,}")
-        links_gdf = gpd.sjoin(
-            links_gdf,
-            county_gdf[['geometry', 'county']],
-            how='left',
-            predicate='intersects'
-        )
-        WranglerLogger.debug(f"{len(links_gdf)=:,}")
-        WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
-        
-        # Use "External" for links outside counties
-        links_gdf['county'] = links_gdf['county'].fillna('External')
-        WranglerLogger.debug(f"links_gdf:\n{links_gdf}")
-
-        # The only links to adjust are those that matched to multiple counties
-        multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)].copy()
-        WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
-
-        if len(multicounty_links_gdf) > 0:
-            # Calculate intersection lengths for multi-county links
-            WranglerLogger.info(f"Found {len(multicounty_links_gdf):,} links in multicounty_links_gdf")
-            
-            # Calculate intersection length for each link-county pair
-            multicounty_links_gdf['intersection_length'] = multicounty_links_gdf.apply(
-                lambda row: row.geometry.intersection(
-                    county_gdf[county_gdf['county'] == row['county']].iloc[0].geometry
-                ).length if not pd.isna(row['county']) else 0,
-                axis=1
-            )
-            
-            # Sorting by index (ascending), intersection_length (descending)
-            multicounty_links_gdf.sort_values(
-                by=['A','B','key','intersection_length'],
-                ascending=[True, True, True, False],
-                inplace=True)
-            WranglerLogger.debug(f"multicounty_links_gdf:\n{multicounty_links_gdf}")
-            # drop duplicates now, keeping first
-            multicounty_links_gdf.drop_duplicates(subset=['A','B','key'], keep='first', inplace=True)
-            WranglerLogger.debug(f"After dropping duplicates: multicounty_links_gdf:\n{multicounty_links_gdf}")
-            
-            # put them back together
-            links_gdf = pd.concat([
-                links_gdf.drop_duplicates(subset=['A','B','key'], keep=False), # single-county links
-                multicounty_links_gdf
-            ])
-            # verify that each link is only represented once
-            multicounty_links_gdf = links_gdf[links_gdf.duplicated(subset=['A','B','key'], keep=False)]
-            assert(len(multicounty_links_gdf)==0)
-
-            # drop temporary columns
-            links_gdf.drop(columns=['index_right','intersection_length'], inplace=True)
-            links_gdf.reset_index(drop=True, inplace=True)
-            
-        # Drop the extra columns from spatial join
-        links_gdf = links_gdf.drop(columns=['index_right'], errors='ignore')
-
-        WranglerLogger.debug(f"links_gdf with one county per link:\n{links_gdf}")
-
-        # Sort nodes by county for consistent numbering
-        nodes_gdf = nodes_gdf.sort_values('county').reset_index(drop=True)
-        WranglerLogger.debug(f"nodes_gdf:\n{nodes_gdf}")
-
-        # revert to LAT_LON_CRS
-        county_gdf.to_crs(LAT_LON_CRS, inplace=True)
-        links_gdf.to_crs(LAT_LON_CRS, inplace=True)
-        nodes_gdf.to_crs(LAT_LON_CRS, inplace=True)    
+        links_gdf, nodes_gdf = assign_county_to_geodataframes(links_gdf, nodes_gdf, base_output_dir)
+        # set non-Bay Area counties to external
+        links_gdf.loc[ ~links_gdf['county'].isin(MTC_COUNTIES), 'county'] = MTCCounty.EXTERNAL.value
+        nodes_gdf.loc[ ~nodes_gdf['county'].isin(MTC_COUNTIES), 'county'] = MTCCounty.EXTERNAL.value
     else:
         # Original single-county logic
         links_gdf['county'] = county
