@@ -2393,12 +2393,12 @@ def step6_create_transit_network(
 
         # set drive_access to true for centroid connectors
         # these were temporarily turned off so buses wouldn't route through them
-        roadway_network.links_df.loc[ roadway_network.links_df['roadway'] == 'centroid connector', 'drive_access'] = 1
+        roadway_network.links_df.loc[ roadway_network.links_df['roadway'] == 'centroid connector', 'drive_access'] = True
         # set walk and bike access for maz connectors
         roadway_network.links_df.loc[
-            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'walk_access'] = 1
+            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'walk_access'] = True
         roadway_network.links_df.loc[
-            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'bike_access'] = 1
+            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'bike_access'] = True
         # assign new transit links to FT=99
         roadway_network.links_df.loc [ roadway_network.links_df['roadway'] == 'transit', 'ft'] = MTCFacilityType.NOT_ASSIGNED
         
