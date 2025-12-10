@@ -18,12 +18,14 @@ USAGE = __doc__
 import argparse
 import pandas as pd
 import pathlib
+import pprint
 import shutil
 
 import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler.scenario import load_scenario
 from network_wrangler.roadway.model_roadway import ModelRoadwayNetwork
+from network_wrangler.models.gtfs.types import RouteType
 
 import inro.emme.desktop.app as _app
 import inro.emme.database.emmebank as _emmebank
@@ -33,6 +35,17 @@ import models.mtc_network
 
 # for model/scenario config
 from tm2py.config import Configuration
+
+# mapping from RouteType to Emme transit mode description
+ROUTE_TYPE_TO_EMME_TRANSIT_MODE = {
+    RouteType.TRAM       :'light_rail',
+    RouteType.SUBWAY     :'light_rail',
+    RouteType.RAIL       :'heavy_rail',
+    RouteType.BUS        :'local_bus',
+    RouteType.FERRY      :'ferry',
+    RouteType.CABLE_TRAM :'light_rail',
+    RouteType.TROLLEYBUS :'local_bus',
+}
 
 def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     """ Fill in missing fields in the model_roadway_net tables
@@ -203,9 +216,9 @@ def create_emmebank_network(
     emme_emmebank.coord_unit_length=1.0/5280.0  # coord_unit = feet
     emme_emmebank.title = f"{network_mode}_network"
     WranglerLogger.info(f"Created emme_emmebank {emme_emmebank}")
-    WranglerLogger.info(f"{emme_emmebank.unit_of_length=}")
-    WranglerLogger.info(f"{emme_emmebank.coord_unit_length=}")
-    WranglerLogger.info(f"{emme_emmebank.dimensions=}")
+    WranglerLogger.debug(f"{emme_emmebank.unit_of_length=}")
+    WranglerLogger.debug(f"{emme_emmebank.coord_unit_length=}")
+    WranglerLogger.debug(f"{emme_emmebank.dimensions=}")
 
     # create emme Scenario object
     emme_scenario = emme_emmebank.create_scenario(tm2_config.emme.all_day_scenario_id)
@@ -249,22 +262,60 @@ def create_emmebank_network(
     # get Network object from scenario
     emme_network = emme_scenario.get_network()
 
+    # save for later use in this method
+    # { mode.description: {'emme_mode_id':one letter, 'type':'AUTO'|'AUX_TRANSIT'|'TRANSIT'}}
+    emme_modes = {}
+    # { (agency_id, route_type): emme_transit_vehicle_id number}
+    emme_transit_vehicles = {}
+
     # create modes
-    # general drive
-    # TODO: update for network_mode
     emme_network.create_mode('AUTO', tm2_config.highway.generic_highway_mode_code)
     emme_network.mode(tm2_config.highway.generic_highway_mode_code).description = "car"
+    emme_modes['car'] = {'emme_mode_id':tm2_config.highway.generic_highway_mode_code, 'type': 'AUTO'}
 
     for transit_mode_config in tm2_config.transit.modes:
         # WranglerLogger.debug(f"transit_mode_config: {transit_mode_config}")
-        if transit_mode_config.description in ['drive_acc','knrdummy','pnrdummy']:
-            emme_network.create_mode(transit_mode_config.assign_type, transit_mode_config.mode_id)
-            emme_network.mode(transit_mode_config.mode_id).description = transit_mode_config.description
-            WranglerLogger.debug(
-                f"Added drive mode with type='{transit_mode_config.assign_type}' "
-                f"id='{transit_mode_config.mode_id}' "
-                f"description='{transit_mode_config.description}'"
-            )
+        if network_mode == 'drive':
+            # for drive, only include these
+            if not transit_mode_config.description in ['drive_acc','knrdummy','pnrdummy']: continue
+
+        emme_network.create_mode(transit_mode_config.assign_type, transit_mode_config.mode_id)
+        emme_network.mode(transit_mode_config.mode_id).description = transit_mode_config.description
+        emme_modes[transit_mode_config.description] = {
+            'emme_mode_id':transit_mode_config.mode_id,
+            'type': transit_mode_config.assign_type
+        }
+    WranglerLogger.debug(f"emme_modes: {pprint.pformat(emme_modes)}")
+
+    # create transit vehicle types
+    if network_mode == 'transit':
+        # simple assumption: one per agency and mode (e.g. Muni bus)
+        # for agency in mtc_scenario.transit_net.feed.agencies
+        # TODO: this is overly simple; need to distinguish between rail types, local vs express bus
+        WranglerLogger.info(f"Creating transit vehicles for agencies x mode")
+        WranglerLogger.debug(f"agencies:\n{mtc_scenario.transit_net.feed.agencies}")
+        WranglerLogger.debug(f"routes:\n{mtc_scenario.transit_net.feed.routes}")
+        WranglerLogger.debug(f"trips:\n{mtc_scenario.transit_net.feed.trips}")
+        WranglerLogger.debug(f"frequencies:\n{mtc_scenario.transit_net.feed.frequencies}")
+        for agency_index, agency_row in mtc_scenario.transit_net.feed.agencies.iterrows():
+            agency_id = agency_row['agency_id']
+            agency_route_types = mtc_scenario.transit_net.feed.routes.loc[ 
+                mtc_scenario.transit_net.feed.routes['agency_id'] == agency_id,
+                'route_type'
+            ].drop_duplicates().tolist()
+            agency_route_types.sort() # sort in place
+            WranglerLogger.debug(f"agency {agency_id} serves route_type {agency_route_types}")
+            for agency_route_type in agency_route_types:
+                # create unique id for this transit vehicle
+                transit_vehicle_id = len(emme_transit_vehicles) + 1
+                emme_mode_description = ROUTE_TYPE_TO_EMME_TRANSIT_MODE[agency_route_type]
+                emme_mode_id = emme_modes[emme_mode_description]['emme_mode_id']
+                emme_transit_vehicle = emme_network.create_transit_vehicle(id=transit_vehicle_id, mode_id=emme_mode_id)
+                # set description
+                emme_transit_vehicle.description = f"{agency_id} {RouteType(agency_route_type).name}"
+                # record
+                emme_transit_vehicles[(agency_id, RouteType(agency_route_type))] = transit_vehicle_id
+        WranglerLogger.debug(f"emme_transit_vehicles: {pprint.pformat(emme_transit_vehicles)}")
 
     # Network.create_node() for centroids and nodes
     # TAZs and then MAZs and then all other nodes
@@ -305,21 +356,44 @@ def create_emmebank_network(
         WranglerLogger.info(f"Wrote {xwalk_file}")
 
     # Network.create_link() for links
-    default_modes = tm2_config.highway.generic_highway_mode_code
+    rail_modes = ''
+    ferry_modes = ''
+    if network_mode == 'drive':
+        default_modes = tm2_config.highway.generic_highway_mode_code
+    elif network_mode == 'transit':
+        default_modes = \
+            emme_modes['car']['emme_mode_id'] + \
+            emme_modes['local_bus']['emme_mode_id'] + \
+            emme_modes['exp_bus']['emme_mode_id']
+        rail_modes = \
+            emme_modes['comm_rail']['emme_mode_id'] + \
+            emme_modes['heavy_rail']['emme_mode_id'] + \
+            emme_modes['light_rail']['emme_mode_id']
+        ferry_modes = \
+            emme_modes['ferry']['emme_mode_id']
+    else:
+        default_modes = \
+            emme_modes['walk']['emme_mode_id']        
+
+    num_links_created = 0
     for index, row in model_roadway_net.links_df.iterrows():
+        link_modes = default_modes
 
         # don't include irrelevant links
         if network_mode == 'drive':
             if not row['drive_access']: continue
         if network_mode == 'transit':
             if not row['drive_access'] and not row['rail_only'] and not row['bus_only'] and not row['ferry_only']: continue
+            if row['rail_only']: link_modes = rail_modes
+            if row['ferry_only']: link_modes = ferry_modes
         if network_mode.startswith('active'):
             if not row['bike_access'] and not row['walk_access']: continue
+        
         
         emme_link = emme_network.create_link(
             i_node_id=model_node_id_to_emme_id[row['A']],
             j_node_id=model_node_id_to_emme_id[row['B']],
-            modes=default_modes
+            modes=link_modes
         )
         # set standard attributes
         emme_link['length']        = row['distance'] # distance is in miles so use this
@@ -347,6 +421,61 @@ def create_emmebank_network(
         # set mtc-specific attributes
         emme_link['#link_county']  = row['county']
         emme_link['#ft']           = row['ft']
+
+        num_links_created += 1
+
+    WranglerLogger.info(f"Created {num_links_created:,} emme links")
+
+    # create transit lines
+    if network_mode == "transit":
+        # we could join tables and just iterate through trips but this is readable enough...
+        for _, agency_row in mtc_scenario.transit_net.feed.agencies.iterrows():
+            agency_id = agency_row['agency_id']
+
+            agency_routes_df = mtc_scenario.transit_net.feed.routes.loc[
+                mtc_scenario.transit_net.feed.routes['agency_id'] == agency_id
+            ]
+            # iterate through routes for this agency
+            for _, route_row in agency_routes_df.iterrows():
+                route_id = route_row['route_id']
+                route_type = RouteType(route_row['route_type'])
+
+                # iterate through trips for this agency
+                route_trips_df = mtc_scenario.transit_net.feed.trips.loc[
+                    mtc_scenario.transit_net.feed.trips['route_id'] == route_id
+                ]
+
+                for _, trip_row in route_trips_df.iterrows():
+                    trip_id = trip_row['trip_id']
+                    shape_id = trip_row['shape_id']
+
+                    WranglerLogger.debug(f"Processing {agency_id} {route_id} {trip_id}")
+                    trip_stoptimes_df = mtc_scenario.transit_net.feed.stop_times.loc[
+                        mtc_scenario.transit_net.feed.stop_times['trip_id'] == trip_id
+                    ]
+                    trip_shapes_df = mtc_scenario.transit_net.feed.shapes.loc[
+                        mtc_scenario.transit_net.feed.shapes['shape_id'] == shape_id
+                    ]
+                    # iterate over shapes and stops
+                    WranglerLogger.debug(f"trip_shapes_df:\n{trip_shapes_df}")
+                    WranglerLogger.debug(f"trip_stoptimes_df:\n{trip_stoptimes_df}")
+
+                    # stop_id is still set in the shapes so we don't need to worry about stoptimes
+                    emme_transit_line_id = f"{route_id} {shape_id}"
+                    emme_transit_vehicle_id = emme_transit_vehicles[(agency_id,route_type)]
+                    shape_itinerary = trip_shapes_df['shape_model_node_id'].tolist()
+                    # convert to emme nodes
+                    emme_shape_itinerary = [model_node_id_to_emme_id[node_id] for node_id in shape_itinerary]
+
+                    try:
+                        emme_transit_line = emme_network.create_transit_line(
+                            emme_transit_line_id, emme_transit_vehicle_id, emme_shape_itinerary
+                        )
+                        emme_transit_line.description = f"{route_id} {route_row['route_long_name']}"
+                        # TODO: set stops
+                    except Exception as e:
+                        WranglerLogger.warning(f"Failed to create line [{emme_transit_line_id}]: {e}")
+
 
     # Scenario.publish_network
     emme_scenario.publish_network(emme_network)
