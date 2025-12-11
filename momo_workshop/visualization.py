@@ -225,12 +225,21 @@ def create_roadway_network_map(
         if bbox_name not in BOUNDING_BOXES:
             raise ValueError(f"Unknown bounding box: {bbox_name}. Available options: {list(BOUNDING_BOXES.keys())}")
         bbox = BOUNDING_BOXES[bbox_name]
-        subset_gdf = nw_gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]]
+        subset_gdf = nw_gdf.cx[bbox[0]:bbox[2], bbox[1]:bbox[3]].copy()
         print(f"Original network: {len(nw_gdf):,} links")
         print(f"Filtered to {bbox_name}: {len(subset_gdf):,} links")
     else:
-        subset_gdf = nw_gdf
+        subset_gdf = nw_gdf.copy()
         print(f"Network: {len(nw_gdf):,} links (no spatial filtering)")
+
+    # Drop columns with geometry objects that can't be JSON serialized by Folium
+    geom_cols_to_drop = [col for col in subset_gdf.columns
+                         if col != 'geometry' and subset_gdf[col].dtype == 'object'
+                         and len(subset_gdf) > 0
+                         and hasattr(subset_gdf[col].iloc[0], '__geo_interface__')]
+    if geom_cols_to_drop:
+        print(f"Dropping columns with non-serializable geometry: {geom_cols_to_drop}")
+        subset_gdf = subset_gdf.drop(columns=geom_cols_to_drop)
 
     # Create A + B column for tooltip
     subset_gdf["A & B (Combined)"] = subset_gdf["A"].astype(str) + ", " + subset_gdf["B"].astype(str) 
