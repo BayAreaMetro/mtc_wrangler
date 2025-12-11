@@ -383,8 +383,8 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
     links_gdf_clip["A & B (Combined)"] = links_gdf_clip["A"].astype(str) + ", " + links_gdf_clip["B"].astype(str)
 
     # Define tooltip fields
-    tooltip_fields = ["A & B (Combined)", "roadway", "roadway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only"]
-    tooltip_aliases = ["A & B:", "Roadway:", "Category:", "Name:", "Oneway:", "Reversed:", "Lanes:", "ML Lanes:", "Access:", "ML Access:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
+    tooltip_fields = ["A & B (Combined)", "roadway", "roadway_display", "name", "oneway", "reversed", "lanes", "access", "bike_access", "truck_access", "walk_access", "bus_only"]
+    tooltip_aliases = ["A & B:", "Roadway:", "Category:", "Name:", "Oneway:", "Reversed:", "Lanes:", "Access:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
     
     # Get bounds for the map
     bounds = orig_links_gdf_clip.total_bounds
