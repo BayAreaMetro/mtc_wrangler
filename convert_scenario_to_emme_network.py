@@ -428,6 +428,12 @@ def create_emmebank_network(
 
     # create transit lines
     if network_mode == "transit":
+        num_transit_lines_created = 0
+
+        # we're going to need to map nodes to emme nodes so let's just do it now
+        mtc_scenario.transit_net.feed.shapes['shape_emme_node_id'] = \
+            mtc_scenario.transit_net.feed.shapes['shape_model_node_id'].map(model_node_id_to_emme_id)
+
         # we could join tables and just iterate through trips but this is readable enough...
         for _, agency_row in mtc_scenario.transit_net.feed.agencies.iterrows():
             agency_id = agency_row['agency_id']
@@ -463,18 +469,40 @@ def create_emmebank_network(
                     # stop_id is still set in the shapes so we don't need to worry about stoptimes
                     emme_transit_line_id = f"{route_id} {shape_id}"
                     emme_transit_vehicle_id = emme_transit_vehicles[(agency_id,route_type)]
-                    shape_itinerary = trip_shapes_df['shape_model_node_id'].tolist()
-                    # convert to emme nodes
-                    emme_shape_itinerary = [model_node_id_to_emme_id[node_id] for node_id in shape_itinerary]
+                    emme_shape_itinerary = trip_shapes_df['shape_emme_node_id'].tolist()
+                    stop_id_itinerary = trip_shapes_df['stop_id'].tolist()
+                    assert(len(emme_shape_itinerary) == len(stop_id_itinerary))
+                    WranglerLogger.debug(f"stop_id_itinerary: {stop_id_itinerary}")
 
                     try:
                         emme_transit_line = emme_network.create_transit_line(
                             emme_transit_line_id, emme_transit_vehicle_id, emme_shape_itinerary
                         )
                         emme_transit_line.description = f"{route_id} {route_row['route_long_name']}"
-                        # TODO: set stops
+
+                        # each node defaults to being a stop
+                        # disallow alightings and boardings for non-stop nodes
+                        stop_id_idx = 0
+                        for emme_transit_segment in emme_transit_line.segments():
+                            WranglerLogger.debug(
+                                f"emme_transit_segment "
+                                f"id={emme_transit_segment.id} "
+                                f"i_node={emme_transit_segment.i_node} "
+                                f"j_node={emme_transit_segment.j_node} "
+                                f"loop_index={emme_transit_segment.loop_index}"
+                            )
+                            # if it's not a stop, disallow alightings, boardings
+                            if stop_id_itinerary[stop_id_idx] is None:
+                                emme_transit_segment.allow_alightings = False
+                                emme_transit_segment.allow_boardings = False
+                                WranglerLogger.debug(f"Disallowing alightings and boardings")
+                            stop_id_idx += 1
+
+                        num_transit_lines_created += 1
                     except Exception as e:
                         WranglerLogger.warning(f"Failed to create line [{emme_transit_line_id}]: {e}")
+
+        WranglerLogger.info(f"Created {num_transit_lines_created:,} emme transit lines")
 
 
     # Scenario.publish_network
@@ -594,10 +622,9 @@ if __name__ == "__main__":
     emme_app.project.name = mtc_scenario.name
 
     # we're going to create emmebank databases by mode:
-    # drive, transit, active
-
-    # active mode networks are too big so get split into two
-    for network_mode in ['drive','transit','active_north','active_south']:
+    # drive, transit
+    # TODO: WAIT WAIT WAIT ARE WE?
+    for network_mode in ['drive','transit']:
         create_emmebank_network(network_mode, mtc_scenario, model_roadway_net, tm2_config, emme_app)
 
     # list project databases
