@@ -22,8 +22,8 @@ BOUNDING_BOXES = {
     'Bay_Area': [-123.0, 36.9, -121.0, 38.9]
 }
 
-# Dictionary mapping highway types to display categories
-HIGHWAY_CATEGORY_MAP = {
+# Dictionary mapping roadway types to display categories
+ROADWAY_CATEGORY_MAP = {
     # Transit links
     'transit': 'Transit',
     'busway': 'Transit',
@@ -206,12 +206,12 @@ def create_roadway_network_map(
 ) -> folium.Map:
     """Create an interactive Folium map of roadway network links.
     
-    Creates an interactive map with color-coded highway types and tooltips showing link attributes.
+    Creates an interactive map with color-coded roadway types and tooltips showing link attributes.
     Can optionally filter to a specific bounding box area.
     
     Args:
         nw_gdf (gpd.GeoDataFrame): A GeoDataFrame containing network links with columns including
-            'A', 'B', 'highway', 'name', 'oneway', 'reversed', 'lanes', 'bike_access',
+            'A', 'B', 'roadway', 'name', 'oneway', 'reversed', 'lanes', 'bike_access',
             'truck_access', 'walk_access', 'bus_only', 'ferry_only', 'rail_only'.
         output_html_file (Optional[Path | str]): If provided, saves the map to this HTML file path.
             Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
@@ -236,17 +236,17 @@ def create_roadway_network_map(
     # Create A + B column for tooltip
     subset_gdf["A & B (Combined)"] = subset_gdf["A"].astype(str) + ", " + subset_gdf["B"].astype(str) 
     
-    # Create highway_display column with aggregate categories
-    # Check for unknown highway types
-    unknown_highways = set(subset_gdf['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
-    if unknown_highways:
-        print(f"ERROR: Unknown highway types found: {unknown_highways}")
-        raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
+    # Create roadway_display column with aggregate categories
+    # Check for unknown roadway types
+    unknown_roadways = set(subset_gdf['roadway'].unique()) - set(ROADWAY_CATEGORY_MAP.keys())
+    if unknown_roadways:
+        print(f"ERROR: Unknown roadway types found: {unknown_roadways}")
+        raise ValueError(f"Unknown roadway types: {unknown_roadways}. Please add them to ROADWAY_CATEGORY_MAP.")
     
-    subset_gdf['highway_display'] = subset_gdf['highway'].map(HIGHWAY_CATEGORY_MAP)
+    subset_gdf['roadway_display'] = subset_gdf['roadway'].map(ROADWAY_CATEGORY_MAP)
 
     # Define the tooltip columns
-    tooltip_cols = ["A & B (Combined)", "highway", "highway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only", "ferry_only", "rail_only"] 
+    tooltip_cols = ["A & B (Combined)", "roadway", "roadway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only", "ferry_only", "rail_only"] 
 
     # Calculate map center and zoom
     if bbox_name:
@@ -270,10 +270,10 @@ def create_roadway_network_map(
     )
     
     # Add each display category with custom styling
-    display_categories = subset_gdf['highway_display'].unique()
+    display_categories = subset_gdf['roadway_display'].unique()
     
     for display_cat in display_categories:
-        cat_subset = subset_gdf[subset_gdf['highway_display'] == display_cat]
+        cat_subset = subset_gdf[subset_gdf['roadway_display'] == display_cat]
         color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
         
         if not cat_subset.empty:
@@ -286,12 +286,12 @@ def create_roadway_network_map(
                 },
                 tooltip=folium.GeoJsonTooltip(
                     fields=tooltip_cols,
-                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"],
+                    aliases=["Nodes (A,B)", "Roadway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"],
                     style="background-color: white; color: #333333; font-family: arial; font-size: 11px; padding: 7px;"
                 ),
                 popup=folium.GeoJsonPopup(
                     fields=tooltip_cols,
-                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"]
+                    aliases=["Nodes (A,B)", "Roadway Type", "Category", "Name", "One-way", "Reversed", "Lanes", "ML Lanes", "Access", "ML Access", "Bike Access", "Truck Access", "Walk Access", "Bus Only", "Ferry Only", "Rail Only"]
                 )
             ).add_to(m)
     
@@ -347,13 +347,13 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
     """Create a dual-pane Folium map comparing original and simplified network links.
     
     Creates an interactive side-by-side map with original links on the left and simplified
-    links on the right, color-coded by highway type with a shared legend.
+    links on the right, color-coded by roadway type with a shared legend.
     
     Args:
         orig_links_gdf_clip (gpd.GeoDataFrame): Clipped GeoDataFrame of original network links
-            with a 'highway' column indicating road type.
+            with a 'roadway' column indicating road type.
         links_gdf_clip (gpd.GeoDataFrame): Clipped GeoDataFrame of simplified network links,
-            optionally with a 'highway' column.
+            optionally with a 'roadway' column.
         output_file (Optional[Path | str]): Full file path where the output HTML map will be saved.
             Can be either a string path or pathlib.Path object. If None, no file is saved. Defaults to None.
     
@@ -361,30 +361,30 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
         folium.plugins.DualMap: The dual map object showing both networks side by side.
             Optionally saves the map to the specified output file path if provided.
     """
-    # Check for unknown highway types
+    # Check for unknown roadway types
     orig_links_gdf_clip = orig_links_gdf_clip.copy()
-    unknown_highways = set(orig_links_gdf_clip['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
-    if unknown_highways:
-        print(f"ERROR: Unknown highway types in original links: {unknown_highways}")
-        raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
+    unknown_roadways = set(orig_links_gdf_clip['roadway'].unique()) - set(ROADWAY_CATEGORY_MAP.keys())
+    if unknown_roadways:
+        print(f"ERROR: Unknown roadway types in original links: {unknown_roadways}")
+        raise ValueError(f"Unknown roadway types: {unknown_roadways}. Please add them to ROADWAY_CATEGORY_MAP.")
     
-    orig_links_gdf_clip['highway_display'] = orig_links_gdf_clip['highway'].map(HIGHWAY_CATEGORY_MAP)
+    orig_links_gdf_clip['roadway_display'] = orig_links_gdf_clip['roadway'].map(ROADWAY_CATEGORY_MAP)
     
     links_gdf_clip = links_gdf_clip.copy()
-    if 'highway' in links_gdf_clip.columns:
-        unknown_highways = set(links_gdf_clip['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
-        if unknown_highways:
-            print(f"ERROR: Unknown highway types in simplified links: {unknown_highways}")
-            raise ValueError(f"Unknown highway types: {unknown_highways}. Please add them to HIGHWAY_CATEGORY_MAP.")
-        links_gdf_clip['highway_display'] = links_gdf_clip['highway'].map(HIGHWAY_CATEGORY_MAP)
+    if 'roadway' in links_gdf_clip.columns:
+        unknown_roadways = set(links_gdf_clip['roadway'].unique()) - set(ROADWAY_CATEGORY_MAP.keys())
+        if unknown_roadways:
+            print(f"ERROR: Unknown roadway types in simplified links: {unknown_roadways}")
+            raise ValueError(f"Unknown roadway types: {unknown_roadways}. Please add them to ROADWAY_CATEGORY_MAP.")
+        links_gdf_clip['roadway_display'] = links_gdf_clip['roadway'].map(ROADWAY_CATEGORY_MAP)
     
     # Create A + B columns for tooltip
     orig_links_gdf_clip["A & B (Combined)"] = orig_links_gdf_clip["A"].astype(str) + ", " + orig_links_gdf_clip["B"].astype(str)
     links_gdf_clip["A & B (Combined)"] = links_gdf_clip["A"].astype(str) + ", " + links_gdf_clip["B"].astype(str)
 
     # Define tooltip fields
-    tooltip_fields = ["A & B (Combined)", "highway", "highway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only"]
-    tooltip_aliases = ["A & B:", "Highway:", "Category:", "Name:", "Oneway:", "Reversed:", "Lanes:", "ML Lanes:", "Access:", "ML Access:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
+    tooltip_fields = ["A & B (Combined)", "roadway", "roadway_display", "name", "oneway", "reversed", "lanes", "ML_lanes", "access", "ML_access", "bike_access", "truck_access", "walk_access", "bus_only"]
+    tooltip_aliases = ["A & B:", "Roadway:", "Category:", "Name:", "Oneway:", "Reversed:", "Lanes:", "ML Lanes:", "Access:", "ML Access:", "Bike Access:", "Truck Access:", "Walk Access:", "Bus Only:"]
     
     # Get bounds for the map
     bounds = orig_links_gdf_clip.total_bounds
@@ -421,11 +421,11 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
     '''
 
     # Get unique display categories from original links
-    display_categories = sorted(orig_links_gdf_clip['highway_display'].unique())
+    display_categories = sorted(orig_links_gdf_clip['roadway_display'].unique())
 
     # Add original links to left map with category-based colors and widths
     for display_cat in display_categories:
-        cat_subset = orig_links_gdf_clip[orig_links_gdf_clip['highway_display'] == display_cat]
+        cat_subset = orig_links_gdf_clip[orig_links_gdf_clip['roadway_display'] == display_cat]
         color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
         
         if not cat_subset.empty:
@@ -443,8 +443,8 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
             ).add_to(m.m1)
 
     # Handle simplified links styling
-    if 'highway_display' not in links_gdf_clip.columns:
-        # If no highway column, use default blue styling
+    if 'roadway_display' not in links_gdf_clip.columns:
+        # If no roadway column, use default blue styling
         folium.GeoJson(
             links_gdf_clip,
             style_function=lambda x: {
@@ -459,9 +459,9 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
         ).add_to(m.m2)
     else:
         # Use category-based styling for simplified links
-        simplified_categories = sorted(links_gdf_clip['highway_display'].unique())
+        simplified_categories = sorted(links_gdf_clip['roadway_display'].unique())
         for display_cat in simplified_categories:
-            cat_subset = links_gdf_clip[links_gdf_clip['highway_display'] == display_cat]
+            cat_subset = links_gdf_clip[links_gdf_clip['roadway_display'] == display_cat]
             color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
             
             if not cat_subset.empty:
@@ -480,8 +480,8 @@ def map_original_and_simplified_links(orig_links_gdf_clip: gpd.GeoDataFrame, lin
 
     # Create dynamic simplified legend based on categories present
     all_categories = set(display_categories)
-    if 'highway_display' in links_gdf_clip.columns:
-        all_categories.update(links_gdf_clip['highway_display'].unique())
+    if 'roadway_display' in links_gdf_clip.columns:
+        all_categories.update(links_gdf_clip['roadway_display'].unique())
     
     legend_html = '<div style="position: fixed; bottom: 50px; left: 50px; width: 160px; height: auto; background-color: white; border:2px solid grey; z-index:9999; font-size:11px; padding: 7px">'
     legend_html += '<p style="margin: 2px 0;"><b>Link Categories</b></p>'
@@ -523,7 +523,7 @@ def create_roadway_transit_map(
     
     Args:
         roadway_gdf (gpd.GeoDataFrame): GeoDataFrame containing roadway network links with
-            columns including 'A', 'B', 'highway', 'name', 'lanes', etc.
+            columns including 'A', 'B', 'roadway', 'name', 'lanes', etc.
         transit_gdf (gpd.GeoDataFrame): GeoDataFrame containing transit network links.
             Should have geometry and optionally route/service information.
         output_html_file (Optional[Path | str]): If provided, saves the map to this HTML file path.
@@ -556,7 +556,7 @@ def create_roadway_transit_map(
         print(f"Transit network: {len(transit_gdf):,} links (no spatial filtering)")
     
     # Exclude centroid connectors (MAZ and TAZ) from roadway
-    roadway_subset = roadway_subset[~roadway_subset['highway'].isin(['MAZ', 'TAZ'])]
+    roadway_subset = roadway_subset[~roadway_subset['roadway'].isin(['MAZ', 'TAZ'])]
     print(f"Roadway network after removing centroids: {len(roadway_subset):,} links")
     
     # Filter transit by route_ids if specified
@@ -569,14 +569,14 @@ def create_roadway_transit_map(
     # Create A + B column for roadway tooltips
     roadway_subset["A & B (Combined)"] = roadway_subset["A"].astype(str) + ", " + roadway_subset["B"].astype(str)
     
-    # Create highway_display column for roadway
-    unknown_highways = set(roadway_subset['highway'].unique()) - set(HIGHWAY_CATEGORY_MAP.keys())
-    if unknown_highways:
-        print(f"WARNING: Unknown highway types found: {unknown_highways}. Treating as 'Other'.")
-        for unk in unknown_highways:
-            HIGHWAY_CATEGORY_MAP[unk] = 'Other'
+    # Create roadway_display column for roadway
+    unknown_roadways = set(roadway_subset['roadway'].unique()) - set(ROADWAY_CATEGORY_MAP.keys())
+    if unknown_roadways:
+        print(f"WARNING: Unknown roadway types found: {unknown_roadways}. Treating as 'Other'.")
+        for unk in unknown_roadways:
+            ROADWAY_CATEGORY_MAP[unk] = 'Other'
     
-    roadway_subset['highway_display'] = roadway_subset['highway'].map(HIGHWAY_CATEGORY_MAP)
+    roadway_subset['roadway_display'] = roadway_subset['roadway'].map(ROADWAY_CATEGORY_MAP)
     
     # Calculate map center and zoom
     if bbox_name:
@@ -600,10 +600,10 @@ def create_roadway_transit_map(
     )
     
     # Add roadway network layers by category (excluding centroids)
-    display_categories = roadway_subset['highway_display'].unique()
+    display_categories = roadway_subset['roadway_display'].unique()
     
     for display_cat in display_categories:
-        cat_subset = roadway_subset[roadway_subset['highway_display'] == display_cat]
+        cat_subset = roadway_subset[roadway_subset['roadway_display'] == display_cat]
         color, width = CATEGORY_STYLES.get(display_cat, ('#808080', 2))
         
         if not cat_subset.empty:
@@ -615,8 +615,8 @@ def create_roadway_transit_map(
                     'opacity': 0.7  # Slightly transparent for roadway
                 },
                 tooltip=folium.GeoJsonTooltip(
-                    fields=["A & B (Combined)", "highway", "highway_display", "name", "lanes"],
-                    aliases=["Nodes (A,B)", "Highway Type", "Category", "Name", "Lanes"],
+                    fields=["A & B (Combined)", "roadway", "roadway_display", "name", "lanes"],
+                    aliases=["Nodes (A,B)", "roadway Type", "Category", "Name", "Lanes"],
                     style="background-color: white; color: #333333; font-family: arial; font-size: 11px; padding: 7px;"
                 ),
                 name=f"Roadway: {display_cat}"
