@@ -81,7 +81,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from models import MTCRoadwayNetwork, MTCCounty, \
     MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
 from models.mtc_roadway_schema import MTCFacilityType
-from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, get_county_geodataframe, get_county_bbox, assign_county_to_geodataframes
+from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, MTC_TIME_PERIODS, get_county_geodataframe, get_county_bbox, assign_county_to_geodataframes
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -910,7 +910,7 @@ def add_facility_type(
     links_gdf['ft'] = links_gdf['ft'].astype('Int64')
 
 
-def create_managed_lanes_fields_v2(
+def create_managed_lanes_fields(
     roadway_net: RoadwayNetwork
 ) -> RoadwayNetwork:
     """Converts buslanes/HOV to managed lanes using apply_roadway_property_change().
@@ -927,11 +927,11 @@ def create_managed_lanes_fields_v2(
         Modified RoadwayNetwork with managed lane fields set
     """
     links_df = roadway_net.links_df
-    WranglerLogger.debug(f"create_managed_lanes_fields_v2():\n{links_df[['lanes']].value_counts()}")
+    WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_df[['lanes']].value_counts()}")
 
     # default HOV times: 5-10a, 3-7p
-    DEFAULT_HOV_TIME_AM = ['05:00', '10:00']
-    DEFAULT_HOV_TIME_PM = ['15:00', '19:00']
+    DEFAULT_HOV_TIME_AM = MTC_TIME_PERIODS['AM']
+    DEFAULT_HOV_TIME_PM = MTC_TIME_PERIODS['PM']
 
     # =========== Bus lanes with GP lanes ===========
     # When both buslanes and GP lanes exist, create managed lane for buses
@@ -1522,6 +1522,7 @@ def stepa_standardize_attributes(
     links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # additional simplifications
+    # TODO: Be more intelligent about this in the area of transit railway stops?
     # Delete links with roadway=='service' and no name
     nameless_service_links_gdf = links_gdf.loc[ 
         (links_gdf['roadway']=='service') & 
@@ -1538,8 +1539,8 @@ def stepa_standardize_attributes(
     add_facility_type(links_gdf)
 
     # NOTE: Managed lanes fields are now created in step3 after RoadwayNetwork creation
-    # using create_managed_lanes_fields_v2() which uses apply_roadway_property_change()
-    # Initialize columns needed by create_managed_lanes_fields_v2 if they don't exist
+    # using create_managed_lanes_fields() which uses apply_roadway_property_change()
+    # Initialize columns needed by create_managed_lanes_fields if they don't exist
     if 'hov:minimum' not in links_gdf.columns:
         links_gdf['hov:minimum'] = None
     if 'toll:hov' not in links_gdf.columns:
@@ -1574,7 +1575,7 @@ def stepa_standardize_attributes(
     # Outputs depending on specified OUTPUT_FORMAT
     
     # Subset the links columns and convert name, ref to strings
-    # Note: ML_lanes, access, ML_access are now created in step3 by create_managed_lanes_fields_v2
+    # Note: ML_lanes, access, ML_access are now created in step3 by create_managed_lanes_fields
     WranglerLogger.debug(f"links_gdf.dtypes:\n{links_gdf.dtypes}")
     links_non_list_cols = [
         'A','B','key','dupe_A_B','roadway','oneway','name','ref','geometry',
@@ -1978,13 +1979,13 @@ def step3_assign_county_node_link_numbering(
     
     # Prepare data for roadway network creation
     # Note: ML_access, ML_lanes, sc_ML_access, sc_ML_lanes, sc_ML_price are created by
-    # create_managed_lanes_fields_v2() after the network is created
+    # create_managed_lanes_fields() after the network is created
     LINK_COLS = [
         'A', 'B','osm_link_id','roadway','name','ref','oneway','reversed','length','geometry',
         'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
         'lanes','distance', 'county', 'model_link_id', 'shape_id',
         'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft',
-        'buslanes', 'hov:minimum', 'toll:hov'  # Needed for create_managed_lanes_fields_v2
+        'buslanes', 'hov:minimum', 'toll:hov'  # Needed for create_managed_lanes_fields
     ]
     NODE_COLS = [
         'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
@@ -2020,7 +2021,7 @@ def step3_assign_county_node_link_numbering(
     hack_rename_nodes(roadway_network)
 
     # Create managed lanes fields using the network_wrangler API
-    roadway_network = create_managed_lanes_fields_v2(roadway_network)
+    roadway_network = create_managed_lanes_fields(roadway_network)
 
     # Write roadway network to cache
     for roadway_format in output_formats:
@@ -2366,13 +2367,7 @@ def step6_create_transit_network(
     WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
 
     # Define time periods for frequency calculation
-    TIME_PERIODS = {
-        'EA': ['03:00','06:00'],  # 3a-6a
-        'AM': ['06:00','10:00'],  # 6a-10a
-        'MD': ['10:00','15:00'],  # 10a-3p
-        'PM': ['15:00','19:00'],  # 3p-7p
-        'EV': ['19:00','03:00'],  # 7p-3a (crosses midnight)
-    }
+
 
     try:
         feed = create_feed_from_gtfs_model(
@@ -2380,7 +2375,7 @@ def step6_create_transit_network(
             roadway_network,
             local_crs=LOCAL_CRS_FEET,
             crs_units="feet",
-            timeperiods=TIME_PERIODS,
+            timeperiods=MTC_TIME_PERIODS,
             frequency_method='median_headway',
             default_frequency_for_onetime_route=180*60,  # 180 minutes
             add_stations_and_links=True,
