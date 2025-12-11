@@ -30,9 +30,8 @@ ROADWAY_CATEGORY_MAP = {
     'rail': 'Transit',
     'light_rail': 'Transit',
     
-    # MAZ/TAZ centroids
-    'MAZ': 'MAZ connector',
-    'TAZ': 'TAZ connector',
+    # MAZ/TAZ centroid connectors
+    'centroid connector': 'Centroid connector',
 
     # Footway and cycle
     'footway': 'Footway/Cycle',
