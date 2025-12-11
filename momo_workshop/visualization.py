@@ -325,7 +325,7 @@ def clip_original_and_simplified_links(orig_links: gpd.GeoDataFrame, links_gdf: 
     Args:
         orig_links (gpd.GeoDataFrame): GeoDataFrame of original network links.
         links_gdf (gpd.GeoDataFrame): GeoDataFrame of simplified network links.
-        taz_gdf (gpd.GeoDataFrame): GeoDataFrame containing TAZ boundaries with a 'TAZ' column.
+        taz_gdf (gpd.GeoDataFrame): GeoDataFrame containing TAZ boundaries with a 'TAZ_NODE' column.
     
     Returns:
         tuple: A tuple containing:
@@ -334,7 +334,7 @@ def clip_original_and_simplified_links(orig_links: gpd.GeoDataFrame, links_gdf: 
     """
     # For taz mask
     taz_list = [360, 293, 292, 406, 562, 561, 565]
-    taz_gdf_subs = taz_gdf[taz_gdf["TAZ"].isin(taz_list)]
+    taz_gdf_subs = taz_gdf[taz_gdf["TAZ_NODE"].isin(taz_list)]
 
     # Clip
     orig_links_gdf_clip = gpd.clip(orig_links, taz_gdf_subs)
