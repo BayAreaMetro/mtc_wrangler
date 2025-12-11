@@ -78,10 +78,7 @@ from network_wrangler.roadway.selection import RoadwayLinkSelection
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from models import MTCRoadwayNetwork, MTCCounty, \
-    MTC_COUNTIES, COUNTY_NAME_TO_CENTROID_START_NUM, COUNTY_NAME_TO_NODE_START_NUM, COUNTY_NAME_TO_NUM
-from models.mtc_roadway_schema import MTCFacilityType
-from models.mtc_network import LOCAL_CRS_FEET, FEET_PER_MILE, MTC_TIME_PERIODS, get_county_geodataframe, get_county_bbox, assign_county_to_geodataframes
+import models
 
 from network_wrangler.roadway.nodes.name import add_roadway_link_names_to_nodes
 from network_wrangler.roadway.nodes.filters import filter_nodes_to_links
@@ -109,7 +106,7 @@ NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
 
 COUNTY_NAME_TO_GTFS_AGENCIES = {
-    MTCCounty.ALAMEDA.value: [
+    models.MTCCounty.ALAMEDA.value: [
         'AC', # AC Transit
         'BA', # BART
         # 'AM', # Capital Corridor - remove this because it dips in and out of county
@@ -118,7 +115,7 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
         'WH', # LAVTA
         'UC', # Union City Transi
     ],
-    MTCCounty.CONTRA_COSTA.value: [
+    models.MTCCounty.CONTRA_COSTA.value: [
         'CC', # County Connection
         'FS', # FAST
         'RV', # Rio Vista Delta Breeze
@@ -126,34 +123,34 @@ COUNTY_NAME_TO_GTFS_AGENCIES = {
         'VC', # Vacaville City Coach
         'WC', # WestCat (Western Contra Costa)
     ],
-    MTCCounty.MARIN.value: [
+    models.MTCCounty.MARIN.value: [
         'GG', # Golden Gate Transit
         'MA', # Marin Transit
         'SA', # SMART
     ],
-    MTCCounty.NAPA.value: [
+    models.MTCCounty.NAPA.value: [
         'VN', # VINE Transit
     ],
-    MTCCounty.SAN_FRANCISCO.value: [
+    models.MTCCounty.SAN_FRANCISCO.value: [
         'SF', # SF Muni
         'BA', # BART
         # 'GG', # Golden Gate Transit
         'CT', # Caltrain
         'MB', # Mission Bay TMA
     ],
-    MTCCounty.SAN_MATEO.value: [
+    models.MTCCounty.SAN_MATEO.value: [
         'SM', # SamTrans
         'BA', # BART
         # 'CT', # Caltrain
     ],
-    MTCCounty.SANTA_CLARA.value: [
+    models.MTCCounty.SANTA_CLARA.value: [
         'MV', # Mountain View Go
         'SC', # VTA
     ],
-    MTCCounty.SOLANO.value: [
+    models.MTCCounty.SOLANO.value: [
         'ST', # SolTrans
     ],
-    MTCCounty.SONOMA.value: [
+    models.MTCCounty.SONOMA.value: [
         'PE', # Petaluma
         'SR', # Santa Rosa CityBus
         'SO', # Sonoma County Transit
@@ -844,7 +841,7 @@ def add_facility_type(
 ):
     """Adds MTC facility type (ft) field to links based on OSM roadway classification.
 
-    Maps OSM highway types to MTC facility type codes as defined in MTCFacilityType enum.
+    Maps OSM highway types to MTC facility type codes as defined in models.MTCFacilityType enum.
 
     Args:
         links_gdf: The links GeoDataFrame to add ft field to
@@ -866,42 +863,42 @@ def add_facility_type(
     WranglerLogger.debug(f"add_facility_type(): roadway value counts:\n{links_gdf['roadway'].value_counts()}")
 
     # Initialize ft field with NOT_ASSIGNED as default
-    links_gdf['ft'] = MTCFacilityType.NOT_ASSIGNED
+    links_gdf['ft'] = models.MTCFacilityType.NOT_ASSIGNED
 
     # Freeway: motorway
     freeway_mask = links_gdf['roadway'] == 'motorway'
-    links_gdf.loc[freeway_mask, 'ft'] = MTCFacilityType.FREEWAY
+    links_gdf.loc[freeway_mask, 'ft'] = models.MTCFacilityType.FREEWAY
 
     # Expressway: trunk (major divided highways that aren't freeways)
     expressway_mask = links_gdf['roadway'] == 'trunk'
-    links_gdf.loc[expressway_mask, 'ft'] = MTCFacilityType.EXPRESSWAY
+    links_gdf.loc[expressway_mask, 'ft'] = models.MTCFacilityType.EXPRESSWAY
 
     # Ramp: motorway_link and trunk_link
     ramp_mask = links_gdf['roadway'].isin(['motorway_link', 'trunk_link'])
-    links_gdf.loc[ramp_mask, 'ft'] = MTCFacilityType.RAMP
+    links_gdf.loc[ramp_mask, 'ft'] = models.MTCFacilityType.RAMP
 
     # Arterials: primary and secondary roads
     # Divided arterial: oneway=True (one direction roadway, typically separated)
     # Undivided arterial: oneway=False (bidirectional roadway)
     primary_divided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == True)
-    links_gdf.loc[primary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
+    links_gdf.loc[primary_divided_mask, 'ft'] = models.MTCFacilityType.DIVIDED_ARTERIAL
 
     primary_undivided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == False)
-    links_gdf.loc[primary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
+    links_gdf.loc[primary_undivided_mask, 'ft'] = models.MTCFacilityType.UNDIVIDED_ARTERIAL
 
     secondary_divided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == True)
-    links_gdf.loc[secondary_divided_mask, 'ft'] = MTCFacilityType.DIVIDED_ARTERIAL
+    links_gdf.loc[secondary_divided_mask, 'ft'] = models.MTCFacilityType.DIVIDED_ARTERIAL
 
     secondary_undivided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == False)
-    links_gdf.loc[secondary_undivided_mask, 'ft'] = MTCFacilityType.UNDIVIDED_ARTERIAL
+    links_gdf.loc[secondary_undivided_mask, 'ft'] = models.MTCFacilityType.UNDIVIDED_ARTERIAL
 
     # Collector: tertiary roads, primary_link, secondary_link, tertiary_link
     collector_mask = links_gdf['roadway'].isin(['tertiary','primary_link','secondary_link','tertiary_link'])
-    links_gdf.loc[collector_mask, 'ft'] = MTCFacilityType.COLLECTOR
+    links_gdf.loc[collector_mask, 'ft'] = models.MTCFacilityType.COLLECTOR
 
     # Local: residential, service, unclassified, living_street
     local_mask = links_gdf['roadway'].isin(['residential', 'service', 'unclassified', 'living_street'])
-    links_gdf.loc[local_mask, 'ft'] = MTCFacilityType.LOCAL
+    links_gdf.loc[local_mask, 'ft'] = models.MTCFacilityType.LOCAL
 
     # Log the facility type distribution
     WranglerLogger.info(f"Facility type distribution:\n{links_gdf['ft'].value_counts().sort_index()}")
@@ -1432,10 +1429,10 @@ def stepa_standardize_attributes(
 
     # Handle county assignment
     if county == "Bay Area":
-        links_gdf, nodes_gdf = assign_county_to_geodataframes(links_gdf, nodes_gdf, base_output_dir)
+        links_gdf, nodes_gdf = models.assign_county_to_geodataframes(links_gdf, nodes_gdf, base_output_dir)
         # set non-Bay Area counties to external
-        links_gdf.loc[ ~links_gdf['county'].isin(MTC_COUNTIES), 'county'] = MTCCounty.EXTERNAL.value
-        nodes_gdf.loc[ ~nodes_gdf['county'].isin(MTC_COUNTIES), 'county'] = MTCCounty.EXTERNAL.value
+        links_gdf.loc[ ~links_gdf['county'].isin(models.MTC_COUNTIES), 'county'] = models.MTCCounty.EXTERNAL.value
+        nodes_gdf.loc[ ~nodes_gdf['county'].isin(models.MTC_COUNTIES), 'county'] = models.MTCCounty.EXTERNAL.value
     else:
         # Original single-county logic
         links_gdf['county'] = county
@@ -1453,7 +1450,7 @@ def stepa_standardize_attributes(
         county_node_count = county_mask.sum()
             
         # Get the starting node ID for this county
-        start_node_id = COUNTY_NAME_TO_NODE_START_NUM.get(county_name, 900_001)
+        start_node_id = models.COUNTY_NAME_TO_NODE_START_NUM.get(county_name, 900_001)
             
         # Assign sequential IDs to all nodes in this county
         county_indices = nodes_gdf[county_mask].index
@@ -1478,7 +1475,7 @@ def stepa_standardize_attributes(
         county_links_count = county_mask.sum()
             
         # Get the county number, use 0 for External or unknown counties
-        county_num = COUNTY_NAME_TO_NUM.get(link_county, 0)
+        county_num = models.COUNTY_NAME_TO_NUM.get(link_county, 0)
             
         # Calculate start_id based on county number
         start_id = county_num * 1_000_000
@@ -1516,9 +1513,9 @@ def stepa_standardize_attributes(
     links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
     links_gdf = handle_links_with_duplicate_A_B(links_gdf)
     # calculate length (in feet) directly; don't trust the existing value
-    links_gdf.to_crs(LOCAL_CRS_FEET, inplace=True)
+    links_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
     links_gdf['length'] = links_gdf.length
-    links_gdf['distance'] = links_gdf['length']/FEET_PER_MILE
+    links_gdf['distance'] = links_gdf['length']/models.FEET_PER_MILE
     links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # additional simplifications
@@ -1773,7 +1770,7 @@ def step1_download_osm_network(
     # Download new graph
     if county == 'Bay Area':
         WranglerLogger.info("Downloading network for Bay Area using bounding box...")
-        bbox = get_county_bbox(MTC_COUNTIES, base_output_dir)
+        bbox = models.get_county_bbox(models.MTC_COUNTIES, base_output_dir)
         WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
         g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
@@ -1824,7 +1821,7 @@ def step2_simplify_network_topology(
             WranglerLogger.warning(f"Could not read cached simplified graph: {e}")
     
     # Project to local CRS for accurate distance calculations
-    g = osmnx.projection.project_graph(g, to_crs=LOCAL_CRS_FEET)
+    g = osmnx.projection.project_graph(g, to_crs=models.LOCAL_CRS_FEET)
     
     # Simplify by consolidating intersections
     WranglerLogger.info(f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet...")
@@ -1914,7 +1911,7 @@ def step3_assign_county_node_link_numbering(
         output_dir: pathlib.Path,
         base_output_dir: pathlib.Path,
         output_formats: list[str],
-) -> MTCRoadwayNetwork:
+) -> models.MTCRoadwayNetwork:
     """
     Step 3: Assigns county-specific node/link numbering schemes.
 
@@ -1964,7 +1961,7 @@ def step3_assign_county_node_link_numbering(
         # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
         WranglerLogger.debug(f"base_network.links_df.dtypes\n:{base_network.links_df.dtypes}")
-        roadway_network = MTCRoadwayNetwork(
+        roadway_network = models.MTCRoadwayNetwork(
             nodes_df=base_network.nodes_df,
             links_df=base_network.links_df,
             shapes_df=base_network.shapes_df,
@@ -2004,7 +2001,7 @@ def step3_assign_county_node_link_numbering(
     base_network.nodes_df['taz_centroid'] = False
     base_network.nodes_df['maz_centroid'] = False
 
-    roadway_network = MTCRoadwayNetwork(
+    roadway_network = models.MTCRoadwayNetwork(
         nodes_df=base_network.nodes_df,
         links_df=base_network.links_df,
         shapes_df=base_network.shapes_df,
@@ -2092,9 +2089,9 @@ def step4_add_centroids_and_connectors(
             raise Exception(f"Couldn't find parquet or geojson file for {roadway_net_file}")
 
         shapes_gdf = cached_links_gdf.copy()
-        # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
+        # Load as base RoadwayNetwork first, then convert to models.MTCRoadwayNetwork
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
-        roadway_network = MTCRoadwayNetwork(
+        roadway_network = models.MTCRoadwayNetwork(
             nodes_df=base_network.nodes_df,
             links_df=base_network.links_df,
             shapes_df=base_network.shapes_df,
@@ -2119,7 +2116,7 @@ def step4_add_centroids_and_connectors(
         roadway_network, 
         zones_gdf_dict["TAZ"], "TAZ_NODE", 
         mode="drive", 
-        local_crs=LOCAL_CRS_FEET,
+        local_crs=models.LOCAL_CRS_FEET,
         zone_buffer_distance=20,
         num_centroid_connectors=4,
         max_mode_graph_degrees=4,
@@ -2128,7 +2125,7 @@ def step4_add_centroids_and_connectors(
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
             "drive_access": False,
             "roadway": "centroid connector",
-            "ft": MTCFacilityType.CONNECTOR,
+            "ft": models.MTCFacilityType.CONNECTOR,
         }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -2138,7 +2135,7 @@ def step4_add_centroids_and_connectors(
         roadway_network, 
         zones_gdf_dict["MAZ"], "MAZ_NODE", 
         mode="walk", 
-        local_crs=LOCAL_CRS_FEET,
+        local_crs=models.LOCAL_CRS_FEET,
         zone_buffer_distance=20,
         num_centroid_connectors=2,
         max_mode_graph_degrees=8, # make this larger because more footway links are oks
@@ -2147,7 +2144,7 @@ def step4_add_centroids_and_connectors(
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
             "drive_access": False,
             "roadway": "centroid connector",
-            "ft": MTCFacilityType.CONNECTOR,
+            "ft": models.MTCFacilityType.CONNECTOR,
         }
     )
     WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -2155,7 +2152,7 @@ def step4_add_centroids_and_connectors(
     # Set county attribute for centroid connector links based on centroid node IDs
     # Links with name="node to [TAZ,MAZ]_NODE" have centroid as A node
     # Links with name="[TAZ,MAZ]_NODE to node" have centroid as B node
-    for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
+    for county_name, node_start in models.COUNTY_NAME_TO_CENTROID_START_NUM.items():
         # For "X_NODE to node" pattern, centroid is A node
         mask_a = (roadway_network.links_df['name'].str.startswith('TAZ_NODE to', na=False) |
                   roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False))
@@ -2169,7 +2166,7 @@ def step4_add_centroids_and_connectors(
         roadway_network.links_df.loc[mask_b, 'county'] = county_name
 
     # Set county and centroid flags for TAZ and MAZ centroid nodes
-    for county_name, node_start in COUNTY_NAME_TO_CENTROID_START_NUM.items():
+    for county_name, node_start in models.COUNTY_NAME_TO_CENTROID_START_NUM.items():
         # Set taz_centroid and maz_centroid flags based on node name
         # First 10k: TAZ
         taz_mask = roadway_network.nodes_df['model_node_id'].between(node_start+1, node_start + 9_999)
@@ -2286,8 +2283,8 @@ def step5_prepare_gtfs_transit_data(
         drop_transit_agency(gtfs_model, agency_id=drop_agencies)
 
     # Filter by geographic boundary
-    county_gdf = get_county_geodataframe(base_output_dir, "CA")
-    county_gdf = county_gdf[county_gdf['NAME10'].isin(MTC_COUNTIES)].copy()
+    county_gdf = models.get_county_geodataframe(base_output_dir, "CA")
+    county_gdf = county_gdf[county_gdf['NAME10'].isin(models.MTC_COUNTIES)].copy()
     if county != "Bay Area":
         county_gdf = county_gdf.loc[county_gdf['NAME10'] == county]
         assert len(county_gdf) == 1
@@ -2373,13 +2370,13 @@ def step6_create_transit_network(
         feed = create_feed_from_gtfs_model(
             gtfs_model,
             roadway_network,
-            local_crs=LOCAL_CRS_FEET,
+            local_crs=models.LOCAL_CRS_FEET,
             crs_units="feet",
-            timeperiods=MTC_TIME_PERIODS,
+            timeperiods=models.MTC_TIME_PERIODS,
             frequency_method='median_headway',
             default_frequency_for_onetime_route=180*60,  # 180 minutes
             add_stations_and_links=True,
-            max_stop_distance = 0.10*FEET_PER_MILE,
+            max_stop_distance = 0.10*models.FEET_PER_MILE,
             trace_shape_ids=trace_shape_ids,
             # for 9-county Bay Area, ignore these - they're logged
             errors = "ignore"
@@ -2395,7 +2392,7 @@ def step6_create_transit_network(
         roadway_network.links_df.loc[
             roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'bike_access'] = True
         # assign new transit links to FT=99
-        roadway_network.links_df.loc [ roadway_network.links_df['roadway'] == 'transit', 'ft'] = MTCFacilityType.NOT_ASSIGNED
+        roadway_network.links_df.loc [ roadway_network.links_df['roadway'] == 'transit', 'ft'] = models.MTCFacilityType.NOT_ASSIGNED
         
     except Exception as e:
         WranglerLogger.error(f"Error creating transit stops and links: {e}")
@@ -2565,7 +2562,7 @@ if __name__ == "__main__":
     pd.options.mode.chained_assignment = 'raise'
 
     parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
-    parser.add_argument("county", type=str, choices=['Bay Area'] + list(MTC_COUNTIES))
+    parser.add_argument("county", type=str, choices=['Bay Area'] + list(models.MTC_COUNTIES))
     parser.add_argument("input_gtfs", type=pathlib.Path, help="Directory with GTFS feed files")
     parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')

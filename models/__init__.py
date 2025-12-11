@@ -27,7 +27,15 @@ Example:
     ```
 """
 
-from .mtc_network import MTCRoadwayNetwork
+from .mtc_network import (
+    LOCAL_CRS_FEET,
+    FEET_PER_MILE,
+    MTC_TIME_PERIODS,
+    get_county_geodataframe,
+    get_county_bbox,
+    assign_county_to_geodataframes,
+    MTCRoadwayNetwork
+)
 from .mtc_roadway_schema import (
     MTCCounty,
     MTC_COUNTIES,
