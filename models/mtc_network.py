@@ -26,6 +26,15 @@ LOCAL_CRS_FEET = "EPSG:2227"
 
 LOCAL_PRJ = 'PROJCS["NAD83 / California zone 3 (ftUS)",GEOGCS["NAD83",DATUM["North_American_Datum_1983",SPHEROID["GRS 1980",6378137,298.257222101,AUTHORITY["EPSG","7019"]],TOWGS84[0,0,0,0,0,0,0],AUTHORITY["EPSG","6269"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4269"]],PROJECTION["Lambert_Conformal_Conic_2SP"],PARAMETER["standard_parallel_1",38.43333333333333],PARAMETER["standard_parallel_2",37.06666666666667],PARAMETER["latitude_of_origin",36.5],PARAMETER["central_meridian",-120.5],PARAMETER["false_easting",6561666.667],PARAMETER["false_northing",1640416.667],UNIT["US survey foot",0.3048006096012192,AUTHORITY["EPSG","9003"]],AXIS["X",EAST],AXIS["Y",NORTH],AUTHORITY["EPSG","2227"]]'
 
+MTC_TIME_PERIODS = {
+    'EA': ['03:00','06:00'],  # 3a-6a
+    'AM': ['06:00','10:00'],  # 6a-10a
+    'MD': ['10:00','15:00'],  # 10a-3p
+    'PM': ['15:00','19:00'],  # 3p-7p
+    'EV': ['19:00','03:00'],  # 7p-3a (crosses midnight)
+}
+""" Used for TM1 and TM2: https://bayareametro.github.io/tm2py/inputs/?h=time+period#time-periods """
+
 def get_county_geodataframe(
         output_dir: pathlib.Path,
         state: str
