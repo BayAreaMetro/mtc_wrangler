@@ -927,8 +927,8 @@ def create_managed_lanes_fields(
     WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_df[['lanes']].value_counts()}")
 
     # default HOV times: 5-10a, 3-7p
-    DEFAULT_HOV_TIME_AM = MTC_TIME_PERIODS['AM']
-    DEFAULT_HOV_TIME_PM = MTC_TIME_PERIODS['PM']
+    DEFAULT_HOV_TIME_AM = models.MTC_TIME_PERIODS['AM']
+    DEFAULT_HOV_TIME_PM = models.MTC_TIME_PERIODS['PM']
 
     # =========== Bus lanes with GP lanes ===========
     # When both buslanes and GP lanes exist, create managed lane for buses
@@ -1341,7 +1341,7 @@ def stepa_standardize_attributes(
     8. Removes unnamed service roads to simplify network
     9. Writes outputs in multiple formats for different use cases
     
-    See ..\models\mtc_roadway_schema.py for county numbering system
+    See mtc_roadway_schema.py for county numbering system
     
     Args:
         g: NetworkX MultiDiGraph from OSMnx containing the road network.
