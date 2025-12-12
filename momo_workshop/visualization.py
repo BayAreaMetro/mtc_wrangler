@@ -233,10 +233,15 @@ def create_roadway_network_map(
         print(f"Network: {len(nw_gdf):,} links (no spatial filtering)")
 
     # Drop columns with geometry objects that can't be JSON serialized by Folium
-    geom_cols_to_drop = [col for col in subset_gdf.columns
-                         if col != 'geometry' and subset_gdf[col].dtype == 'object'
-                         and len(subset_gdf) > 0
-                         and hasattr(subset_gdf[col].iloc[0], '__geo_interface__')]
+    # Check all non-geometry columns for shapely objects
+    geom_cols_to_drop = []
+    if len(subset_gdf) > 0:
+        for col in subset_gdf.columns:
+            if col == 'geometry':
+                continue
+            first_valid = subset_gdf[col].dropna().iloc[0] if not subset_gdf[col].dropna().empty else None
+            if first_valid is not None and hasattr(first_valid, '__geo_interface__'):
+                geom_cols_to_drop.append(col)
     if geom_cols_to_drop:
         print(f"Dropping columns with non-serializable geometry: {geom_cols_to_drop}")
         subset_gdf = subset_gdf.drop(columns=geom_cols_to_drop)
