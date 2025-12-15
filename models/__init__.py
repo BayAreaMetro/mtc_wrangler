@@ -31,6 +31,7 @@ from .mtc_network import (
     LOCAL_CRS_FEET,
     FEET_PER_MILE,
     MTC_TIME_PERIODS,
+    TIME_PERIOD_TO_LABEL,
     get_county_geodataframe,
     get_county_bbox,
     assign_county_to_geodataframes,

@@ -35,6 +35,9 @@ MTC_TIME_PERIODS = {
 }
 """ Used for TM1 and TM2: https://bayareametro.github.io/tm2py/inputs/?h=time+period#time-periods """
 
+TIME_PERIOD_TO_LABEL = {'-'.join(value): key for key, value in MTC_TIME_PERIODS.items()}
+""" For lookup up from scoped links """
+
 def get_county_geodataframe(
         output_dir: pathlib.Path,
         state: str

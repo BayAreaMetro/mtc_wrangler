@@ -269,15 +269,28 @@ def create_emmebank_network(
     emme_transit_vehicles = {}
 
     # create modes
-    emme_network.create_mode('AUTO', tm2_config.highway.generic_highway_mode_code)
-    emme_network.mode(tm2_config.highway.generic_highway_mode_code).description = "car"
+    car_mode = emme_network.create_mode('AUTO', tm2_config.highway.generic_highway_mode_code)
+    car_mode.description = "car"
     emme_modes['car'] = {'emme_mode_id':tm2_config.highway.generic_highway_mode_code, 'type': 'AUTO'}
+
+    if network_mode == 'drive':
+        # add other highway modes
+        maz_auto_mode = emme_network.create_mode('AUX_AUTO', tm2_config.highway.maz_to_maz.mode_code)
+        maz_auto_mode.description = "maz_auto"
+        emme_modes['maz_auto'] = {'emme_mode_id': tm2_config.highway.maz_to_maz.mode_code, 'type':'AUX_AUTO'}
+
+        # add codes for other highway assignment classes: drive alone, shared ride, trucks, tolled classes, etc
+        for highway_class_config in tm2_config.highway.classes:
+            class_auto_mode = emme_network.create_mode('AUX_AUTO', highway_class_config.mode_code)
+            class_auto_mode.description = highway_class_config.name
+            emme_modes[highway_class_config.name] = {'emme_mode_id':highway_class_config.mode_code, 'type':'AUX_AUTO'}
+
 
     for transit_mode_config in tm2_config.transit.modes:
         # WranglerLogger.debug(f"transit_mode_config: {transit_mode_config}")
         if network_mode == 'drive':
             # for drive, only include these
-            if not transit_mode_config.description in ['drive_acc','knrdummy','pnrdummy']: continue
+            if not transit_mode_config.description in ['knrdummy','pnrdummy']: continue
 
         emme_network.create_mode(transit_mode_config.assign_type, transit_mode_config.mode_id)
         emme_network.mode(transit_mode_config.mode_id).description = transit_mode_config.description
@@ -484,18 +497,18 @@ def create_emmebank_network(
                         # disallow alightings and boardings for non-stop nodes
                         stop_id_idx = 0
                         for emme_transit_segment in emme_transit_line.segments():
-                            WranglerLogger.debug(
-                                f"emme_transit_segment "
-                                f"id={emme_transit_segment.id} "
-                                f"i_node={emme_transit_segment.i_node} "
-                                f"j_node={emme_transit_segment.j_node} "
-                                f"loop_index={emme_transit_segment.loop_index}"
-                            )
+                            # WranglerLogger.debug(
+                            #     f"emme_transit_segment "
+                            #     f"id={emme_transit_segment.id} "
+                            #     f"i_node={emme_transit_segment.i_node} "
+                            #     f"j_node={emme_transit_segment.j_node} "
+                            #     f"loop_index={emme_transit_segment.loop_index}"
+                            # )
                             # if it's not a stop, disallow alightings, boardings
                             if stop_id_itinerary[stop_id_idx] is None:
                                 emme_transit_segment.allow_alightings = False
                                 emme_transit_segment.allow_boardings = False
-                                WranglerLogger.debug(f"Disallowing alightings and boardings")
+                                # WranglerLogger.debug(f"Disallowing alightings and boardings")
                             stop_id_idx += 1
 
                         num_transit_lines_created += 1
@@ -504,11 +517,125 @@ def create_emmebank_network(
 
         WranglerLogger.info(f"Created {num_transit_lines_created:,} emme transit lines")
 
-
     # Scenario.publish_network
     emme_scenario.publish_network(emme_network)
     WranglerLogger.info(f"Published scenario network for {network_mode}")
+
+    # for checking for timeperiod scoped columns
+    scoped_lanes_mask  = model_roadway_net.links_df['sc_lanes'].apply(lambda x: isinstance(x, list))
+    scoped_access_mask = model_roadway_net.links_df['sc_access'].apply(lambda x: isinstance(x, list))
+    scoped_price_mask  = model_roadway_net.links_df['sc_price'].apply(lambda x: isinstance(x, list))
+
+    # update roadway links with scoped managed lanes
+    scoped_links_df = model_roadway_net.links_df.loc[ 
+        (model_roadway_net.links_df['managed'] == 1) &
+        (scoped_lanes_mask | scoped_access_mask | scoped_price_mask)
+    ].copy()
+    # map to emme node ids
+    scoped_links_df['A_emme'] = scoped_links_df['A'].map(model_node_id_to_emme_id)
+    scoped_links_df['B_emme'] = scoped_links_df['B'].map(model_node_id_to_emme_id)
+    scoped_links_df['GP_A_emme'] = scoped_links_df['GP_A'].map(model_node_id_to_emme_id)
+    scoped_links_df['GP_B_emme'] = scoped_links_df['GP_B'].map(model_node_id_to_emme_id)
+
+    WranglerLogger.debug(f"TIME_PERIOD_TO_LABEL:{models.TIME_PERIOD_TO_LABEL}")
+    WranglerLogger.debug(f"Scoped roadway links:\n{scoped_links_df}")
+    # default to 0
+    scoped_columns = []
+    for time_period in models.MTC_TIME_PERIODS.keys():
+        scoped_links_df[f'lanes {time_period}'] = 0
+        scoped_links_df[f'price {time_period}'] = 0
+        scoped_links_df[f'access {time_period}'] = 'all'
+        scoped_columns = scoped_columns + [f'lanes {time_period}',f'price {time_period}',f'access {time_period}']
+
+        # scoped_links_df[f'access {time_period}'] = 0
+    # this is slow but we don't typically have that many scoped links
+    for _, scoped_link in scoped_links_df.iterrows():
+        model_link_id = scoped_link.model_link_id
+        WranglerLogger.debug(f"model_link_id {model_link_id} scoped_link:\n{scoped_link}")
+
+        # if there are no lanes, nothing to do
+        if not isinstance(scoped_link.sc_lanes, list): continue
+
+        # convert to { time_period_str: price_val }
+        scoped_price_dict = {}
+        if isinstance(scoped_link.sc_price, list):
+            for scoped_price in scoped_link.sc_price:
+                time_period_str = f"{scoped_price.timespan[0]}-{scoped_price.timespan[1]}"
+                if time_period_str not in models.TIME_PERIOD_TO_LABEL: continue
+                scoped_price_dict[models.TIME_PERIOD_TO_LABEL[time_period_str]] = \
+                    scoped_price.value
+
+        # convert to { time_period_str: access_val }
+        scoped_access_dict = {}
+        if isinstance(scoped_link.sc_access, list):
+            for scoped_access in scoped_link.sc_access:
+                time_period_str = f"{scoped_access.timespan[0]}-{scoped_access.timespan[1]}"
+                if time_period_str not in models.TIME_PERIOD_TO_LABEL: continue
+                scoped_access_dict[models.TIME_PERIOD_TO_LABEL[time_period_str]] = \
+                    scoped_access.value
+
+        # go through the scoped lanes dicts
+        for scoped_lanes in scoped_link.sc_lanes:
+            WranglerLogger.debug(f"scoped_lanes: {scoped_lanes}")
+            # set 'lanes TIMEPERIOD'
+            time_period_str = f"{scoped_lanes.timespan[0]}-{scoped_lanes.timespan[1]}"
+            WranglerLogger.debug(f"time_period_str: {time_period_str}")
+            if time_period_str not in models.TIME_PERIOD_TO_LABEL: continue
+
+            time_period = models.TIME_PERIOD_TO_LABEL[time_period_str]
+            scoped_links_df.loc[ scoped_links_df['model_link_id']== model_link_id,
+                                f'lanes {time_period}'] = scoped_lanes.value
+
+            # set price
+            # TODO: update for TM2 toll lookup
+            if time_period in scoped_price_dict:
+                scoped_links_df.loc[ scoped_links_df['model_link_id']== model_link_id,
+                                    f'price {time_period}'] = scoped_price_dict[time_period]                
+
+            # express lanes access only applies for free -- so don't set if price is set...
+            elif time_period in scoped_access_dict:
+                scoped_links_df.loc[ scoped_links_df['model_link_id']== model_link_id,
+                                    f'access {time_period}'] = scoped_access_dict[time_period]
+
+    WranglerLogger.debug(
+        f"After preprocessing, Scoped roadway links:\n"
+        f"{scoped_links_df[['A','B','A_emme','B_emme','GP_A','GP_B','GP_A_emme','GP_B_emme','access','price','lanes']+scoped_columns]}"
+    )
+
+    # create time of day scenarios
+    for time_period_config in tm2_config.time_periods:
+        time_period = time_period_config.name.upper()
+        WranglerLogger.debug(f"Copying emme_scenario for {time_period}")
+        emme_period_scenario = emme_emmebank.copy_scenario(
+            source_id = emme_scenario.id,
+            destination_id = time_period_config.emme_scenario_id
+        )
+        emme_period_scenario.title = f"{network_mode}, {time_period}"
+        emme_period_network = emme_period_scenario.get_network()
+
+        # make updates
+        for _, scoped_link in scoped_links_df.iterrows():
+            # nothing to do
+            if scoped_link[f'lanes {time_period}'] == 0: continue
+
+            # otherwise, set lanes and remove from GP_lanes
+            managed_link = emme_period_network.link(scoped_link.A_emme, scoped_link.B_emme)
+            gp_link = emme_period_network.link(scoped_link.GP_A_emme, scoped_link.GP_B_emme)
+
+            managed_link.num_lanes = scoped_link[f'lanes {time_period}']
+            gp_link.num_lanes = max(gp_link.num_lanes - scoped_link[f'lanes {time_period}'], 0)
+
+            if scoped_link[f'price {time_period}'] > 0:
+                # TODO: price -> toll mapping, access?
+                pass
+            elif scoped_link[f'access {time_period}'] != 'all':
+                # TODO: update access via modes
+                pass
+
+        # Scenario.publish_network
+        emme_period_scenario.publish_network(emme_period_network)
     
+    return
 
 if __name__ == "__main__":
     # Setup pandas display options
