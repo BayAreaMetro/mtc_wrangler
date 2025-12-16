@@ -123,10 +123,12 @@ def create_emmebank_network(
         tm2_config: Configuration,
         emme_app: _app
 ):
-    """_summary_
+    """Creates an emmebank for the given network mode, including time-of-day scenarios with networks.
+
+    In terrible need of refactoring but I wanted to get it all down first.
 
     Args:
-        network_mode (str): One of 'drive', 'transit', active_north', 'active_south'
+        network_mode (str): One of 'drive', 'transit'
         mtc_scenario (network_wrangler.Scenario): The Scenario including roadway and transit networks
         model_roadway_net (ModelRoadwayNetwork): A model version of the roadway network, in case
           custom preprocessing is done
@@ -310,6 +312,20 @@ def create_emmebank_network(
         WranglerLogger.debug(f"routes:\n{mtc_scenario.transit_net.feed.routes}")
         WranglerLogger.debug(f"trips:\n{mtc_scenario.transit_net.feed.trips}")
         WranglerLogger.debug(f"frequencies:\n{mtc_scenario.transit_net.feed.frequencies}")
+
+        # add time period string
+        if 'time_period' not in mtc_scenario.transit_net.feed.frequencies.columns:
+            mtc_scenario.transit_net.feed.frequencies['start_time_str'] = \
+                mtc_scenario.transit_net.feed.frequencies['start_time'].dt.strftime('%H:%M')
+            mtc_scenario.transit_net.feed.frequencies['end_time_str'] = \
+                mtc_scenario.transit_net.feed.frequencies['end_time'].dt.strftime('%H:%M')
+            mtc_scenario.transit_net.feed.frequencies['time_str'] = \
+                mtc_scenario.transit_net.feed.frequencies['start_time_str'] + '-' + \
+                mtc_scenario.transit_net.feed.frequencies['end_time_str']
+            mtc_scenario.transit_net.feed.frequencies['time_period'] = \
+                mtc_scenario.transit_net.feed.frequencies['time_str'].map(models.TIME_PERIOD_TO_LABEL)
+        WranglerLogger.debug(f"frequencies:\n{mtc_scenario.transit_net.feed.frequencies}")
+
         for agency_index, agency_row in mtc_scenario.transit_net.feed.agencies.iterrows():
             agency_id = agency_row['agency_id']
             agency_route_types = mtc_scenario.transit_net.feed.routes.loc[ 
@@ -551,7 +567,7 @@ def create_emmebank_network(
     # this is slow but we don't typically have that many scoped links
     for _, scoped_link in scoped_links_df.iterrows():
         model_link_id = scoped_link.model_link_id
-        WranglerLogger.debug(f"model_link_id {model_link_id} scoped_link:\n{scoped_link}")
+        # WranglerLogger.debug(f"model_link_id {model_link_id} scoped_link:\n{scoped_link}")
 
         # if there are no lanes, nothing to do
         if not isinstance(scoped_link.sc_lanes, list): continue
@@ -576,10 +592,9 @@ def create_emmebank_network(
 
         # go through the scoped lanes dicts
         for scoped_lanes in scoped_link.sc_lanes:
-            WranglerLogger.debug(f"scoped_lanes: {scoped_lanes}")
+            # WranglerLogger.debug(f"scoped_lanes: {scoped_lanes}")
             # set 'lanes TIMEPERIOD'
             time_period_str = f"{scoped_lanes.timespan[0]}-{scoped_lanes.timespan[1]}"
-            WranglerLogger.debug(f"time_period_str: {time_period_str}")
             if time_period_str not in models.TIME_PERIOD_TO_LABEL: continue
 
             time_period = models.TIME_PERIOD_TO_LABEL[time_period_str]
@@ -605,7 +620,7 @@ def create_emmebank_network(
     # create time of day scenarios
     for time_period_config in tm2_config.time_periods:
         time_period = time_period_config.name.upper()
-        WranglerLogger.debug(f"Copying emme_scenario for {time_period}")
+        WranglerLogger.info(f"Creating emme_scenario for timeperiod='{time_period}' {type(time_period)}")
         emme_period_scenario = emme_emmebank.copy_scenario(
             source_id = emme_scenario.id,
             destination_id = time_period_config.emme_scenario_id
@@ -613,7 +628,8 @@ def create_emmebank_network(
         emme_period_scenario.title = f"{network_mode}, {time_period}"
         emme_period_network = emme_period_scenario.get_network()
 
-        # make updates
+        # make updates to roadway based on scoped links
+        links_modified = 0
         for _, scoped_link in scoped_links_df.iterrows():
             # nothing to do
             if scoped_link[f'lanes {time_period}'] == 0: continue
@@ -624,6 +640,7 @@ def create_emmebank_network(
 
             managed_link.num_lanes = scoped_link[f'lanes {time_period}']
             gp_link.num_lanes = max(gp_link.num_lanes - scoped_link[f'lanes {time_period}'], 0)
+            links_modified += 2
 
             if scoped_link[f'price {time_period}'] > 0:
                 # TODO: price -> toll mapping, access?
@@ -632,6 +649,39 @@ def create_emmebank_network(
                 # TODO: update access via modes
                 pass
 
+        WranglerLogger.info(f"  Updated {links_modified} roadway links for time-period specific modifications")
+        # for transit, we need to handle time periods and set frequencies
+        if network_mode != "transit": continue
+
+        deleted_lines = 0
+        modified_lines = 0
+        for _, trip in mtc_scenario.transit_net.feed.trips.iterrows():
+            emme_transit_line_id = f"{trip.route_id} {trip.shape_id}"
+            # get frequencies for this trip
+            trip_freqs_df = mtc_scenario.transit_net.feed.frequencies.loc[ mtc_scenario.transit_net.feed.frequencies['trip_id'] == trip.trip_id]
+            trip_freqs_df.set_index('time_period', inplace=True)
+            WranglerLogger.debug(f"trip_freqs_df:\n{trip_freqs_df}")
+            headway_secs = trip_freqs_df['headway_secs'].to_dict()
+            WranglerLogger.debug(f"headway_secs:{headway_secs} keys={headway_secs.keys()} types={[type(key) for key in headway_secs.keys()]}")
+            WranglerLogger.debug(f"{time_period} in headway_secs.keys()? {time_period in headway_secs.keys()}")
+
+            # delete the transit line if it's not running in this time period
+            if time_period in headway_secs.keys(): 
+                # set headway, which is in minutes
+                headway_min = headway_secs[time_period]/60.0
+                if headway_min > 1000:
+                    WranglerLogger.warning(
+                        f"Headway for {trip.trip_id} in {time_period} is "
+                        f"{headway_min} mins, which is higher than EMME max; setting to 999"
+                    )
+                    headway_min = 999
+                emme_period_network.transit_line(emme_transit_line_id).headway = headway_min
+                modified_lines += 1
+            else:
+                emme_period_network.delete_transit_line(emme_transit_line_id)
+                deleted_lines += 1
+
+        WranglerLogger.info(f"  Deleted {deleted_lines:,} transit lines and set headways for {modified_lines:,} for this time period")
         # Scenario.publish_network
         emme_period_scenario.publish_network(emme_period_network)
     
