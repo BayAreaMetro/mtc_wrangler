@@ -2374,7 +2374,7 @@ def step6_create_transit_network(
             crs_units="feet",
             timeperiods=models.MTC_TIME_PERIODS,
             frequency_method='median_headway',
-            default_frequency_for_onetime_route=180*60,  # 180 minutes
+            default_frequency_for_onetime_route=180,
             add_stations_and_links=True,
             max_stop_distance = 0.10*models.FEET_PER_MILE,
             trace_shape_ids=trace_shape_ids,
