@@ -9,6 +9,7 @@ import geopandas as gpd
 import seaborn as sns
 import folium
 from folium import plugins
+import shapely.geometry.base
 
 # Dictionary of common bounding boxes [min_lon, min_lat, max_lon, max_lat]
 BOUNDING_BOXES = {
@@ -239,9 +240,12 @@ def create_roadway_network_map(
         for col in subset_gdf.columns:
             if col == 'geometry':
                 continue
-            first_valid = subset_gdf[col].dropna().iloc[0] if not subset_gdf[col].dropna().empty else None
-            if first_valid is not None and hasattr(first_valid, '__geo_interface__'):
-                geom_cols_to_drop.append(col)
+            try:
+                first_valid = subset_gdf[col].dropna().iloc[0] if not subset_gdf[col].dropna().empty else None
+                if first_valid is not None and isinstance(first_valid, shapely.geometry.base.BaseGeometry):
+                    geom_cols_to_drop.append(col)
+            except Exception:
+                pass  # Skip columns that cause issues during inspection
     if geom_cols_to_drop:
         print(f"Dropping columns with non-serializable geometry: {geom_cols_to_drop}")
         subset_gdf = subset_gdf.drop(columns=geom_cols_to_drop)
@@ -567,7 +571,28 @@ def create_roadway_transit_map(
         transit_subset = transit_gdf.copy()
         print(f"Roadway network: {len(roadway_gdf):,} links (no spatial filtering)")
         print(f"Transit network: {len(transit_gdf):,} links (no spatial filtering)")
-    
+
+    # Drop columns with geometry objects that can't be JSON serialized by Folium
+    def drop_geometry_columns(gdf, name):
+        geom_cols_to_drop = []
+        if len(gdf) > 0:
+            for col in gdf.columns:
+                if col == 'geometry':
+                    continue
+                try:
+                    first_valid = gdf[col].dropna().iloc[0] if not gdf[col].dropna().empty else None
+                    if first_valid is not None and isinstance(first_valid, shapely.geometry.base.BaseGeometry):
+                        geom_cols_to_drop.append(col)
+                except Exception:
+                    pass  # Skip columns that cause issues during inspection
+        if geom_cols_to_drop:
+            print(f"Dropping {name} columns with non-serializable geometry: {geom_cols_to_drop}")
+            return gdf.drop(columns=geom_cols_to_drop)
+        return gdf
+
+    roadway_subset = drop_geometry_columns(roadway_subset, "roadway")
+    transit_subset = drop_geometry_columns(transit_subset, "transit")
+
     # Exclude centroid connectors (MAZ and TAZ) from roadway
     roadway_subset = roadway_subset[~roadway_subset['roadway'].isin(['MAZ', 'TAZ'])]
     print(f"Roadway network after removing centroids: {len(roadway_subset):,} links")
