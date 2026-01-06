@@ -915,7 +915,7 @@ def create_managed_lanes_fields(
     This version uses the network_wrangler apply_roadway_property_change() API
     which operates on a RoadwayNetwork object with proper selection and validation.
 
-    Expects columns: buslanes, hov:minimum, toll:hov (initialized in stepa_standardize_attributes)
+    Expects columns: buslanes, hov:minimum, toll, toll:hov (initialized in stepa_standardize_attributes)
 
     Args:
         roadway_net: RoadwayNetwork to modify
@@ -924,6 +924,7 @@ def create_managed_lanes_fields(
         Modified RoadwayNetwork with managed lane fields set
     """
     links_df = roadway_net.links_df
+    links_df['tolltype'] = models.MTCTollType.NO_TOLL
     WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_df[['lanes']].value_counts()}")
 
     # default HOV times: 5-10a, 3-7p
@@ -986,6 +987,7 @@ def create_managed_lanes_fields(
     links_df = roadway_net.links_df
 
     WranglerLogger.debug(f"hov:minimum\n{links_df['hov:minimum'].apply(str).value_counts(dropna=False)}")
+    WranglerLogger.debug(f"toll\n{links_df['toll'].apply(str).value_counts(dropna=False)}")
     WranglerLogger.debug(f"toll:hov\n{links_df['toll:hov'].apply(str).value_counts(dropna=False)}")
 
     # =========== HOV2/Express lanes ===========
@@ -1019,6 +1021,7 @@ def create_managed_lanes_fields(
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
                 ]
             },
+            "tolltype": { "set": models.MTCTollType.EXPRESS_LANE },
         }
         roadway_net = apply_roadway_property_change(
             roadway_net, selection, property_changes, project_name="hov2_express"
@@ -1057,6 +1060,7 @@ def create_managed_lanes_fields(
                     {"timespan": DEFAULT_HOV_TIME_PM, "set": 3.0},
                 ]
             },
+            "tolltype": { "set": models.MTCTollType.EXPRESS_LANE },
         }
         roadway_net = apply_roadway_property_change(
             roadway_net, selection, property_changes, project_name="hov3_express"
@@ -1142,7 +1146,7 @@ def create_managed_lanes_fields(
         WranglerLogger.debug(f"links_df['sc_ML_price'].value_counts(dropna=False):\n{links_df['sc_ML_price'].value_counts(dropna=False)}")
 
     # we're done with these; drop them
-    roadway_net.links_df.drop(columns=['buslanes', 'hov:minimum', 'toll:hov'], inplace=True)
+    roadway_net.links_df.drop(columns=['buslanes', 'hov:minimum', 'toll', 'toll:hov'], inplace=True)
 
     return roadway_net
 
@@ -1540,6 +1544,8 @@ def stepa_standardize_attributes(
     # Initialize columns needed by create_managed_lanes_fields if they don't exist
     if 'hov:minimum' not in links_gdf.columns:
         links_gdf['hov:minimum'] = None
+    if 'toll' not in  links_gdf.columns:
+        links_gdf['toll'] = None
     if 'toll:hov' not in links_gdf.columns:
         links_gdf['toll:hov'] = None
     if 'buslanes' not in links_gdf.columns:
@@ -1578,7 +1584,7 @@ def stepa_standardize_attributes(
         'A','B','key','dupe_A_B','roadway','oneway','name','ref','geometry',
         'drive_access','bike_access','walk_access','truck_access','bus_only',
         'lanes','length','distance','county','model_link_id','shape_id','ft',
-        'buslanes', 'hov:minimum', 'toll:hov'  # Kept for step3 processing
+        'buslanes', 'hov:minimum', 'toll', 'toll:hov'  # Kept for step3 processing
     ]
     parquet_links_gdf = links_gdf[links_non_list_cols].copy()
     parquet_links_gdf['name'] = parquet_links_gdf['name'].astype(str)
@@ -1719,6 +1725,73 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
         WranglerLogger.debug(f"gdfs[{zone_type}] type={type(gdfs[zone_type])}\n{gdfs[zone_type]}")
 
     return gdfs
+
+def fetch_toll_gantry_nodes(
+        base_output_dir: pathlib.Path
+    ) -> gpd.GeoDataFrame:
+    """
+    Fetch nodes with highway=toll_gantry from OpenStreetMap using Overpass API.
+    
+    Args:
+        base_output_dir: Base directory for shared resources (to get bounding box)
+        
+    Returns:
+        GeoDataFrame with toll gantry nodes, columns:
+        - osmid: OSM node ID
+        - lat, lon: coordinates
+        - geometry: Point geometry
+        - All OSM tags (e.g., name, ref, etc.)
+    """
+    WranglerLogger.info(f"Fetching toll gantry nodes for Bay Area")
+    
+    # Get bounding box for Bay Area
+    bbox = models.get_county_bbox(models.MTC_COUNTIES, base_output_dir)
+
+    # bbox format from models.get_county_bbox is (west, south, east, north)
+    west, south, east, north = bbox
+    
+    # Overpass API query
+    overpass_url = "http://overpass-api.de/api/interpreter"
+    overpass_query = f"""
+    [out:json][timeout:60];
+    (
+      node["highway"="toll_gantry"]({south},{west},{north},{east});
+    );
+    out body;
+    """
+    
+    WranglerLogger.debug(f"Querying Overpass API with bbox: south={south:.6f}, west={west:.6f}, north={north:.6f}, east={east:.6f}")
+    
+    try:
+        response = requests.get(overpass_url, params={'data': overpass_query}, timeout=120)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        WranglerLogger.error(f"Failed to fetch toll gantry nodes from Overpass API: {e}")
+        return gpd.GeoDataFrame(columns=['osmid', 'lat', 'lon', 'geometry'], crs=LAT_LON_CRS)
+    
+    # Convert to GeoDataFrame
+    nodes = []
+    for element in data.get('elements', []):
+        node_data = {
+            'osmid': element['id'],
+            'lat': element['lat'],
+            'lon': element['lon'],
+            'geometry': shapely.geometry.Point(element['lon'], element['lat'])
+        }
+        # Add all OSM tags
+        node_data.update(element.get('tags', {}))
+        nodes.append(node_data)
+    
+    if not nodes:
+        WranglerLogger.warning(f"No toll gantry nodes found for Bay Area")
+        return gpd.GeoDataFrame(columns=['osmid', 'lat', 'lon', 'geometry'], crs=LAT_LON_CRS)
+    
+    gdf = gpd.GeoDataFrame(nodes, crs=LAT_LON_CRS)
+    WranglerLogger.info(f"Found {len(gdf)} toll gantry nodes for Bay Area")
+    WranglerLogger.debug(f"Toll gantry nodes:\n{gdf}")
+    
+    return gdf
 
 # =============================================================================
 # 7-STEP NETWORK CREATION WORKFLOW FUNCTIONS
@@ -1916,8 +1989,7 @@ def step3_assign_county_node_link_numbering(
     Step 3: Assigns county-specific node/link numbering schemes.
 
     Creates a RoadwayNetwork object with model-specific node and link IDs
-    based on the county numbering system. This step is already integrated
-    into step3_standardize_attributes.
+    based on the county numbering system.
 
     Args:
         links_gdf: Links GeoDataFrame from step 3
@@ -1982,10 +2054,10 @@ def step3_assign_county_node_link_numbering(
         'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
         'lanes','distance', 'county', 'model_link_id', 'shape_id',
         'drive_centroid_fit', 'walk_centroid_fit', 'direction', 'ft',
-        'buslanes', 'hov:minimum', 'toll:hov'  # Needed for create_managed_lanes_fields
+        'buslanes', 'hov:minimum', 'toll', 'toll:hov'  # Needed for create_managed_lanes_fields
     ]
     NODE_COLS = [
-        'osmid','osm_node_id','X', 'Y', 'street_count', 'geometry', 'county', 'model_node_id'
+        'osmid','osm_node_id','X', 'Y', 'highway', 'street_count', 'geometry', 'county', 'model_node_id'
     ]
     
     clean_links_gdf = links_gdf[LINK_COLS].copy()
@@ -2016,6 +2088,12 @@ def step3_assign_county_node_link_numbering(
 
     # Apply node name hacks for specific locations
     hack_rename_nodes(roadway_network)
+
+    # fetch nodes for toll gantries
+    toll_gantry_gdf = fetch_toll_gantry_nodes(base_output_dir)
+    toll_gantry_file = base_output_dir / "toll_gantry_nodes.geojson"
+    toll_gantry_gdf.to_file(toll_gantry_file)
+    WranglerLogger.info(f"Wrote {toll_gantry_file}")
 
     # Create managed lanes fields using the network_wrangler API
     roadway_network = create_managed_lanes_fields(roadway_network)

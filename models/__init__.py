@@ -46,6 +46,7 @@ from .mtc_roadway_schema import (
     MTCFacilityType,
     MTCRoadLinksTable,
     MTCRoadNodesTable,
+    MTCTollType,
     MTCUseClass,
 )
 

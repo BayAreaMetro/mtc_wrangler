@@ -120,6 +120,13 @@ class MTCFacilityType(IntEnum):
     CONNECTOR = 8
     NOT_ASSIGNED = 99
 
+class MTCTollType(str, Enum):
+    """Type of toll"""
+    BRIDGE = "bridge"
+    EXPRESS_LANE = "express_lane"
+    CORDON = "cordon"
+    ALL_LANE_TOLLING = "all_lane_tolling"
+    NO_TOLL = "no_toll"
 
 class MTCUseClass(IntEnum):
     """Vehicle-class restrictions classification codes.
@@ -152,6 +159,7 @@ class MTCRoadLinksTable(RoadLinksTable):
     ft: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
     # TODO: Should this be automatically created from the access attribute in the RoadLinksTable?
     useclass: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
+    tolltype: Series[str] = Field(coerce=True, nullable=False, default=MTCTollType.NO_TOLL.value)
     tollbooth: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
     tollseg: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
 
@@ -175,6 +183,12 @@ class MTCRoadLinksTable(RoadLinksTable):
         # Allow NaN for optional field
         return useclass.isna() | useclass.isin(valid_useclasses)
 
+    @pa.check("tolltype")
+    def check_valid_tolltype(cls, tolltype: Series) -> Series[bool]:
+        """Validate that tolltype values are valid MTCTollType enum values."""
+        valid_tolltypes = {e.value for e in MTCTollType}
+        return tolltype.isin(valid_tolltypes)
+    
     class Config(RoadLinksTable.Config):
         """Inherit parent configuration settings."""
         pass
