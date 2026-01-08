@@ -88,8 +88,9 @@ from network_wrangler.transit.feed.feed import Feed
 from network_wrangler.transit.network import TransitNetwork
 from network_wrangler.transit.io import load_feed_from_path, write_transit, load_transit
 from network_wrangler.models.gtfs.types import RouteType
-from network_wrangler.utils.transit import \
-  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model
+from network_wrangler.transit.filter import \
+  drop_transit_agency, filter_transit_by_boundary
+from network_wrangler.utils.transit import create_feed_from_gtfs_model
 from network_wrangler.roadway.centroids import FitForCentroidConnection, add_centroid_nodes, add_centroid_connectors
 
 # Suppress FutureWarning about downcasting in fillna
@@ -924,7 +925,6 @@ def create_managed_lanes_fields(
         Modified RoadwayNetwork with managed lane fields set
     """
     links_df = roadway_net.links_df
-    links_df['tolltype'] = models.MTCTollType.NO_TOLL
     WranglerLogger.debug(f"create_managed_lanes_fields():\n{links_df[['lanes']].value_counts()}")
 
     # default HOV times: 5-10a, 3-7p
@@ -1793,6 +1793,89 @@ def fetch_toll_gantry_nodes(
     
     return gdf
 
+def set_bridge_toll_links(
+        links_gdf: gpd.GeoDataFrame,
+        base_output_dir: pathlib.Path,
+        buffer_distance_feet: float = 20.0
+    ) -> gpd.GeoDataFrame:
+    """
+    Set tolltype='bridge' for roadway links with drive access that intersect toll gantries.
+    Fetches toll gantry nodes from OSM and saves them to a file.
+    
+    Args:
+        links_gdf: GeoDataFrame of roadway links
+        base_output_dir: Base directory for shared resources (to get bounding box and save gantry file)
+        buffer_distance_feet: Buffer distance around toll gantries to check for intersections (in feet)
+        
+    Returns:
+        Modified links_gdf with tolltype set to 'bridge' for links near toll gantries
+    """
+    # Fetch toll gantry nodes from OSM
+    toll_gantry_gdf = fetch_toll_gantry_nodes(base_output_dir)
+    toll_gantry_file = base_output_dir / "toll_gantry_nodes.geojson"
+    
+    # Save toll gantry nodes to file
+    if len(toll_gantry_gdf) > 0:
+        toll_gantry_gdf.to_file(toll_gantry_file)
+        WranglerLogger.info(f"Wrote {toll_gantry_file}")
+    
+    if len(toll_gantry_gdf) == 0:
+        # check for cached version
+        toll_gantry_gdf = gpd.read_file(toll_gantry_file)
+        WranglerLogger.info(f"No toll gantries found, checking cached file {toll_gantry_file}")
+
+        if len(toll_gantry_gdf) == 0:
+            WranglerLogger.warning(f"No cached toll gantries found; skipping setting bridge toll links")
+            return links_gdf
+    
+    WranglerLogger.info(f"Checking {len(links_gdf):,} links for toll gantry intersections")
+    
+    # initialize tolltype
+    links_gdf['tolltype'] = models.MTCTollType.NO_TOLL
+
+    # Ensure both are in the same CRS (local feet)
+    links_gdf_local = links_gdf.to_crs(models.LOCAL_CRS_FEET)
+    toll_gantry_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
+    
+    # Buffer the toll gantry points
+    toll_gantry_gdf.rename(columns={'osmid':'tollgantry_osmid'}, inplace=True)
+    toll_gantry_gdf['geometry'] = toll_gantry_gdf.geometry.buffer(buffer_distance_feet)
+    
+    # Find links with drive access
+    drive_access_mask = links_gdf_local['drive_access'] == True
+    WranglerLogger.debug(f"Found {drive_access_mask.sum():,} links with drive access")
+    
+    # Perform spatial join to find intersections
+    intersecting_links = gpd.sjoin(
+        links_gdf_local[drive_access_mask],
+        toll_gantry_gdf[['geometry', 'tollgantry_osmid']],
+        how='inner',
+        predicate='intersects'
+    )
+    
+    if len(intersecting_links) == 0:
+        WranglerLogger.info("No links intersect toll gantries")
+        return links_gdf
+    
+    # Get unique link indices that intersect toll gantries
+    WranglerLogger.debug(f"intersecting_links:\n{intersecting_links}")
+    toll_link_indices = intersecting_links.index.unique()
+    WranglerLogger.info(f"Found {len(toll_link_indices):,} links intersecting toll gantries (within {buffer_distance_feet} feet)")
+    
+    # Log some details about which gantries were matched
+    gantry_counts = intersecting_links.groupby('tollgantry_osmid').size()
+    WranglerLogger.debug(f"Links per toll gantry:\n{gantry_counts}")
+    
+    # Set tolltype to 'bridge' for these links
+    links_gdf.loc[toll_link_indices, 'tolltype'] = models.MTCTollType.BRIDGE
+    
+    # Log which links were updated
+    updated_links = links_gdf.loc[toll_link_indices, 
+        ['model_link_id', 'roadway', 'name', 'ref', 'tolltype']]
+    WranglerLogger.debug(f"Updated links to tolltype=BRIDGE:\n{updated_links}")
+    
+    return links_gdf
+
 # =============================================================================
 # 7-STEP NETWORK CREATION WORKFLOW FUNCTIONS
 # =============================================================================
@@ -2089,11 +2172,8 @@ def step3_assign_county_node_link_numbering(
     # Apply node name hacks for specific locations
     hack_rename_nodes(roadway_network)
 
-    # fetch nodes for toll gantries
-    toll_gantry_gdf = fetch_toll_gantry_nodes(base_output_dir)
-    toll_gantry_file = base_output_dir / "toll_gantry_nodes.geojson"
-    toll_gantry_gdf.to_file(toll_gantry_file)
-    WranglerLogger.info(f"Wrote {toll_gantry_file}")
+    # Set tolltype='bridge' for links that intersect toll gantries
+    roadway_network.links_df = set_bridge_toll_links(roadway_network.links_df, base_output_dir)
 
     # Create managed lanes fields using the network_wrangler API
     roadway_network = create_managed_lanes_fields(roadway_network)
@@ -2459,7 +2539,7 @@ def step6_create_transit_network(
             # for 9-county Bay Area, ignore these - they're logged
             errors = "ignore"
         )
-        WranglerLogger.info(f"Created transit Feed object with stops and links integrated")
+        WranglerLogger.info(f"Created transit Feed object with stops and links integrated:\n{feed}")
 
         # set drive_access to true for centroid connectors
         # these were temporarily turned off so buses wouldn't route through them

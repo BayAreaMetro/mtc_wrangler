@@ -26,13 +26,15 @@ import network_wrangler
 from network_wrangler import WranglerLogger
 from network_wrangler import write_transit
 from network_wrangler.transit.network import TransitNetwork
-from network_wrangler.utils.transit import \
-  drop_transit_agency, filter_transit_by_boundary, create_feed_from_gtfs_model, truncate_route_at_stop
+from network_wrangler.transit.filter import \
+  drop_transit_agency, filter_transit_by_boundary, truncate_route_at_stop
+from network_wrangler.utils.transit import create_feed_from_gtfs_model
 from network_wrangler.errors import \
   NodeNotFoundError, TransitValidationError
 from network_wrangler.roadway.nodes.create import generate_node_ids
 from network_wrangler.roadway.io import load_roadway_from_dir, write_roadway
 from network_wrangler.transit.io import load_feed_from_path
+from network_wrangler.models.gtfs.types import RouteType
 
 INPUT_2015v12 = pathlib.Path(r"E:\Box\Modeling and Surveys\Development\Travel Model Two Conversion\Model Inputs\2015-tm22-dev-sprint-03\standard_network_after_project_cards")
 INPUT_2023GTFS = pathlib.Path("M:\\Data\\Transit\\511\\2023-10")

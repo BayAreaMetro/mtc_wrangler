@@ -82,6 +82,19 @@ Counties are numbered based on their node ID range order:
 6=Solano, 7=Napa, 8=Sonoma, 9=Marin
 """
 
+BRIDGE_TOLLBOOTHS = {
+    1: 'Benicia-Martinez Bridge',
+    2: 'Carquinez Bridge',
+    3: 'Richmond-San Rafael Bridge',
+    4: 'Golden Gate Bridge',
+    5: 'San Francisco Bay Bridge',
+    6: 'San Mateo-Hayward Bridge',
+    7: 'Dumbarton Bridge',
+    8: 'Antioch Bridge'
+}
+"""Numbering consistent with TM1 TOLLCLASS:
+
+See https://github.com/BayAreaMetro/modeling-website/wiki/MasterNetworkLookupTables#toll-code-tollclass"""
 
 class MTCFacilityType(IntEnum):
     """Functional class (ft) codes for highway assignment.
@@ -122,11 +135,11 @@ class MTCFacilityType(IntEnum):
 
 class MTCTollType(str, Enum):
     """Type of toll"""
+    NO_TOLL = "no_toll"
     BRIDGE = "bridge"
     EXPRESS_LANE = "express_lane"
     CORDON = "cordon"
     ALL_LANE_TOLLING = "all_lane_tolling"
-    NO_TOLL = "no_toll"
 
 class MTCUseClass(IntEnum):
     """Vehicle-class restrictions classification codes.
