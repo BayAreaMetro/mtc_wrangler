@@ -82,15 +82,15 @@ Counties are numbered based on their node ID range order:
 6=Solano, 7=Napa, 8=Sonoma, 9=Marin
 """
 
-BRIDGE_TOLLBOOTHS = {
-    1: 'Benicia-Martinez Bridge',
-    2: 'Carquinez Bridge',
-    3: 'Richmond-San Rafael Bridge',
-    4: 'Golden Gate Bridge',
-    5: 'San Francisco Bay Bridge',
-    6: 'San Mateo-Hayward Bridge',
-    7: 'Dumbarton Bridge',
-    8: 'Antioch Bridge'
+GANTRY_NAME_TO_TOLLBOOTH = {
+    'Benicia-Martinez Bridge Toll'           : 1,
+    'Carquinez Bridge Toll'                  : 2,
+    'Richmond-San Rafael Bridge Toll'        : 3,
+    'Golden Gate Bridge Automated Toll Plaza': 4,
+    'San Francisco-Oakland Bay Bridge Toll'  : 5,
+    'San Mateo-Hayward Bridge Toll'          : 6,
+    'Dumbarton Bridge Toll'                  : 7,
+    'Antioch Bridge Toll'                    : 8,
 }
 """Numbering consistent with TM1 TOLLCLASS:
 

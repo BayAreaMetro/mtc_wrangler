@@ -43,6 +43,7 @@ from .mtc_roadway_schema import (
     COUNTY_NAME_TO_CENTROID_START_NUM,
     COUNTY_NAME_TO_NODE_START_NUM,
     COUNTY_NAME_TO_NUM,
+    GANTRY_NAME_TO_TOLLBOOTH,
     MTCFacilityType,
     MTCRoadLinksTable,
     MTCRoadNodesTable,

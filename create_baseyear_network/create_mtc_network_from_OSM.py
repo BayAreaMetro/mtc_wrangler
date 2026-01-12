@@ -1828,6 +1828,15 @@ def set_bridge_toll_links(
             WranglerLogger.warning(f"No cached toll gantries found; skipping setting bridge toll links")
             return links_gdf
     
+    # add tollbooth to toll_gantry_gdf
+    toll_gantry_gdf['tollbooth'] = toll_gantry_gdf['name'].map(models.GANTRY_NAME_TO_TOLLBOOTH)
+    # error on any that failed to map
+    null_tollbooth = toll_gantry_gdf.loc[ pd.isna(toll_gantry_gdf['tollbooth']) ]
+    if len(null_tollbooth) > 0:
+        error_str = f"The following toll gantry names were not recognized using GANTRY_NAME_TO_TOLLBOOTH:\n{null_tollbooth}"
+        WranglerLogger.fatal(error_str)
+        raise KeyError(error_str)
+
     WranglerLogger.info(f"Checking {len(links_gdf):,} links for toll gantry intersections")
     
     # initialize tolltype
@@ -1838,7 +1847,7 @@ def set_bridge_toll_links(
     toll_gantry_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
     
     # Buffer the toll gantry points
-    toll_gantry_gdf.rename(columns={'osmid':'tollgantry_osmid'}, inplace=True)
+    toll_gantry_gdf.rename(columns={'osmid':'tollgantry_osmid', 'name':'tollname'}, inplace=True)
     toll_gantry_gdf['geometry'] = toll_gantry_gdf.geometry.buffer(buffer_distance_feet)
     
     # Find links with drive access
@@ -1848,7 +1857,7 @@ def set_bridge_toll_links(
     # Perform spatial join to find intersections
     intersecting_links = gpd.sjoin(
         links_gdf_local[drive_access_mask],
-        toll_gantry_gdf[['geometry', 'tollgantry_osmid']],
+        toll_gantry_gdf[['geometry', 'tollgantry_osmid', 'tollbooth', 'tollname']],
         how='inner',
         predicate='intersects'
     )
@@ -1869,9 +1878,15 @@ def set_bridge_toll_links(
     # Set tolltype to 'bridge' for these links
     links_gdf.loc[toll_link_indices, 'tolltype'] = models.MTCTollType.BRIDGE
     
+    # Copy tollbooth and toll gantry name to the bridge links
+    # For links that intersect multiple gantries, use the first match
+    first_match = intersecting_links.groupby(intersecting_links.index).first()
+    links_gdf.loc[toll_link_indices, 'tollbooth'] = first_match['tollbooth']
+    links_gdf.loc[toll_link_indices, 'tollname'] = first_match['tollname']
+    
     # Log which links were updated
     updated_links = links_gdf.loc[toll_link_indices, 
-        ['model_link_id', 'roadway', 'name', 'ref', 'tolltype']]
+        ['model_link_id', 'roadway', 'name', 'ref', 'tolltype', 'tollbooth', 'tollname']]
     WranglerLogger.debug(f"Updated links to tolltype=BRIDGE:\n{updated_links}")
     
     return links_gdf
