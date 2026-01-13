@@ -184,8 +184,8 @@ def create_emmebank_network(
     # starting with versions from E:\TM2\emme_project\Database_highway\emmebank
     emme_emmebank_dimensions = {
         'scenarios'             : 6 if network_mode in ['drive','transit'] else 1, # all day, plus one per time period
-        'centroids'             : 5_000,
-        'regular_nodes'         : 994_999,
+        'centroids'             : 20_000,
+        'regular_nodes'         : 979_999,
         'links'                 : 2_000_000,
         'transit_vehicles'      : 600,
         'transit_lines'         : 40_000,
@@ -427,7 +427,13 @@ def create_emmebank_network(
         # set standard attributes
         emme_link['length']        = row['distance'] # distance is in miles so use this
         emme_link['type']          = 1 # what is this?
-        emme_link['num_lanes']     = row['lanes']
+        # this is an emme requirement
+        if row['lanes'] > 9.9:
+            WranglerLogger.warning(f"The following link has lanes>9.9: setting to 9:\n{row}")
+            emme_link['num_lanes'] = 9
+        else:
+            emme_link['num_lanes'] = row['lanes']
+
         # set intermediate coordinates, if there are any
         link_coords = list(row['geometry'].coords)
         if len(link_coords) > 2: 
@@ -496,7 +502,16 @@ def create_emmebank_network(
                     WranglerLogger.debug(f"trip_stoptimes_df:\n{trip_stoptimes_df}")
 
                     # stop_id is still set in the shapes so we don't need to worry about stoptimes
-                    emme_transit_line_id = f"{route_id} {shape_id}"
+                    # Emme transit line documentation:
+                    # - Space (space), comma (,) and colon (:) are reserved characters which are used
+                    #   as delimiters to separate fields in transaction file formats.
+                    # - To use a reserved character inside the transit line name field, enclose
+                    #   the entire string in single-quotes (‘).
+                    # - Changed in version 4.4: Character limit of ID increased from six to 40 characters.
+                    emme_transit_line_id = f"'{route_id} {shape_id}'"
+                    # since we do run into the 40 character limit, dispance with ':20230930'
+                    emme_transit_line_id = emme_transit_line_id.replace(':20230930','')
+
                     emme_transit_vehicle_id = emme_transit_vehicles[(agency_id,route_type)]
                     emme_shape_itinerary = trip_shapes_df['shape_emme_node_id'].tolist()
                     stop_id_itinerary = trip_shapes_df['stop_id'].tolist()
@@ -656,7 +671,9 @@ def create_emmebank_network(
         deleted_lines = 0
         modified_lines = 0
         for _, trip in mtc_scenario.transit_net.feed.trips.iterrows():
-            emme_transit_line_id = f"{trip.route_id} {trip.shape_id}"
+            emme_transit_line_id = f"'{trip.route_id} {trip.shape_id}'"
+            emme_transit_line_id = emme_transit_line_id.replace(':20230930','')
+
             # get frequencies for this trip
             trip_freqs_df = mtc_scenario.transit_net.feed.frequencies.loc[ mtc_scenario.transit_net.feed.frequencies['trip_id'] == trip.trip_id]
             trip_freqs_df.set_index('time_period', inplace=True)
@@ -691,6 +708,7 @@ if __name__ == "__main__":
     # Setup pandas display options
     pd.options.display.max_columns = None
     pd.options.display.width = None
+    pd.options.display.max_rows = 300 # number of rows to show before truncating
     
     parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter,)
     parser.add_argument("--overwrite", action="store_true", help="Delete previous version (otherwise it will error)")
@@ -736,6 +754,11 @@ if __name__ == "__main__":
         # useclass?
         "length", # network_wrangler uses distance
     ]
+    # Managed lane offset is 4_500_000: https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
+    # but we can't use that because there are some managed lanes for two-way links
+    mtc_scenario.road_net.config.IDS.ML_NODE_ID_METHOD = 'range'
+    # TODO: This is for alameda...
+    mtc_scenario.road_net.config.IDS.ML_NODE_ID_RANGE = (7_000_000, 7_500_000 - 1)
 
     WranglerLogger.debug(f"{mtc_scenario.road_net.links_df.crs=}")
     model_roadway_net = mtc_scenario.road_net.model_net
