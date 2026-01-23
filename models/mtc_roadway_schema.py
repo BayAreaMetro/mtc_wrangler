@@ -217,12 +217,19 @@ class MTCRoadNodesTable(RoadNodesTable):
         county: County name (must be one of the 9 Bay Area counties)
         taz_centroid: Indicates if node is a TAZ (Traffic Analysis Zone) centroid
         maz_centroid: Indicates if node is a MAZ (Micro-zone) centroid
+        is_ctrl_acc_hwy: Indicates if node is on a controlled access highway
+          (freeway or expressway)
+        is_interchange: For nodes with is_ctrl_acc_hwy==True, indicates if
+          this node is an interchange
     """
 
     # Required MTC fields
     county: Series[str] = Field(coerce=True, nullable=False)
     taz_centroid: Series[bool] = Field(coerce=True, nullable=False)
     maz_centroid: Series[bool] = Field(coerce=True, nullable=False)
+    # for highway/expressway reliability
+    is_ctrl_acc_hwy: Series[bool] = Field(coerce=True, nullable=False)
+    is_interchange: Series[bool] = Field(coerce=True, nullable=False)
 
     @pa.check("county")
     def check_valid_county(cls, county: Series) -> Series[bool]:

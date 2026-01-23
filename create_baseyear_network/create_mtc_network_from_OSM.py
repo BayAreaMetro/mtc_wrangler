@@ -1608,6 +1608,11 @@ def stepa_standardize_attributes(
     nodes_non_list_cols = [
         'osmid','X','Y','street_count','ref','geometry','county','model_node_id'
     ]
+    # Add optional columns if they exist (added in later steps)
+    optional_node_cols = ['is_ctrl_acc_hwy', 'is_interchange']
+    for col in optional_node_cols:
+        if col in nodes_gdf.columns:
+            nodes_non_list_cols.append(col)
     parquet_nodes_gdf = nodes_gdf[nodes_non_list_cols].copy()
     parquet_nodes_gdf['ref'] = parquet_nodes_gdf['ref'].astype(str)
 
@@ -1794,21 +1799,19 @@ def fetch_toll_gantry_nodes(
     return gdf
 
 def set_bridge_toll_links(
-        links_gdf: gpd.GeoDataFrame,
+        roadway_network: RoadwayNetwork,
         base_output_dir: pathlib.Path,
         buffer_distance_feet: float = 20.0
-    ) -> gpd.GeoDataFrame:
+    ) -> None:
     """
     Set tolltype='bridge' for roadway links with drive access that intersect toll gantries.
     Fetches toll gantry nodes from OSM and saves them to a file.
+    Updates roadway_network.links_df in place.
     
     Args:
-        links_gdf: GeoDataFrame of roadway links
+        roadway_network: RoadwayNetwork to modify
         base_output_dir: Base directory for shared resources (to get bounding box and save gantry file)
         buffer_distance_feet: Buffer distance around toll gantries to check for intersections (in feet)
-        
-    Returns:
-        Modified links_gdf with tolltype set to 'bridge' for links near toll gantries
     """
     # Fetch toll gantry nodes from OSM
     toll_gantry_gdf = fetch_toll_gantry_nodes(base_output_dir)
@@ -1826,7 +1829,7 @@ def set_bridge_toll_links(
 
         if len(toll_gantry_gdf) == 0:
             WranglerLogger.warning(f"No cached toll gantries found; skipping setting bridge toll links")
-            return links_gdf
+            return
     
     # add tollbooth to toll_gantry_gdf
     toll_gantry_gdf['tollbooth'] = toll_gantry_gdf['name'].map(models.GANTRY_NAME_TO_TOLLBOOTH)
@@ -1837,13 +1840,13 @@ def set_bridge_toll_links(
         WranglerLogger.fatal(error_str)
         raise KeyError(error_str)
 
-    WranglerLogger.info(f"Checking {len(links_gdf):,} links for toll gantry intersections")
+    WranglerLogger.info(f"Checking {len(roadway_network.links_df):,} links for toll gantry intersections")
     
     # initialize tolltype
-    links_gdf['tolltype'] = models.MTCTollType.NO_TOLL
+    roadway_network.links_df['tolltype'] = models.MTCTollType.NO_TOLL
 
     # Ensure both are in the same CRS (local feet)
-    links_gdf_local = links_gdf.to_crs(models.LOCAL_CRS_FEET)
+    links_gdf_local = roadway_network.links_df.to_crs(models.LOCAL_CRS_FEET)
     toll_gantry_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
     
     # Buffer the toll gantry points
@@ -1864,7 +1867,7 @@ def set_bridge_toll_links(
     
     if len(intersecting_links) == 0:
         WranglerLogger.info("No links intersect toll gantries")
-        return links_gdf
+        return
     
     # Get unique link indices that intersect toll gantries
     WranglerLogger.debug(f"intersecting_links:\n{intersecting_links}")
@@ -1876,20 +1879,94 @@ def set_bridge_toll_links(
     WranglerLogger.debug(f"Links per toll gantry:\n{gantry_counts}")
     
     # Set tolltype to 'bridge' for these links
-    links_gdf.loc[toll_link_indices, 'tolltype'] = models.MTCTollType.BRIDGE
+    roadway_network.links_df.loc[toll_link_indices, 'tolltype'] = models.MTCTollType.BRIDGE
     
     # Copy tollbooth and toll gantry name to the bridge links
     # For links that intersect multiple gantries, use the first match
     first_match = intersecting_links.groupby(intersecting_links.index).first()
-    links_gdf.loc[toll_link_indices, 'tollbooth'] = first_match['tollbooth']
-    links_gdf.loc[toll_link_indices, 'tollname'] = first_match['tollname']
+    roadway_network.links_df.loc[toll_link_indices, 'tollbooth'] = first_match['tollbooth']
+    roadway_network.links_df.loc[toll_link_indices, 'tollname'] = first_match['tollname']
     
     # Log which links were updated
-    updated_links = links_gdf.loc[toll_link_indices, 
+    updated_links = roadway_network.links_df.loc[toll_link_indices, 
         ['model_link_id', 'roadway', 'name', 'ref', 'tolltype', 'tollbooth', 'tollname']]
     WranglerLogger.debug(f"Updated links to tolltype=BRIDGE:\n{updated_links}")
+
+def set_controlled_access_highway_nodes(
+        roadway_network: RoadwayNetwork
+    ) -> None:
+    """
+    Add is_ctrl_acc_hwy and is_interchange flags to nodes.
+    Updates roadway_network.nodes_df in place.
     
-    return links_gdf
+    A node is considered to be on a controlled access highway if it is connected
+    to at least one link with facility type (ft) of freeway or expressway.
+    
+    A controlled access highway node is considered an interchange if it has more
+    than one incoming link OR more than one outgoing link.
+    
+    Args:
+        roadway_network: RoadwayNetwork to modify
+    """
+    WranglerLogger.info("Adding controlled access highway node flags")
+    
+    # Initialize the columns to False for all nodes
+    roadway_network.nodes_df['is_ctrl_acc_hwy'] = False
+    roadway_network.nodes_df['is_interchange'] = False
+    
+    # Find all links with ft=freeway or ft=expressway
+    ctrl_acc_mask = roadway_network.links_df['ft'].isin([
+        models.MTCFacilityType.FREEWAY,
+        models.MTCFacilityType.EXPRESSWAY
+    ])
+    
+    ctrl_acc_links = roadway_network.links_df[ctrl_acc_mask]
+    WranglerLogger.debug(f"Found {len(ctrl_acc_links):,} controlled access highway links")
+    
+    if len(ctrl_acc_links) == 0:
+        WranglerLogger.warning("No controlled access highway links found")
+        return
+    
+    # Get unique node IDs from A and B columns of controlled access links
+    ctrl_acc_node_ids = set(ctrl_acc_links['A'].unique()) | set(ctrl_acc_links['B'].unique())
+    WranglerLogger.info(f"Found {len(ctrl_acc_node_ids):,} nodes on controlled access highways")
+    
+    # Set is_ctrl_acc_hwy to True for these nodes
+    node_mask = roadway_network.nodes_df['model_node_id'].isin(ctrl_acc_node_ids)
+    roadway_network.nodes_df.loc[node_mask, 'is_ctrl_acc_hwy'] = True
+    
+    WranglerLogger.debug(
+        f"Set is_ctrl_acc_hwy=True for {node_mask.sum():,} nodes "
+        f"({node_mask.sum() / len(roadway_network.nodes_df) * 100:.1f}% of all nodes)"
+    )
+    
+    # For controlled access highway nodes, determine if they are interchanges
+    # An interchange has more than one incoming link OR more than one outgoing link
+    # Count ALL links (not just ctrl acc), since ramps/other roads connecting make it an interchange
+    all_links = roadway_network.links_df
+    
+    # Count incoming and outgoing links for each ctrl acc highway node
+    incoming_counts = all_links[all_links['B'].isin(ctrl_acc_node_ids)].groupby('B').size()
+    outgoing_counts = all_links[all_links['A'].isin(ctrl_acc_node_ids)].groupby('A').size()
+    
+    # Find nodes with more than one incoming or outgoing link
+    interchange_nodes_incoming = incoming_counts[incoming_counts > 1].index.tolist()
+    interchange_nodes_outgoing = outgoing_counts[outgoing_counts > 1].index.tolist()
+    interchange_node_ids = set(interchange_nodes_incoming) | set(interchange_nodes_outgoing)
+    
+    WranglerLogger.debug(
+        f"Found {len(interchange_nodes_incoming):,} ctrl acc nodes with >1 incoming link, "
+        f"{len(interchange_nodes_outgoing):,} ctrl acc nodes with >1 outgoing link"
+    )
+    
+    # Set is_interchange to True for these nodes
+    interchange_mask = roadway_network.nodes_df['model_node_id'].isin(interchange_node_ids)
+    roadway_network.nodes_df.loc[interchange_mask, 'is_interchange'] = True
+    
+    WranglerLogger.info(
+        f"Set is_interchange=True for {interchange_mask.sum():,} nodes "
+        f"({interchange_mask.sum() / node_mask.sum() * 100:.1f}% of ctrl acc hwy nodes)"
+    )
 
 # =============================================================================
 # 7-STEP NETWORK CREATION WORKFLOW FUNCTIONS
@@ -2147,6 +2224,11 @@ def step3_assign_county_node_link_numbering(
     # Prepare data for roadway network creation
     # Note: ML_access, ML_lanes, sc_ML_access, sc_ML_lanes, sc_ML_price are created by
     # create_managed_lanes_fields() after the network is created
+    
+    # Initialize controlled access highway flags (will be set later by set_controlled_access_highway_nodes)
+    nodes_gdf['is_ctrl_acc_hwy'] = False
+    nodes_gdf['is_interchange'] = False
+    
     LINK_COLS = [
         'A', 'B','osm_link_id','roadway','name','ref','oneway','reversed','length','geometry',
         'drive_access', 'bike_access', 'walk_access', 'truck_access', 'bus_only',
@@ -2155,7 +2237,8 @@ def step3_assign_county_node_link_numbering(
         'buslanes', 'hov:minimum', 'toll', 'toll:hov'  # Needed for create_managed_lanes_fields
     ]
     NODE_COLS = [
-        'osmid','osm_node_id','X', 'Y', 'highway', 'street_count', 'geometry', 'county', 'model_node_id'
+        'osmid','osm_node_id','X', 'Y', 'highway', 'street_count', 'geometry', 'county', 'model_node_id',
+        'is_ctrl_acc_hwy', 'is_interchange'  # Controlled access highway flags
     ]
     
     clean_links_gdf = links_gdf[LINK_COLS].copy()
@@ -2188,7 +2271,10 @@ def step3_assign_county_node_link_numbering(
     hack_rename_nodes(roadway_network)
 
     # Set tolltype='bridge' for links that intersect toll gantries
-    roadway_network.links_df = set_bridge_toll_links(roadway_network.links_df, base_output_dir)
+    set_bridge_toll_links(roadway_network, base_output_dir)
+
+    # Set information re: controlled access highways
+    set_controlled_access_highway_nodes(roadway_network)
 
     # Create managed lanes fields using the network_wrangler API
     roadway_network = create_managed_lanes_fields(roadway_network)
@@ -2284,7 +2370,15 @@ def step4_add_centroids_and_connectors(
             WranglerLogger.info(f"Filtered {zone_type} to {county}: {len(zones_gdf_dict[zone_type]):,} rows")
 
     # TAZ & TAZ drive connectors
-    add_centroid_nodes(roadway_network, zones_gdf_dict["TAZ"], "TAZ_NODE")
+    add_centroid_nodes(
+        roadway_network, 
+        zones_gdf_dict["TAZ"], 
+        "TAZ_NODE",
+        default_node_attribute_dict={
+            "is_ctrl_acc_hwy": False,
+            "is_interchange": False,
+        }
+    )
     summary_gdf = add_centroid_connectors(
         roadway_network, 
         zones_gdf_dict["TAZ"], "TAZ_NODE", 
@@ -2295,15 +2389,27 @@ def step4_add_centroids_and_connectors(
         max_mode_graph_degrees=4,
         default_link_attribute_dict = {
             "lanes":7, "oneway":False,
+            "walk_access": True,
+            "bike_access": True,
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
             "drive_access": False,
             "roadway": "centroid connector",
             "ft": models.MTCFacilityType.CONNECTOR,
+            "drive_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
+            "walk_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
         }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
     # MAZ & MAZ walk/bike connectors
-    add_centroid_nodes(roadway_network, zones_gdf_dict["MAZ"], "MAZ_NODE")
+    add_centroid_nodes(
+        roadway_network, 
+        zones_gdf_dict["MAZ"],
+        "MAZ_NODE",
+        default_node_attribute_dict={
+            "is_ctrl_acc_hwy": False,
+            "is_interchange": False,
+        }
+    )
     summary_gdf = add_centroid_connectors(
         roadway_network, 
         zones_gdf_dict["MAZ"], "MAZ_NODE", 
@@ -2314,10 +2420,14 @@ def step4_add_centroids_and_connectors(
         max_mode_graph_degrees=8, # make this larger because more footway links are oks
         default_link_attribute_dict = {
             "lanes":7, "oneway":False, 
+            "walk_access": True,
+            "bike_access": True,
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
             "drive_access": False,
             "roadway": "centroid connector",
             "ft": models.MTCFacilityType.CONNECTOR,
+            "drive_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
+            "walk_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
         }
     )
     WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -2536,9 +2646,6 @@ def step6_create_transit_network(
     """
     WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
 
-    # Define time periods for frequency calculation
-
-
     try:
         feed = create_feed_from_gtfs_model(
             gtfs_model,
@@ -2552,21 +2659,21 @@ def step6_create_transit_network(
             max_stop_distance = 0.10*models.FEET_PER_MILE,
             trace_shape_ids=trace_shape_ids,
             # for 9-county Bay Area, ignore these - they're logged
-            errors = "ignore"
+            errors = "ignore",
+            default_node_attribute_dict={
+                "is_ctrl_acc_hwy": False,
+                "is_interchange": False,
+            },
+            default_link_attribute_dict={
+                "ft": models.MTCFacilityType.NOT_ASSIGNED,
+            }
         )
         WranglerLogger.info(f"Created transit Feed object with stops and links integrated:\n{feed}")
 
         # set drive_access to true for centroid connectors
         # these were temporarily turned off so buses wouldn't route through them
         roadway_network.links_df.loc[ roadway_network.links_df['roadway'] == 'centroid connector', 'drive_access'] = True
-        # set walk and bike access for maz connectors
-        roadway_network.links_df.loc[
-            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'walk_access'] = True
-        roadway_network.links_df.loc[
-            roadway_network.links_df['name'].isin(['MAZ_NODE to node','node to MAZ_NODE']), 'bike_access'] = True
-        # assign new transit links to FT=99
-        roadway_network.links_df.loc [ roadway_network.links_df['roadway'] == 'transit', 'ft'] = models.MTCFacilityType.NOT_ASSIGNED
-        
+
     except Exception as e:
         WranglerLogger.error(f"Error creating transit stops and links: {e}")
         county_no_spaces = county.replace(" ", "")

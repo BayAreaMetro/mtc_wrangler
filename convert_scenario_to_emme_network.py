@@ -60,6 +60,7 @@ def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     WranglerLogger.debug(f"model_roadway_net.nodes_df.county:\n{model_roadway_net.nodes_df['county'].value_counts(dropna=False)}")
 
     # taz_centroid: default to False
+    WranglerLogger.debug(f"model_roadway_net.nodes_df.taz_centroid:\n{model_roadway_net.nodes_df['taz_centroid'].value_counts(dropna=False)}")
     model_roadway_net.nodes_df.loc[
         pd.isnull(model_roadway_net.nodes_df['taz_centroid']), 'taz_centroid'
     ] = 0
@@ -67,6 +68,7 @@ def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     WranglerLogger.debug(f"model_roadway_net.nodes_df.taz_centroid:\n{model_roadway_net.nodes_df['taz_centroid'].value_counts(dropna=False)}")
 
     # maz_centroid: default to False
+    WranglerLogger.debug(f"model_roadway_net.nodes_df.maz_centroid:\n{model_roadway_net.nodes_df['maz_centroid'].value_counts(dropna=False)}")
     model_roadway_net.nodes_df.loc[
         pd.isnull(model_roadway_net.nodes_df['maz_centroid']), 'maz_centroid'
     ] = 0
@@ -106,10 +108,12 @@ def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     WranglerLogger.debug(f"model_roadway_net.links_df.ref:\n{model_roadway_net.links_df['ref'].value_counts(dropna=False)}")
 
     # county: default to ''
+    WranglerLogger.debug(f"model_roadway_net.links_df.county:\n{model_roadway_net.links_df['county'].value_counts(dropna=False)}")
     model_roadway_net.links_df['county'] = model_roadway_net.links_df['county'].replace({None:''}).fillna('')
     WranglerLogger.debug(f"model_roadway_net.links_df.county:\n{model_roadway_net.links_df['county'].value_counts(dropna=False)}")
 
     # facility type: missing values are connectors
+    WranglerLogger.debug(f"model_roadway_net.links_df.ft:\n{model_roadway_net.links_df['ft'].value_counts(dropna=False)}")
     model_roadway_net.links_df.loc[ 
         model_roadway_net.links_df['roadway'].isin(['ml_access_point','ml_egress_point']), 'ft'] = MTCFacilityType.CONNECTOR
     model_roadway_net.links_df['ft'] = model_roadway_net.links_df['ft'].astype(int)
@@ -747,13 +751,26 @@ if __name__ == "__main__":
     WranglerLogger.debug(f"mtc_scenario:\n{mtc_scenario}")
 
     # create ModelRoadwayNetwork instance
-    mtc_scenario.road_net.config.MODEL_ROADWAY.ADDITIONAL_COPY_FROM_GP_TO_ML = [
+    mtc_scenario.road_net.config.MODEL_ROADWAY.ADDITIONAL_COPY_FROM_GP_LINK_TO_ML = [
         # these are in the mtc_roadway_schema: MTCRoadLinksTable
         "county",
         "ft",
         # useclass?
         "length", # network_wrangler uses distance
+        "tolltype",
+        "tollbooth",
+        # "tollseg" # To be implemented
     ]
+    mtc_scenario.config.ADDITIONAL_COPY_TO_ACCESS_EGRESS = [
+        "county"
+    ]
+    mtc_scenario.road_net.config.MODEL_ROADWAY.ADDITIONAL_COPY_FROM_GP_NODE_TO_ML = [
+        "county",
+        "taz_centroid",
+        "maz_centroid",
+        "is_ctrl_acc_hwy",
+        "is_interchange"
+    ]   
     # Managed lane offset is 4_500_000: https://bayareametro.github.io/tm2py/inputs/#county-node-numbering-system
     # but we can't use that because there are some managed lanes for two-way links
     mtc_scenario.road_net.config.IDS.ML_NODE_ID_METHOD = 'range'
