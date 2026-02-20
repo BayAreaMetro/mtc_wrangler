@@ -20,6 +20,7 @@ scikit-learn
 
 # Census/geographic data (from install instructions) 
 pygris
+us
 
 # Visualization
 matplotlib

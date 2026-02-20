@@ -1648,7 +1648,7 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
 
     WranglerLogger.info(f"Looking for MTC zones files in {ZONES_DIR}")
 
-    ZONE_VERSION = "2_5"
+    ZONE_VERSION = "2_6"
     BASE_URL = "https://github.com/BayAreaMetro/tm2py-utils/raw/refs/heads/main/tm2py_utils/inputs/maz_taz"
     SHAPEFILE_FILETYPES = [".cpg",".dbf",".prj",".shp",".shx"]
     gdfs = {}
