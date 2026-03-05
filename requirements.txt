@@ -26,6 +26,7 @@ us
 matplotlib
 seaborn
 plotly
+tableauhyperapi
 
 # Jupyter notebook support
 jupyter

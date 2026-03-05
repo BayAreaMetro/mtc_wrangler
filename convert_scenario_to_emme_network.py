@@ -344,8 +344,12 @@ def create_emmebank_network(
                 emme_mode_description = ROUTE_TYPE_TO_EMME_TRANSIT_MODE[agency_route_type]
                 emme_mode_id = emme_modes[emme_mode_description]['emme_mode_id']
                 emme_transit_vehicle = emme_network.create_transit_vehicle(id=transit_vehicle_id, mode_id=emme_mode_id)
-                # set description
-                emme_transit_vehicle.description = f"{agency_id} {RouteType(agency_route_type).name}"
+                # set description (max 10 chars in Emme)
+                vehicle_desc = f"{agency_id} {RouteType(agency_route_type).name}"
+                if len(vehicle_desc) > 10:
+                    WranglerLogger.debug(f"Truncating vehicle description '{vehicle_desc}' to '{vehicle_desc[:10]}'")
+                    vehicle_desc = vehicle_desc[:10]
+                emme_transit_vehicle.description = vehicle_desc
                 # record
                 emme_transit_vehicles[(agency_id, RouteType(agency_route_type))] = transit_vehicle_id
         WranglerLogger.debug(f"emme_transit_vehicles: {pprint.pformat(emme_transit_vehicles)}")
@@ -354,12 +358,23 @@ def create_emmebank_network(
     # TAZs and then MAZs and then all other nodes
     model_node_id_to_emme_id = {}
     for index, row in model_roadway_net.nodes_df.iterrows():
+        # The maximum number of centroids is 20k so MAZs cannot be included
+        if row['maz_centroid']: continue
+
         # WranglerLogger.debug(f"Processing node {index}: row=\n{row}")
         # id is a string
-        emme_node = emme_network.create_node(
-            id=index+1, 
-            is_centroid=row['taz_centroid'] | row['maz_centroid']
-        )
+        try:
+            emme_node = emme_network.create_node(
+                id=index+1, 
+                is_centroid=row['taz_centroid'] | row['maz_centroid']
+            )
+        except RuntimeError as e:
+            WranglerLogger.error(
+                f"Failed to create node at index {index} (model_node_id={row['model_node_id']}). "
+                f"Nodes created so far: {len(model_node_id_to_emme_id):,} / "
+                f"{len(model_roadway_net.nodes_df):,} total. Error: {e}"
+            )
+            raise
         # set standard attributes
         emme_node['x'] = row['geometry'].x
         emme_node['y'] = row['geometry'].y
@@ -421,13 +436,24 @@ def create_emmebank_network(
             if row['ferry_only']: link_modes = ferry_modes
         if network_mode.startswith('active'):
             if not row['bike_access'] and not row['walk_access']: continue
+
+        # don't include MAZ connectors since we can't include MAZs
+        if row['name'].startswith('MAZ_NODE to'): continue
+        if row['name'].endswith('to MAZ_NODE'): continue
         
-        
-        emme_link = emme_network.create_link(
-            i_node_id=model_node_id_to_emme_id[row['A']],
-            j_node_id=model_node_id_to_emme_id[row['B']],
-            modes=link_modes
-        )
+        try:
+            emme_link = emme_network.create_link(
+                i_node_id=model_node_id_to_emme_id[row['A']],
+                j_node_id=model_node_id_to_emme_id[row['B']],
+                modes=link_modes
+            )
+        except RuntimeError as e:
+            WranglerLogger.error(
+                f"Failed to create link at index {index} (A={row['A']}, B={row['B']}). "
+                f"Links created so far: {num_links_created:,} / "
+                f"{len(model_roadway_net.links_df):,} total. Error: {e}"
+            )
+            raise
         # set standard attributes
         emme_link['length']        = row['distance'] # distance is in miles so use this
         emme_link['type']          = 1 # what is this?
@@ -513,8 +539,16 @@ def create_emmebank_network(
                     #   the entire string in single-quotes (‘).
                     # - Changed in version 4.4: Character limit of ID increased from six to 40 characters.
                     emme_transit_line_id = f"'{route_id} {shape_id}'"
-                    # since we do run into the 40 character limit, dispance with ':20230930'
+                    # since we do run into the 40 character limit, dispense with ':20230930'
                     emme_transit_line_id = emme_transit_line_id.replace(':20230930','')
+                    # Emme max transit line ID is 40 chars (including quotes)
+                    if len(emme_transit_line_id) > 40:
+                        WranglerLogger.warning(
+                            f"Truncating transit line ID '{emme_transit_line_id}' "
+                            f"({len(emme_transit_line_id)} chars) to 40 chars"
+                        )
+                        # keep the closing quote; truncate content inside
+                        emme_transit_line_id = emme_transit_line_id[:39] + "'"
 
                     emme_transit_vehicle_id = emme_transit_vehicles[(agency_id,route_type)]
                     emme_shape_itinerary = trip_shapes_df['shape_emme_node_id'].tolist()
@@ -526,7 +560,11 @@ def create_emmebank_network(
                         emme_transit_line = emme_network.create_transit_line(
                             emme_transit_line_id, emme_transit_vehicle_id, emme_shape_itinerary
                         )
-                        emme_transit_line.description = f"{route_id} {route_row['route_long_name']}"
+                        line_description = f"{route_id} {route_row['route_long_name']}"
+                        if len(line_description) > 10:
+                            WranglerLogger.debug(f"Truncating line description '{line_description}' to '{line_description[:10]}")
+                            line_description = line_description[:10]
+                        emme_transit_line.description = line_description
 
                         # each node defaults to being a stop
                         # disallow alightings and boardings for non-stop nodes
@@ -677,6 +715,13 @@ def create_emmebank_network(
         for _, trip in mtc_scenario.transit_net.feed.trips.iterrows():
             emme_transit_line_id = f"'{trip.route_id} {trip.shape_id}'"
             emme_transit_line_id = emme_transit_line_id.replace(':20230930','')
+            # Apply same truncation as during creation
+            if len(emme_transit_line_id) > 40:
+                emme_transit_line_id = emme_transit_line_id[:39] + "'"
+
+            # skip lines that were never created (e.g. due to mode errors)
+            if emme_period_network.transit_line(emme_transit_line_id) is None:
+                continue
 
             # get frequencies for this trip
             trip_freqs_df = mtc_scenario.transit_net.feed.frequencies.loc[ mtc_scenario.transit_net.feed.frequencies['trip_id'] == trip.trip_id]
@@ -739,6 +784,13 @@ if __name__ == "__main__":
         args.tm2_config_dir / "model_config.toml", 
         args.tm2_config_dir / "scenario_config.toml"
     ])
+    # The project_path is currently configured as "emme_project/mtc_emme.emp"
+    # But when we create a project, by default, it only takes the project name and creates
+    # [project_name]/[project_name].emp so update the project_path as such
+    prev_path = tm2_config.emme.project_path
+    new_path = prev_path.parent / f"{str(prev_path.parent)}.emp"
+    object.__setattr__(tm2_config.emme, 'project_path', new_path)
+    WranglerLogger.info(f"Updated tm2_config.emme.project_path from {prev_path} to {tm2_config.emme.project_path}")
 
     if args.overwrite:
         prev_proj = output_dir / tm2_config.emme.project_path.parent
@@ -776,6 +828,10 @@ if __name__ == "__main__":
     mtc_scenario.road_net.config.IDS.ML_NODE_ID_METHOD = 'range'
     # TODO: This is for alameda...
     mtc_scenario.road_net.config.IDS.ML_NODE_ID_RANGE = (7_000_000, 7_500_000 - 1)
+    # Default ML_LINK_ID_SCALAR of 3_000_000 collides with county-based link IDs
+    # (e.g. SF link 1_000_042 + 3_000_000 = 4_000_042 which is in Alameda's range).
+    # Use 10_000_000 to place ML link IDs above all county ranges.
+    mtc_scenario.road_net.config.IDS.ML_LINK_ID_SCALAR = 10_000_000
 
     WranglerLogger.debug(f"{mtc_scenario.road_net.links_df.crs=}")
     model_roadway_net = mtc_scenario.road_net.model_net

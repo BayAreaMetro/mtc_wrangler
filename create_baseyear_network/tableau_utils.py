@@ -199,8 +199,8 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
             table_def.add_column(col, tableauhyperapi.SqlType.text())
             inserter_definition.append(tableauhyperapi.TableDefinition.Column(
                 name=col, type=tableauhyperapi.SqlType.text()))
-            # convert others to text
-            gdf[col] = gdf[col].astype(str)
+            # ensure text columns never pass NaN/None to Hyper
+            gdf[col] = gdf[col].apply(lambda value: str(value) if pd.notna(value) else '')
         column_mappings.append(col)
 
     WranglerLogger.debug(f"table_def={table_def}")
