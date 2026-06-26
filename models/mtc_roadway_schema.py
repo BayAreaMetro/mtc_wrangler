@@ -25,21 +25,41 @@ class MTCCounty(str, Enum):
     EXTERNAL = "External"
 
 
-COUNTY_NAME_TO_CENTROID_START_NUM = {
-    MTCCounty.SAN_FRANCISCO.value: 0,
-    MTCCounty.SAN_MATEO.value    : 100_000,
-    MTCCounty.SANTA_CLARA.value  : 200_000,
-    MTCCounty.ALAMEDA.value      : 300_000,
-    MTCCounty.CONTRA_COSTA.value : 400_000,
-    MTCCounty.SOLANO.value       : 500_000,
-    MTCCounty.NAPA.value         : 600_000,
-    MTCCounty.SONOMA.value       : 700_000,
-    MTCCounty.MARIN.value        : 800_000,
+COUNTY_NAME_TO_CENTROID_START_NUM_TM2 = {
+    MTCCounty.SAN_FRANCISCO.value: 1,
+    MTCCounty.SAN_MATEO.value    : 100_001,
+    MTCCounty.SANTA_CLARA.value  : 200_001,
+    MTCCounty.ALAMEDA.value      : 300_001,
+    MTCCounty.CONTRA_COSTA.value : 400_001,
+    MTCCounty.SOLANO.value       : 500_001,
+    MTCCounty.NAPA.value         : 600_001,
+    MTCCounty.SONOMA.value       : 700_001,
+    MTCCounty.MARIN.value        : 800_001,
 }
-"""Mapping of county names to centroid ID starting ranges.
+"""Mapping of county names to centroid ID starting ranges 
+planned for TM2.
 
 https://bayareametro.github.io/tm2py/input/network/#county-node-numbering-system
 """
+
+COUNTY_NAME_TO_CENTROID_START_NUM = {
+    MTCCounty.SAN_FRANCISCO.value: 1,
+    MTCCounty.SAN_MATEO.value    : 191,
+    MTCCounty.SANTA_CLARA.value  : 347,
+    MTCCounty.ALAMEDA.value      : 715,
+    MTCCounty.CONTRA_COSTA.value : 1040,
+    MTCCounty.SOLANO.value       : 1211,
+    MTCCounty.NAPA.value         : 1291,
+    MTCCounty.SONOMA.value       : 1318,
+    MTCCounty.MARIN.value        : 1404,
+}
+"""Mapping of county names to centroid ID startaring ranges
+for TM1 1454 zone system
+
+https://github.com/BayAreaMetro/modeling-website/wiki/TazData#taz1454-by-county
+"""
+
+
 
 COUNTY_NAME_TO_NODE_START_NUM = {
     MTCCounty.SAN_FRANCISCO.value: 1_000_000,
