@@ -14,7 +14,8 @@ Main Features:
 The script performs the following workflow:
 1. Downloads OSM network data for specified geography
 2. Simplifies network topology while preserving connectivity
-3. Standardizes attributes (roadway types, lanes, access modes)
+3. Standardizes attributes (roadway types, lanes, access modes) and
+   create centroid connectors
 4. Assigns county-specific node/link numbering schemes
 5. Integrates GTFS transit data
 6. Creates transit stops and links on the roadway network
@@ -42,19 +43,40 @@ Usage:
     - Individual county names: 'San Francisco', 'San Mateo', 'Santa Clara',
       'Alameda', 'Contra Costa', 'Solano', 'Napa', 'Sonoma', 'Marin'
 
+Caching / fast iteration:
+    Every expensive step writes its result to <output_dir>/<county>/ and reloads it
+    on the next run, so re-running is cheap. Two flags control this:
+      --start-step N   Skip steps before N and load their outputs from cache. E.g.
+                       '--start-step 6' loads the step-4 roadway network and step-5
+                       GTFS model from cache and runs only steps 6-7. Prerequisite
+                       caches must already exist from an earlier full run.
+      --stop-step N    Stop after step N. Combine with --start-step to run a single
+                       step, e.g. '--start-step 6 --stop-step 6' runs only step 6.
+      --force-step S   Recompute the given step(s) even if cached (overwrites cache).
+                       Valid ids: 1 1a 2 2a 3 4 5 6 7.
+      --run-1a         Run step 1a (diagnostics for the original, unsimplified network).
+                       Its output is discarded downstream, so it is skipped by default.
+    Each cache also writes a "<name>.meta.json" stamping the network_wrangler version
+    + git SHA/dirty flag; on load, a mismatch logs a warning so you know a cache may
+    be stale after editing network_wrangler (use --force-step to rebuild it).
+
 Example:
     python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet hyper
     python create_mtc_network_from_OSM.py "Santa Clara" ../../511gtfs_2023-09 ../../output_from_OSM/SantaClara parquet --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --force-step 6
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --stop-step 6
 """
 
 USAGE = __doc__
 import argparse
 import datetime
+import json
 import pathlib
 import pickle
 import pprint
 import requests
 import statistics
+import subprocess
 import sys
 from typing import Any, Optional, Tuple, Union
 
@@ -230,6 +252,126 @@ ROADWAY_HIERARCHY = [
     'living_street',  # pedestrian-focused residential
     'service',        # vehicle access to building, parking lot, etc.
 ]
+
+
+# =============================================================================
+# Step caching / fast-path control
+# =============================================================================
+# The workflow is a linear pipeline (steps 1 -> 7). Each expensive step writes
+# its result to disk and, on a subsequent run, loads that cached result instead
+# of recomputing. Two module-level controls, set from the CLI in __main__, drive
+# this behavior:
+#   _START_STEP : integer 1-7. Steps before this are skipped entirely and their
+#                 outputs are loaded from cache (see load_prerequisites_for_step).
+#   _STOP_STEP  : integer 1-7. Steps after this are not run. Combine with _START_STEP
+#                 to run a single step (e.g. start=6, stop=6 runs only step 6).
+#   _FORCE_STEPS: set of step-id strings ("1","2a","3",...). A step whose id is in
+#                 this set ignores its cache and recomputes (and rewrites the cache).
+#
+# Robustness notes (see also the module docstring):
+#   - Raw/simplified OSM graphs (steps 1,2) are cached with pickle. That is the
+#     pragmatic choice: a networkx MultiDiGraph with shapely geometries has no
+#     clean tabular form, and these caches depend only on osmnx/networkx -- NOT
+#     on network_wrangler -- so editing network_wrangler will not corrupt them.
+#   - Wrangler objects (RoadwayNetwork / GtfsModel / TransitNetwork) are NEVER
+#     pickled. They round-trip through the library's own read/write functions so
+#     the cache stays aligned with whatever version of the code is running.
+#   - Every cache write also writes a "<name>.meta.json" sidecar stamping the
+#     network_wrangler version + git fingerprint. On load, a fingerprint mismatch
+#     logs a visible warning (so you know a cache may be stale after editing
+#     network_wrangler) but still uses the cache unless you pass --force-step.
+_START_STEP: int = 1
+_STOP_STEP: int = 7
+_FORCE_STEPS: set[str] = set()
+
+# Ordered list of pipeline step ids, used to validate --start-step / --force-step
+STEP_IDS = ["1", "1a", "2", "2a", "3", "4", "5", "6", "7"]
+
+
+def use_cache_for_step(step_id: str) -> bool:
+    """Return True if the given step should use its cache (i.e. it is not forced)."""
+    return step_id not in _FORCE_STEPS
+
+
+def _cache_meta_path(cache_path: pathlib.Path) -> pathlib.Path:
+    """Return the sidecar metadata path for a cache file or directory."""
+    return cache_path.parent / f"{cache_path.name}.meta.json"
+
+
+def get_cache_fingerprint(extra_params: Optional[dict] = None) -> dict:
+    """
+    Best-effort fingerprint of the code/params that produced a cache.
+
+    Captures the installed network_wrangler version plus the git short SHA and
+    dirty flag of its source tree (if it is a git checkout, as in a dev fork).
+    This is what lets us detect that a cache was built with different
+    network_wrangler code than is currently running.
+
+    Args:
+        extra_params: Optional step-specific parameters to record (e.g. tolerance).
+
+    Returns:
+        A JSON-serializable dict.
+    """
+    fingerprint: dict = {
+        "nw_version": getattr(network_wrangler, "__version__", "unknown"),
+    }
+    try:
+        nw_dir = pathlib.Path(network_wrangler.__file__).parent
+        sha = subprocess.run(
+            ["git", "-C", str(nw_dir), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if sha.returncode == 0:
+            fingerprint["nw_git_sha"] = sha.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(nw_dir), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if dirty.returncode == 0:
+            fingerprint["nw_git_dirty"] = bool(dirty.stdout.strip())
+    except Exception as e:
+        WranglerLogger.debug(f"Could not compute network_wrangler git fingerprint: {e}")
+    if extra_params:
+        fingerprint["params"] = extra_params
+    return fingerprint
+
+
+def write_cache_meta(cache_path: pathlib.Path, extra_params: Optional[dict] = None) -> None:
+    """Write a "<cache>.meta.json" sidecar stamping how the cache was produced."""
+    meta = {
+        "created": NOW,
+        "fingerprint": get_cache_fingerprint(extra_params),
+    }
+    try:
+        _cache_meta_path(cache_path).write_text(json.dumps(meta, indent=2, default=str))
+    except Exception as e:
+        WranglerLogger.debug(f"Could not write cache metadata for {cache_path}: {e}")
+
+
+def check_cache_meta(cache_path: pathlib.Path, extra_params: Optional[dict] = None) -> None:
+    """
+    Compare a cache's stored fingerprint against the current environment and warn
+    on any mismatch. This never blocks cache use (so caching still helps while you
+    are actively editing network_wrangler) -- it only surfaces a visible warning so
+    you know to pass --force-step if the cache is stale.
+    """
+    meta_path = _cache_meta_path(cache_path)
+    if not meta_path.exists():
+        return  # legacy cache without metadata; nothing to compare
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception as e:
+        WranglerLogger.debug(f"Could not read cache metadata {meta_path}: {e}")
+        return
+    cached_fp = meta.get("fingerprint", {})
+    current_fp = get_cache_fingerprint(extra_params)
+    if cached_fp != current_fp:
+        WranglerLogger.warning(
+            f"Cache '{cache_path.name}' was built with a different environment than the "
+            f"current run.\n  cached : {cached_fp}\n  current: {current_fp}\n"
+            f"  Using it anyway; pass --force-step to rebuild if results look stale."
+        )
 
 
 def get_min_or_median_value(lane: Union[int, str, list[Union[int, str]]]) -> int:
@@ -1325,6 +1467,7 @@ def stepa_standardize_attributes(
         output_dir: pathlib.Path,
         base_output_dir: pathlib.Path,
         output_formats: list[str],
+        cache_step_id: Optional[str] = None,
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     Standardize OSM network data and write to multiple output formats.
@@ -1356,6 +1499,10 @@ def stepa_standardize_attributes(
         prefix: String prefix for output filenames (e.g., "3_simplified_")
         output_dir: Base directory for output
         output_formats: Handled formats: hyper, geojson, parquet, gpkg
+        cache_step_id: If provided (e.g. "2a"), the returned (links_gdf, nodes_gdf)
+            tuple is pickled to "<prefix>standardized.pkl" and reloaded on subsequent
+            runs (unless the step is forced). Pickle is safe here because these are
+            plain geopandas objects, not network_wrangler objects.
     
     Returns:
         Tuple of (links_gdf, nodes_gdf) containing:
@@ -1386,6 +1533,22 @@ def stepa_standardize_attributes(
     """
     WranglerLogger.info(f"======= STEP {prefix[:2]}: Standardize attributes for {county} =======")
     county_no_spaces = county.replace(" ","")
+
+    # Check for a cached (links_gdf, nodes_gdf) result. These are plain geopandas
+    # objects (not network_wrangler objects), so pickle is an appropriate cache format.
+    cache_pkl = output_dir / f"{prefix}standardized.pkl"
+    if cache_step_id and use_cache_for_step(cache_step_id) and cache_pkl.exists():
+        try:
+            with open(cache_pkl, "rb") as f:
+                (links_gdf, nodes_gdf) = pickle.load(f)
+            check_cache_meta(cache_pkl)
+            WranglerLogger.info(
+                f"Loaded cached standardized attributes from {cache_pkl} "
+                f"({len(links_gdf):,} links, {len(nodes_gdf):,} nodes)"
+            )
+            return (links_gdf, nodes_gdf)
+        except Exception as e:
+            WranglerLogger.debug(f"Could not load cached standardized attributes: {e}")
 
     # project to long/lat
     g = osmnx.projection.project_graph(g, to_crs=LAT_LON_CRS)
@@ -1628,6 +1791,17 @@ def stepa_standardize_attributes(
         nodes_geojson_file = output_dir / f"{prefix}nodes.geojson"
         nodes_gdf.to_file(nodes_geojson_file, driver='GeoJSON')
         WranglerLogger.info(f"Wrote {nodes_geojson_file}")
+
+    # Cache the full (links_gdf, nodes_gdf) result so downstream steps can be
+    # re-run without recomputing this standardization (see cache_step_id).
+    if cache_step_id:
+        try:
+            with open(cache_pkl, "wb") as f:
+                pickle.dump((links_gdf, nodes_gdf), f)
+            write_cache_meta(cache_pkl)
+            WranglerLogger.info(f"Cached standardized attributes to {cache_pkl}")
+        except Exception as e:
+            WranglerLogger.warning(f"Could not cache standardized attributes: {e}")
 
     return (links_gdf, nodes_gdf)
 
@@ -2139,7 +2313,7 @@ def step1_download_osm_network(
     # Check for cached graph
     initial_graph_file = output_dir / "1_graph_OSM.pkl"
     
-    if initial_graph_file.exists():
+    if use_cache_for_step("1") and initial_graph_file.exists():
         try:
             with open(initial_graph_file, 'rb') as f:
                 g = pickle.load(f)
@@ -2192,7 +2366,7 @@ def step2_simplify_network_topology(
     simplified_graph_file = output_dir / f"2_graph_OSM_simplified{NETWORK_SIMPLIFY_TOLERANCE}.pkl"
     
     # Check for cached simplified graph
-    if simplified_graph_file.exists():
+    if use_cache_for_step("2") and simplified_graph_file.exists():
         try:
             with open(simplified_graph_file, 'rb') as f:
                 simplified_g = pickle.load(f)
@@ -2286,6 +2460,58 @@ def hack_rename_nodes(roadway_network):
 
     # Add more node rename hacks here as needed
 
+def load_cached_mtc_roadway(
+        output_dir: pathlib.Path,
+        roadway_net_file: str,
+) -> Optional["models.MTCRoadwayNetwork"]:
+    """
+    Load a cached MTCRoadwayNetwork previously written with the given file prefix.
+
+    Reads the parquet (preferred) or geojson node/link files, rebuilds a base
+    RoadwayNetwork via the network_wrangler API, and wraps it as an
+    MTCRoadwayNetwork (validation skipped, since the data was already validated
+    when written).
+
+    Args:
+        output_dir: Directory containing the cached files.
+        roadway_net_file: File prefix, e.g. "3_roadway_network" or "4_roadway_network".
+
+    Returns:
+        The loaded MTCRoadwayNetwork, or None if no cache is present or it fails to load.
+    """
+    node_parquet = output_dir / f"{roadway_net_file}_node.parquet"
+    node_geojson = output_dir / f"{roadway_net_file}_node.geojson"
+    try:
+        if node_parquet.exists():
+            cached_nodes_gdf = gpd.read_parquet(node_parquet)
+            cached_links_gdf = gpd.read_parquet(output_dir / f"{roadway_net_file}_link.parquet")
+            src = node_parquet
+        elif node_geojson.exists():
+            cached_nodes_gdf = gpd.read_file(node_geojson)
+            cached_links_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_link.geojson")
+            src = node_geojson
+        else:
+            return None
+
+        shapes_gdf = cached_links_gdf.copy()
+        base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
+        roadway_network = models.MTCRoadwayNetwork(
+            nodes_df=base_network.nodes_df,
+            links_df=base_network.links_df,
+            shapes_df=base_network.shapes_df,
+            validate_mtc=False,  # Skip validation for cached data
+        )
+        check_cache_meta(output_dir / roadway_net_file)
+        WranglerLogger.info(
+            f"Loaded cached roadway network '{roadway_net_file}' from {src} "
+            f"({len(roadway_network.links_df):,} links, {len(roadway_network.nodes_df):,} nodes)"
+        )
+        return roadway_network
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached roadway network '{roadway_net_file}': {e}")
+        return None
+
+
 def step3_assign_county_node_link_numbering(
         links_gdf: gpd.GeoDataFrame,
         nodes_gdf: gpd.GeoDataFrame,
@@ -2317,43 +2543,10 @@ def step3_assign_county_node_link_numbering(
     roadway_net_file = "3_roadway_network"
     
     # Check for cached roadway network
-    try:
-        parquet_file = output_dir / f"{roadway_net_file}_node.parquet"
-        geojson_file = output_dir / f"{roadway_net_file}_node.geojson"
-        if parquet_file.exists():
-            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
-            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.parquet'}")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.parquet'}")
-        
-        elif geojson_file.exists():
-            cached_nodes_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_node.geojson")
-            cached_links_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_link.geojson")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.geojson'}")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.geojson'}")
-        
-        else:
-            raise Exception(f"Couldn't find parquet or geojson file for {roadway_net_file}")
-
-        shapes_gdf = cached_links_gdf.copy()
-        WranglerLogger.debug(f"cached_links_gdf.dtypes\n:{cached_links_gdf.dtypes}")            
-        # Load as base RoadwayNetwork first, then convert to MTCRoadwayNetwork
-        base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
-        WranglerLogger.debug(f"base_network.links_df.dtypes\n:{base_network.links_df.dtypes}")
-        roadway_network = models.MTCRoadwayNetwork(
-            nodes_df=base_network.nodes_df,
-            links_df=base_network.links_df,
-            shapes_df=base_network.shapes_df,
-            validate_mtc=False  # Skip validation for cached data
-        )
-        WranglerLogger.debug(f"roadway_network.links_df.dtypes\n:{roadway_network.links_df.dtypes}")
-
-        WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
-        return roadway_network
-    except Exception as e:
-        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
+    if use_cache_for_step("3"):
+        cached = load_cached_mtc_roadway(output_dir, roadway_net_file)
+        if cached is not None:
+            return cached
     
     # Prepare data for roadway network creation
     # Note: ML_access, ML_lanes, sc_ML_access, sc_ML_lanes, sc_ML_price are created by
@@ -2432,6 +2625,7 @@ def step3_assign_county_node_link_numbering(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
     
+    write_cache_meta(output_dir / roadway_net_file)
     WranglerLogger.info(f"Created roadway network with {len(roadway_network.links_df)} links and {len(roadway_network.nodes_df)} nodes")
     return roadway_network
 
@@ -2461,39 +2655,10 @@ def step4_add_centroids_and_connectors(
     roadway_net_file = "4_roadway_network"
 
     # Check for cached roadway network
-    try:
-        parquet_file = output_dir / f"{roadway_net_file}_node.parquet"
-        geojson_file = output_dir / f"{roadway_net_file}_node.geojson"
-        if parquet_file.exists():
-            cached_nodes_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_node.parquet")
-            cached_links_gdf = gpd.read_parquet(path=output_dir / f"{roadway_net_file}_link.parquet")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.parquet'}")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.parquet'}")
-        
-        elif geojson_file.exists():
-            cached_nodes_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_node.geojson")
-            cached_links_gdf = gpd.read_file(output_dir / f"{roadway_net_file}_link.geojson")
-            WranglerLogger.info(f"Loaded cached roadway network from:")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_node.geojson'}")
-            WranglerLogger.info(f"  {output_dir / f'{roadway_net_file}_link.geojson'}")
-        
-        else:
-            raise Exception(f"Couldn't find parquet or geojson file for {roadway_net_file}")
-
-        shapes_gdf = cached_links_gdf.copy()
-        # Load as base RoadwayNetwork first, then convert to models.MTCRoadwayNetwork
-        base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
-        roadway_network = models.MTCRoadwayNetwork(
-            nodes_df=base_network.nodes_df,
-            links_df=base_network.links_df,
-            shapes_df=base_network.shapes_df,
-            validate_mtc=False  # Skip validation for cached data
-        )
-        WranglerLogger.info(f"Loaded cached roadway network from {roadway_net_file}")
-        return roadway_network
-    except Exception as e:
-        WranglerLogger.debug(f"Could not load cached roadway network: {e}")
+    if use_cache_for_step("4"):
+        cached = load_cached_mtc_roadway(output_dir, roadway_net_file)
+        if cached is not None:
+            return cached
 
     # Create centroid connectors -- fetch travel model zone data
     zones_gdf_dict = get_travel_model_zones(base_output_dir)
@@ -2641,7 +2806,53 @@ def step4_add_centroids_and_connectors(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
+    write_cache_meta(output_dir / roadway_net_file)
     return roadway_network
+
+def load_cached_gtfs(output_dir: pathlib.Path) -> Optional[GtfsModel]:
+    """
+    Load a cached (already filtered) GtfsModel from the step-5 cache directory.
+
+    Returns:
+        The loaded GtfsModel, or None if no cache is present or it fails to load.
+    """
+    gtfs_model_dir = output_dir / "5_gtfs_model"
+    if not gtfs_model_dir.exists():
+        return None
+    try:
+        gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
+        check_cache_meta(gtfs_model_dir)
+        WranglerLogger.info(f"Loaded cached GTFS model from {gtfs_model_dir}")
+        return gtfs_model
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached GTFS model: {e}")
+        return None
+
+def load_cached_standardized(
+        output_dir: pathlib.Path,
+        prefix: str = "2a_simplified_",
+) -> Optional[tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]]:
+    """
+    Load the cached (links_gdf, nodes_gdf) tuple produced by stepa_standardize_attributes.
+
+    Returns:
+        The (links_gdf, nodes_gdf) tuple, or None if no cache is present or it fails to load.
+    """
+    cache_pkl = output_dir / f"{prefix}standardized.pkl"
+    if not cache_pkl.exists():
+        return None
+    try:
+        with open(cache_pkl, "rb") as f:
+            (links_gdf, nodes_gdf) = pickle.load(f)
+        check_cache_meta(cache_pkl)
+        WranglerLogger.info(
+            f"Loaded cached standardized attributes from {cache_pkl} "
+            f"({len(links_gdf):,} links, {len(nodes_gdf):,} nodes)"
+        )
+        return (links_gdf, nodes_gdf)
+    except Exception as e:
+        WranglerLogger.debug(f"Could not load cached standardized attributes: {e}")
+        return None
 
 def step5_prepare_gtfs_transit_data(
         county: str,
@@ -2670,13 +2881,10 @@ def step5_prepare_gtfs_transit_data(
     gtfs_model_dir = output_dir / "5_gtfs_model"
     
     # Check for cached GTFS model
-    if gtfs_model_dir.exists():
-        try:
-            gtfs_model = load_feed_from_path(gtfs_model_dir, wrangler_flavored=False, low_memory=False)
-            WranglerLogger.info(f"Loaded cached GTFS model from {gtfs_model_dir}")
-            return gtfs_model
-        except Exception as e:
-            WranglerLogger.debug(f"Could not load cached GTFS model: {e}")
+    if use_cache_for_step("5"):
+        cached = load_cached_gtfs(output_dir)
+        if cached is not None:
+            return cached
     
     # Load and filter GTFS data
     WranglerLogger.info("Loading GTFS feed for September 27, 2023...")
@@ -2760,6 +2968,7 @@ def step5_prepare_gtfs_transit_data(
         prefix="gtfs_model",
         overwrite=True
     )
+    write_cache_meta(gtfs_model_dir)
     
     WranglerLogger.info(f"Integrated GTFS data: {len(gtfs_model.routes)} routes, {len(gtfs_model.stops)} stops")
     return gtfs_model
@@ -2771,7 +2980,7 @@ def step6_create_transit_network(
         output_dir: pathlib.Path,
         output_formats: list[str],
         trace_shape_ids: Optional[list[str]] = None,
-) -> tuple[TransitNetwork, gpd.GeoDataFrame]:
+) -> tuple[TransitNetwork, gpd.GeoDataFrame, RoadwayNetwork]:
     """
     Step 6: Create TransitNetwork by converting GtfsModel to Wrangler-flavored Feed object,
     integrating with RoadwayNetwork
@@ -2789,9 +2998,34 @@ def step6_create_transit_network(
         trace_shape_ids: Optional list of shape IDs to trace for debugging transit routing
 
     Returns:
-        Tuple of (TransitNetwork with stops and links integrated, shape_links_gdf)
+        Tuple of (TransitNetwork with stops and links integrated, shape_links_gdf,
+        roadway_network). The roadway_network is returned because this step mutates
+        it in place (adding transit station nodes/links and toggling centroid
+        connector drive_access); on a cache hit the transit-modified roadway network
+        is reloaded from disk and returned so downstream steps use the correct one.
     """
     WranglerLogger.info(f"======= STEP 6: Creating Wrangler-flavored GTFS Feed for {county} =======")
+
+    roadway_net_file = "6_roadway_network_inc_transit"
+    transit_network_dir = output_dir / "6_transit_network"
+    shape_links_file = output_dir / "6_transit_road_links_gdf.parquet"
+
+    # Check for a cached transit network + transit-modified roadway network. Both are
+    # network_wrangler objects, so they are reloaded through the library I/O (never pickle).
+    if use_cache_for_step("6"):
+        cached_roadway = load_cached_mtc_roadway(output_dir, roadway_net_file)
+        if (cached_roadway is not None) and transit_network_dir.exists():
+            try:
+                cached_transit = load_transit(transit_network_dir)
+                check_cache_meta(transit_network_dir)
+                cached_shape_gdf = gpd.read_parquet(shape_links_file) if shape_links_file.exists() else None
+                WranglerLogger.info(
+                    f"Loaded cached transit network from {transit_network_dir} and "
+                    f"transit-modified roadway network '{roadway_net_file}'"
+                )
+                return cached_transit, cached_shape_gdf, cached_roadway
+            except Exception as e:
+                WranglerLogger.debug(f"Could not load cached transit network: {e}")
 
     try:
         feed = create_feed_from_gtfs_model(
@@ -2882,6 +3116,7 @@ def step6_create_transit_network(
             WranglerLogger.info(f"Wrote roadway network with transit in {roadway_format} format")
         except Exception as e:
             WranglerLogger.warning(f"Error writing roadway network in {roadway_format}: {e}")
+    write_cache_meta(output_dir / roadway_net_file)
     
     # Create transit network
     transit_network = load_transit(feed=feed)
@@ -2895,6 +3130,7 @@ def step6_create_transit_network(
         prefix="transit_network",
         overwrite=True
     )
+    write_cache_meta(transit_network_dir)
     WranglerLogger.info(f"Wrote transit network to {transit_network_dir}")
 
     # Construct links from transit network shape points
@@ -2953,7 +3189,7 @@ def step6_create_transit_network(
         debug_file = output_dir / shape_roadnet_links_name.replace("_gdf",".geojson")
         shape_roadnet_links_gdf.to_file(debug_file, driver="GeoJSON")
         WranglerLogger.error(f"Wrote {debug_file}")
-    return transit_network, shape_roadnet_links_gdf
+    return transit_network, shape_roadnet_links_gdf, roadway_network
 
 if __name__ == "__main__":
     """
@@ -2994,8 +3230,40 @@ if __name__ == "__main__":
     parser.add_argument("output_dir", type=pathlib.Path, help="Directory to write output files")
     parser.add_argument("output_format", type=str, choices=['parquet','hyper','geojson','gpkg'], help="Output format for network files", nargs = '+')
     parser.add_argument("--trace-shape-ids", type=str, nargs='*', help="Optional shape IDs to trace for debugging transit routing", default=None)
+    parser.add_argument(
+        "--start-step", type=int, default=1, choices=range(1, 8), metavar="{1-7}",
+        help="Skip steps before this one, loading their outputs from cache instead of "
+             "recomputing. E.g. '--start-step 6' loads the step-4 roadway network and "
+             "step-5 GTFS model from cache and runs only steps 6-7. Prerequisite caches "
+             "must already exist (from an earlier full run).",
+    )
+    parser.add_argument(
+        "--stop-step", type=int, default=7, choices=range(1, 8), metavar="{1-7}",
+        help="Stop after this step instead of running through step 7. Combine with "
+             "--start-step to run a single step, e.g. '--start-step 6 --stop-step 6' "
+             "runs only step 6. Must be >= --start-step.",
+    )
+    parser.add_argument(
+        "--force-step", type=str, nargs="*", default=[], choices=STEP_IDS, metavar="STEP",
+        help=f"Recompute the given step(s) even if a cache exists, ignoring and "
+             f"overwriting the cache. Valid step ids: {STEP_IDS}.",
+    )
+    parser.add_argument(
+        "--run-1a", action="store_true",
+        help="Run step 1a, which standardizes and writes diagnostic files for the "
+             "original (unsimplified) network. Its result is discarded (only the "
+             "simplified step-2a output is used downstream), so it is skipped by "
+             "default. Pass this only when you need those original-network diagnostics.",
+    )
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
+
+    # Apply cache/fast-path controls (module-level, read by the step functions)
+    _START_STEP = args.start_step
+    _STOP_STEP = args.stop_step
+    _FORCE_STEPS = set(args.force_step)
+    if _STOP_STEP < _START_STEP:
+        parser.error(f"--stop-step ({_STOP_STEP}) must be >= --start-step ({_START_STEP})")
 
     # Set up output directories
     # Base directory for shared resources (zones, county shapefiles)
@@ -3022,6 +3290,7 @@ if __name__ == "__main__":
     )
     WranglerLogger.info(f"Starting 7-step network creation workflow for {args.county}")
     WranglerLogger.info(f"Created by {__file__}")
+    WranglerLogger.info(f"start_step={_START_STEP}, stop_step={_STOP_STEP}, force_steps={sorted(_FORCE_STEPS) if _FORCE_STEPS else 'none'}")
 
     # For now, doing drive as we'll add handle transit and walk/bike separately
     # Aug 24: switch to all because Market Street bus-only links are missing
@@ -3032,75 +3301,140 @@ if __name__ == "__main__":
         WranglerLogger.fatal("No roadway output formats specified. Please include at least one of 'parquet','geojson','gpkg'")
         sys.exit()
 
+    def _require(obj, what: str, needed_by: str):
+        """Fail fast with an actionable message when a required cache is missing."""
+        if obj is None:
+            raise FileNotFoundError(
+                f"--start-step {_START_STEP} needs {what} (produced by an earlier step) "
+                f"but it could not be loaded from cache in {output_dir}. Run without "
+                f"--start-step (or with a smaller value) to generate it first. Required by {needed_by}."
+            )
+        return obj
+
     try:
-        # STEP 1: Download OSM network data
-        g = step1_download_osm_network(args.county, output_dir, base_output_dir)
+        start = _START_STEP
+        stop = _STOP_STEP
+        roadway_network = None
+        gtfs_model = None
+        transit_network = None
+        shape_links_gdf = None
+        links_gdf = None
+        nodes_gdf = None
 
-        # STEP 1a: standardize attributes (and write)
-        # Note: we don't keep the results of this, since we'll use version from the simplified graph
-        stepa_standardize_attributes(g, args.county, "1a_original_", output_dir, base_output_dir, args.output_format)
+        # STEPS 1-2: Download OSM, standardize, simplify -> (links_gdf, nodes_gdf) for step 3
+        if start <= 2:
+            # STEP 1: Download OSM network data
+            g = step1_download_osm_network(args.county, output_dir, base_output_dir)
 
-        # STEP 2: Simplify network topology
-        simplified_g = step2_simplify_network_topology(g, args.county, output_dir)
+            # STEP 1a: standardize attributes (and write) for the ORIGINAL network.
+            # Its result is discarded (we use the simplified step-2a output downstream),
+            # so it only runs when explicitly requested for diagnostics via --run-1a.
+            if args.run_1a:
+                stepa_standardize_attributes(g, args.county, "1a_original_", output_dir, base_output_dir, args.output_format)
+            else:
+                WranglerLogger.info("Skipping step 1a diagnostics (pass --run-1a to enable)")
 
-        # STEP 2a: standardize attributes and write
-        (links_gdf, nodes_gdf) = stepa_standardize_attributes(simplified_g, args.county, "2a_simplified_", output_dir, base_output_dir, args.output_format)
+            # STEP 2: Simplify network topology
+            simplified_g = step2_simplify_network_topology(g, args.county, output_dir)
+
+            # STEP 2a: standardize attributes, write, and cache (links_gdf, nodes_gdf)
+            (links_gdf, nodes_gdf) = stepa_standardize_attributes(
+                simplified_g, args.county, "2a_simplified_", output_dir, base_output_dir,
+                args.output_format, cache_step_id="2a")
 
         # STEP 3: Assign county-specific numbering and create MTCRoadwayNetwork object
         # This also drops columns we're done with and writes the roadway network
-        roadway_network = step3_assign_county_node_link_numbering(links_gdf, nodes_gdf, args.county, output_dir, base_output_dir, args.output_format)
+        if start <= 3 <= stop:
+            if start == 3:
+                (links_gdf, nodes_gdf) = _require(
+                    load_cached_standardized(output_dir, "2a_simplified_"),
+                    "the step-2a standardized links/nodes", "step 3")
+            roadway_network = step3_assign_county_node_link_numbering(
+                links_gdf, nodes_gdf, args.county, output_dir, base_output_dir, args.output_format)
 
         # STEP 4: Add centroids and centroid connectors
-        roadway_network = step4_add_centroids_and_connectors(roadway_network, args.county, output_dir, base_output_dir, args.output_format)
+        if start <= 4 <= stop:
+            if start == 4:
+                roadway_network = _require(
+                    load_cached_mtc_roadway(output_dir, "3_roadway_network"),
+                    "the step-3 roadway network", "step 4")
+            roadway_network = step4_add_centroids_and_connectors(
+                roadway_network, args.county, output_dir, base_output_dir, args.output_format)
 
-        # STEP 5: Prepare GTFS transit data: Read and filter to service date, relevant operators. Creates GtfsModel object
+        # STEP 5: Prepare GTFS transit data (independent of the roadway network)
         # This also writes the GtfsModel as GTFS
-        gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir)
+        if start <= 5 <= stop:
+            gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir)
 
-        # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork to create a Wrangler-flavored Feed object
-        # This writes the RoadwayNetwork and TransitNetwork
-        transit_network, shape_links_gdf = step6_create_transit_network(gtfs_model, roadway_network, args.county, output_dir, args.output_format, args.trace_shape_ids)
+        # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork.
+        # Needs the step-4 roadway network; load it from cache if step 4 was skipped.
+        if start <= 6 <= stop:
+            if roadway_network is None:
+                roadway_network = _require(
+                    load_cached_mtc_roadway(output_dir, "4_roadway_network"),
+                    "the step-4 roadway network", "step 6")
+            if gtfs_model is None:
+                gtfs_model = _require(load_cached_gtfs(output_dir), "the step-5 GTFS model", "step 6")
+            # step 6 mutates and returns the roadway network (adds transit stations/links)
+            transit_network, shape_links_gdf, roadway_network = step6_create_transit_network(
+                gtfs_model, roadway_network, args.county, output_dir, args.output_format, args.trace_shape_ids)
 
-        # before doing this, convert list-columns to strings or writing the scenario will fail
-        list_columns = ["link_names", "incoming_link_names", "outgoing_link_names"]
-        for list_col in list_columns:
-            if list_col in roadway_network.nodes_df.columns:
-                roadway_network.nodes_df[list_col] = roadway_network.nodes_df[list_col].astype(str)
+        # STEP 7: Create base year scenario. Needs the transit-modified roadway network
+        # and transit network; load them from the step-6 cache if step 6 was skipped.
+        if stop >= 7:
+            if start == 7:
+                roadway_network = _require(
+                    load_cached_mtc_roadway(output_dir, "6_roadway_network_inc_transit"),
+                    "the step-6 transit-modified roadway network", "step 7")
+                try:
+                    transit_network = load_transit(output_dir / "6_transit_network")
+                except Exception as e:
+                    transit_network = None
+                transit_network = _require(transit_network, "the step-6 transit network", "step 7")
 
-        # STEP 7: Create base year scenario
-        my_scenario = network_wrangler.scenario.create_scenario(
-            base_scenario = {
-                "road_net": roadway_network,
-                "transit_net": transit_network,
-                "applied_projects": [],
-                "conflicts": {}
-            },
-            name='mtc_baseyear_from_OSM'
-        )
-    
-        # write it to disk
-        scenario_dir = output_dir / "7_scenario"
-        scenario_dir.mkdir(exist_ok=True)
-        my_scenario.write(
-            path=scenario_dir,
-            name="mtc_2023",
-            roadway_file_format="geojson",
-            roadway_true_shape=True
-        )
-        WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
+            # before doing this, convert list-columns to strings or writing the scenario will fail
+            list_columns = ["link_names", "incoming_link_names", "outgoing_link_names"]
+            for list_col in list_columns:
+                if list_col in roadway_network.nodes_df.columns:
+                    roadway_network.nodes_df[list_col] = roadway_network.nodes_df[list_col].astype(str)
 
-        # TODO: apply some projects
-        # TODO: Write scneario with projects
-        # TODO: Write as cube network?
+            # Create base year scenario
+            my_scenario = network_wrangler.scenario.create_scenario(
+                base_scenario = {
+                    "road_net": roadway_network,
+                    "transit_net": transit_network,
+                    "applied_projects": [],
+                    "conflicts": {}
+                },
+                name='mtc_baseyear_from_OSM'
+            )
+
+            # write it to disk
+            scenario_dir = output_dir / "7_scenario"
+            scenario_dir.mkdir(exist_ok=True)
+            my_scenario.write(
+                path=scenario_dir,
+                name="mtc_2023",
+                roadway_file_format="geojson",
+                roadway_true_shape=True
+            )
+            write_cache_meta(scenario_dir)
+            WranglerLogger.info(f"Wrote scenario to {scenario_dir}")
+
+            # TODO: apply some projects
+            # TODO: Write scneario with projects
+            # TODO: Write as cube network?
 
         WranglerLogger.info("=" * 60)
-        WranglerLogger.info("7-STEP WORKFLOW COMPLETED SUCCESSFULLY")
+        WranglerLogger.info(f"WORKFLOW COMPLETED SUCCESSFULLY (steps {start}-{stop})")
         WranglerLogger.info("=" * 60)
         WranglerLogger.info(f"Final network summary for {args.county}:")
-        WranglerLogger.info(f"  - Roadway links: {len(roadway_network.links_df):,}")
-        WranglerLogger.info(f"  - Roadway nodes: {len(roadway_network.nodes_df):,}")
-        WranglerLogger.info(f"  - Transit routes: {len(transit_network.feed.routes):,}")
-        WranglerLogger.info(f"  - Transit stops: {len(transit_network.feed.stops):,}")
+        if roadway_network is not None:
+            WranglerLogger.info(f"  - Roadway links: {len(roadway_network.links_df):,}")
+            WranglerLogger.info(f"  - Roadway nodes: {len(roadway_network.nodes_df):,}")
+        if transit_network is not None:
+            WranglerLogger.info(f"  - Transit routes: {len(transit_network.feed.routes):,}")
+            WranglerLogger.info(f"  - Transit stops: {len(transit_network.feed.stops):,}")
         sys.exit()
         
     except Exception as e:
