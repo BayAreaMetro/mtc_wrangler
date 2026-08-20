@@ -7,6 +7,7 @@ from typing import Optional
 
 import pandera as pa
 from pandera import Field
+from pandas import Int64Dtype as Int64
 from pandera.typing import Series
 
 from network_wrangler.models.roadway.tables import RoadLinksTable, RoadNodesTable
@@ -189,12 +190,12 @@ class MTCRoadLinksTable(RoadLinksTable):
 
     # Required MTC fields
     county: Series[str] = Field(coerce=True, nullable=False)
-    ft: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
+    ft: Optional[Series[Int64]] = Field(coerce=True, nullable=True, default=None)
     # TODO: Should this be automatically created from the access attribute in the RoadLinksTable?
-    useclass: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
+    useclass: Optional[Series[Int64]] = Field(coerce=True, nullable=True, default=None)
     tolltype: Series[str] = Field(coerce=True, nullable=False, default=MTCTollType.NO_TOLL.value)
-    tollbooth: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
-    tollseg: Optional[Series[int]] = Field(coerce=True, nullable=True, default=None)
+    tollbooth: Optional[Series[Int64]] = Field(coerce=True, nullable=True, default=None)
+    tollseg: Optional[Series[Int64]] = Field(coerce=True, nullable=True, default=None)
 
     @pa.check("county")
     def check_valid_county(cls, county: Series) -> Series[bool]:
