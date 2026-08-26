@@ -113,7 +113,12 @@ from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.transit.filter import \
   drop_transit_agency, filter_transit_by_boundary
 from network_wrangler.utils.transit import create_feed_from_gtfs_model
-from network_wrangler.roadway.centroids import FitForCentroidConnection, add_centroid_nodes, add_centroid_connectors
+from network_wrangler.roadway.centroids import (
+    FitForCentroidConnection,
+    add_centroid_connectors,
+    add_centroid_nodes,
+    prepare_zones_table,
+)
 from network_wrangler.utils.io_table import read_table, write_table
 
 # Suppress FutureWarning about downcasting in fillna
@@ -1888,16 +1893,13 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
     WranglerLogger.debug(f"taz_gdf.columns: {list(taz_gdf.columns)}")
     WranglerLogger.debug(f"taz_gdf.head():\n{taz_gdf.head()}")
 
-    # Rename TAZ1454 column to TAZ for consistency
-    taz_gdf.rename(columns={"TAZ1454": "TAZ"}, inplace=True)
-
     # Build centroid geometry from TAZ1475_centroids.csv (N, Latitude, Longitude)
     centroids_df = pd.read_csv(ZONES_DIR / CENTROIDS_FILE)
     WranglerLogger.debug(f"centroids_df.head():\n{centroids_df.head()}")
     taz_gdf = taz_gdf.merge(
         centroids_df[["N", "Latitude", "Longitude"]],
         how="left",
-        left_on="TAZ",
+        left_on="TAZ1454",
         right_on="N",
         validate="one_to_one"
     )
@@ -1915,22 +1917,19 @@ def get_travel_model_zones(base_output_dir: pathlib.Path,):
         taz_gdf,
         county_mapping_df[["ZONE", "COUNTY_NAME"]].drop_duplicates(),
         how="left",
-        left_on="TAZ",
+        left_on="TAZ1454",
         right_on="ZONE",
         validate="one_to_one",
         indicator=True
     )
     unmatched = taz_gdf[taz_gdf["_merge"] != "both"]
     if len(unmatched) > 0:
-        WranglerLogger.warning(f"TAZs with no county match:\n{unmatched[['TAZ','_merge']]}")
+        WranglerLogger.warning(f"TAZs with no county match:\n{unmatched[['TAZ1454','_merge']]}")
     taz_gdf.drop(columns=["ZONE", "_merge"], inplace=True)
     taz_gdf.rename(columns={"COUNTY_NAME": "county"}, inplace=True)
 
-    # Rename TAZ -> TAZ_NODE to match the column convention used by add_centroid_nodes()
-    taz_gdf.rename(columns={"TAZ": "TAZ_NODE"}, inplace=True)
-
     # Keep only the columns required by the return contract
-    taz_gdf = taz_gdf[["TAZ_NODE", "county", "geometry", "geometry_centroid"]]
+    taz_gdf = taz_gdf[["TAZ1454", "county", "geometry", "geometry_centroid"]]
 
     WranglerLogger.info(
         f"TM1 TAZ zones: {len(taz_gdf)} zones across "
@@ -2763,11 +2762,24 @@ def step4_add_centroids_and_connectors(
             zones_gdf_dict[zone_type] = zones_gdf_dict[zone_type].loc[ zones_gdf_dict[zone_type].county == county ]
             WranglerLogger.info(f"Filtered {zone_type} to {county}: {len(zones_gdf_dict[zone_type]):,} rows")
 
+    zones_table_dict = {
+        "TAZ": prepare_zones_table(
+            zones_gdf_dict["TAZ"],
+            zone_id_col="TAZ1454",
+            metadata={"zone_name": "TAZ"},
+        )
+    }
+    if "MAZ" in zones_gdf_dict:
+        zones_table_dict["MAZ"] = prepare_zones_table(
+            zones_gdf_dict["MAZ"],
+            zone_id_col="MAZ_NODE",
+            metadata={"zone_name": "MAZ"},
+        )
+
     # TAZ & TAZ drive connectors
     add_centroid_nodes(
         roadway_network, 
-        zones_gdf_dict["TAZ"], 
-        "TAZ_NODE",
+        zones_table_dict["TAZ"],
         default_node_attribute_dict={
             "is_ctrl_acc_hwy": False,
             "is_interchange": False,
@@ -2775,7 +2787,7 @@ def step4_add_centroids_and_connectors(
     )
     summary_gdf = add_centroid_connectors(
         roadway_network, 
-        zones_gdf_dict["TAZ"], "TAZ_NODE", 
+        zones_table_dict["TAZ"],
         mode="drive", 
         local_crs=models.LOCAL_CRS_FEET,
         zone_buffer_distance=20,
@@ -2798,8 +2810,7 @@ def step4_add_centroids_and_connectors(
     if "MAZ" in zones_gdf_dict:
         add_centroid_nodes(
             roadway_network, 
-            zones_gdf_dict["MAZ"],
-            "MAZ_NODE",
+            zones_table_dict["MAZ"],
             default_node_attribute_dict={
                 "is_ctrl_acc_hwy": False,
                 "is_interchange": False,
@@ -2807,7 +2818,7 @@ def step4_add_centroids_and_connectors(
         )
         summary_gdf = add_centroid_connectors(
             roadway_network, 
-            zones_gdf_dict["MAZ"], "MAZ_NODE", 
+            zones_table_dict["MAZ"],
             mode="walk", 
             local_crs=models.LOCAL_CRS_FEET,
             zone_buffer_distance=20,
@@ -2835,7 +2846,7 @@ def step4_add_centroids_and_connectors(
     for county_name in models.COUNTY_NAME_TO_CENTROID_START_NUM.keys():
         county_taz_ids = set(
             zones_gdf_dict["TAZ"].loc[
-                zones_gdf_dict["TAZ"]["county"] == county_name, "TAZ_NODE"
+                zones_gdf_dict["TAZ"]["county"] == county_name, "TAZ1454"
             ]
         )
         county_maz_ids = set(
@@ -2845,15 +2856,23 @@ def step4_add_centroids_and_connectors(
         ) if "MAZ" in zones_gdf_dict else set()
         county_centroid_ids = county_taz_ids | county_maz_ids
 
-        # Centroid connector links: centroid is A node ("TAZ_NODE to node" / "MAZ_NODE to node")
-        mask_a = (roadway_network.links_df['name'].str.startswith('TAZ_NODE to', na=False) |
-                  roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False))
+        # Centroid connector links: centroid is A node.
+        # Support legacy labels and canonical wrangler labels.
+        mask_a = (
+            roadway_network.links_df['name'].str.startswith('TAZ1454 to', na=False)
+            | roadway_network.links_df['name'].str.startswith('MAZ_NODE to', na=False)
+            | roadway_network.links_df['name'].str.startswith('zone_id to', na=False)
+        )
         mask_a &= roadway_network.links_df['A'].isin(county_centroid_ids)
         roadway_network.links_df.loc[mask_a, 'county'] = county_name
 
-        # Centroid connector links: centroid is B node ("node to TAZ_NODE" / "node to MAZ_NODE")
-        mask_b = (roadway_network.links_df['name'].str.endswith('to TAZ_NODE', na=False) |
-                  roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False))
+        # Centroid connector links: centroid is B node.
+        # Support legacy labels and canonical wrangler labels.
+        mask_b = (
+            roadway_network.links_df['name'].str.endswith('to TAZ1454', na=False)
+            | roadway_network.links_df['name'].str.endswith('to MAZ_NODE', na=False)
+            | roadway_network.links_df['name'].str.endswith('to zone_id', na=False)
+        )
         mask_b &= roadway_network.links_df['B'].isin(county_centroid_ids)
         roadway_network.links_df.loc[mask_b, 'county'] = county_name
 
