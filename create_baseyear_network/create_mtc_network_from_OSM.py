@@ -113,12 +113,8 @@ from network_wrangler.models.gtfs.types import RouteType
 from network_wrangler.transit.filter import \
   drop_transit_agency, filter_transit_by_boundary
 from network_wrangler.utils.transit import create_feed_from_gtfs_model
-from network_wrangler.roadway.centroids import (
-    FitForCentroidConnection,
-    add_centroid_connectors,
-    add_centroid_nodes,
-    prepare_zones_table,
-)
+from network_wrangler.roadway.nodes.centroids import add_centroid_nodes, prepare_zones_table
+from network_wrangler.roadway.links.connectors import FitForCentroidConnection, add_centroid_connectors
 from network_wrangler.utils.io_table import read_table, write_table
 
 # Suppress FutureWarning about downcasting in fillna
