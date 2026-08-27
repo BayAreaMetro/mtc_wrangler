@@ -2275,23 +2275,223 @@ def set_controlled_access_highway_nodes(
     )
 
 # =============================================================================
+# PBF FILE HELPERS (used by step 1)
+# =============================================================================
+#
+# Why PBF extracts instead of live Overpass API queries?
+#
+#   The Overpass API (overpass-api.de) enforces rate limits and per-query size
+#   caps that are routinely hit when downloading a 9-county Bay Area network or
+#   even a single large county such as Santa Clara.  Symptoms include long
+#   retry waits, partial results, and occasional HTTP 429 / 504 errors.
+#
+#   Using a pre-downloaded Geofabrik PBF extract avoids these issues entirely:
+#   * No network round-trips during the network build (faster, reproducible).
+#   * The exact OSM data vintage is recorded in the PBF header and logged.
+#   * osmium-tool clips the extract to the county bbox in seconds, keeping
+#     the downstream osmnx graph to a manageable size.
+#
+# Workflow:
+#   1. Download a regional .osm.pbf from Geofabrik (one-time, ~300 MB):
+#        https://download.geofabrik.de/north-america/us/california/norcal.html
+#   2. Place the file in:
+#        <output_dir>/osm_geofabrik_extracts/norcal-latest.osm.pbf
+#   3. Run the script normally — no extra flags needed.
+#
+# Key references:
+#   * Geofabrik download server:
+#       https://download.geofabrik.de/
+#   * OSM PBF format spec (Protocol Buffer Binary Format):
+#       https://wiki.openstreetmap.org/wiki/PBF_Format
+#   * osmium-tool (bbox extraction + format conversion):
+#       https://osmcode.org/osmium-tool/
+#       Install: conda install -c conda-forge osmium-tool
+#   * pyosmium (Python bindings, used for PBF header/timestamp reading):
+#       https://osmcode.org/pyosmium/
+#       Install: pip install osmium  (or conda install -c conda-forge pyosmium)
+#   * osmnx graph_from_xml (reads the extracted .osm XML):
+#       https://osmnx.readthedocs.io/en/stable/osmnx.html#osmnx.graph.graph_from_xml
+#
+# =============================================================================
+
+def _get_pbf_timestamp(pbf_file: pathlib.Path) -> str:
+    """Get OSM replication timestamp from a PBF file header.
+
+    Tries pyosmium first, then the osmium CLI tool, and falls back to
+    the file's modification time.
+
+    Args:
+        pbf_file: Path to the .osm.pbf file.
+
+    Returns:
+        Timestamp string, or a fallback description if the timestamp cannot be read.
+    """
+    # Try pyosmium (Python bindings for osmium-tool)
+    try:
+        import osmium  # type: ignore[import]
+        reader = osmium.io.Reader(str(pbf_file), osmium.osm.Nothing)
+        ts = reader.header().get("osmosis_replication_timestamp")
+        reader.close()
+        if ts:
+            return ts
+    except ImportError:
+        pass
+    except Exception as e:
+        WranglerLogger.debug(f"pyosmium timestamp read failed: {e}")
+
+    # Try osmium CLI tool
+    try:
+        result = subprocess.run(
+            ["osmium", "fileinfo", str(pbf_file)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "osmosis_replication_timestamp" in line:
+                    return line.split("=", 1)[-1].strip()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        WranglerLogger.debug(f"osmium CLI timestamp read failed: {e}")
+
+    # Fallback: file modification time
+    mtime = datetime.datetime.fromtimestamp(pbf_file.stat().st_mtime)
+    return f"(file mtime: {mtime.strftime('%Y-%m-%d %H:%M:%S')})"
+
+
+def _extract_osm_from_pbf(
+    pbf_file: pathlib.Path,
+    output_osm: pathlib.Path,
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+) -> None:
+    """Extract highway-only OSM XML from a PBF file, optionally clipping to a bbox.
+
+    Uses a two-step osmium-tool pipeline to keep intermediate files small:
+
+    1. ``osmium extract --bbox=...`` clips the PBF to the bounding box, writing a
+       compact intermediate PBF (binary, ~10x smaller than OSM XML).
+    2. ``osmium tags-filter w/highway`` retains only ways with a ``highway`` tag
+       (plus their referenced nodes), matching the ``network_type='all'`` filter
+       that osmnx previously sent to the Overpass API.
+
+    Without bbox, step 1 is skipped and only the highway filter is applied.
+
+    This produces an OSM XML file that is typically 300–600 MB for the Bay Area,
+    vs. 6+ GB for an unfiltered bbox extract.
+
+    Uses the osmium-tool CLI (``osmium`` command) which must be on the system
+    PATH.  Install with:
+      conda install -c conda-forge osmium-tool
+
+    Args:
+        pbf_file: Path to the source .osm.pbf file.
+        output_osm: Path to write the OSM XML output (e.g. a ``.osm`` file).
+        bbox: Optional ``(west, south, east, north)`` bounding box in WGS84
+              decimal degrees.
+
+    Raises:
+        RuntimeError: If osmium is not found or exits with a non-zero exit code.
+    """
+    def _run(cmd: list[str]) -> None:
+        """Run an osmium command, raising RuntimeError on failure."""
+        WranglerLogger.info(f"Running: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "osmium command not found. Install osmium-tool to run this script:\n"
+                "  conda install -c conda-forge osmium-tool\n"
+                "  or see: https://osmcode.org/osmium-tool/"
+            )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"osmium failed (exit code {result.returncode}).\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+
+    if bbox is not None:
+        west, south, east, north = bbox
+        # Step 1: clip to bbox → compact intermediate PBF
+        temp_pbf = output_osm.with_suffix(".bbox.osm.pbf")
+        _run([
+            "osmium", "extract",
+            f"--bbox={west},{south},{east},{north}",
+            str(pbf_file), "-o", str(temp_pbf), "--overwrite",
+        ])
+        size_mb = temp_pbf.stat().st_size / 1e6
+        WranglerLogger.info(f"Bbox-clipped PBF: {temp_pbf} ({size_mb:.1f} MB)")
+
+        # Step 2: filter to highway=* ways → final OSM XML
+        _run([
+            "osmium", "tags-filter", str(temp_pbf), "w/highway",
+            "-o", str(output_osm), "--overwrite",
+        ])
+        temp_pbf.unlink()
+    else:
+        # No bbox: just filter to highway=* ways → OSM XML
+        _run([
+            "osmium", "tags-filter", str(pbf_file), "w/highway",
+            "-o", str(output_osm), "--overwrite",
+        ])
+
+    size_mb = output_osm.stat().st_size / 1e6
+    WranglerLogger.info(f"Wrote highway-filtered OSM extract to {output_osm} ({size_mb:.1f} MB)")
+
+
+def _find_pbf_file(base_output_dir: pathlib.Path) -> pathlib.Path:
+    """Find the single .osm.pbf extract in base_output_dir / "osm_geofabrik_extracts".
+
+    Expects exactly one ``.osm.pbf`` file in that directory.
+
+    Args:
+        base_output_dir: Base output directory passed as ``output_dir`` on the CLI
+                         (before the county subdirectory is appended).
+
+    Returns:
+        Path to the single ``.osm.pbf`` file found.
+
+    Raises:
+        FileNotFoundError: If no ``.osm.pbf`` file is present.
+        ValueError: If more than one ``.osm.pbf`` file is present.
+    """
+    extracts_dir = base_output_dir / "osm_geofabrik_extracts"
+    found = sorted(extracts_dir.glob("*.osm.pbf"))
+    if len(found) == 0:
+        raise FileNotFoundError(
+            f"No .osm.pbf file found in {extracts_dir}.\n"
+            f"Download a regional extract from https://download.geofabrik.de/ "
+            f"(e.g. norcal-latest.osm.pbf) and place it in that directory."
+        )
+    if len(found) > 1:
+        names = ", ".join(f.name for f in found)
+        raise ValueError(
+            f"Multiple .osm.pbf files found in {extracts_dir}: {names}\n"
+            f"Keep only the one you want to use."
+        )
+    WranglerLogger.info(f"Using Geofabrik extract: {found[0].name}")
+    return found[0]
+
+
+# =============================================================================
 # 7-STEP NETWORK CREATION WORKFLOW FUNCTIONS
 # =============================================================================
 
 def step1_download_osm_network(
-        county: str, output_dir: pathlib.Path, base_output_dir: pathlib.Path
+        county: str, output_dir: pathlib.Path, base_output_dir: pathlib.Path,
+        pbf_file: pathlib.Path,
     ) -> networkx.MultiDiGraph:
     """
-    Step 1: Downloads OSM network data for specified geography.
+    Step 1: Loads OSM network data for specified geography from a local PBF extract.
 
-    Downloads road network data from OpenStreetMap using OSMnx for either
-    individual counties or the entire Bay Area. Uses caching to avoid
-    repeated downloads.
+    Reads road network data from a local Geofabrik .osm.pbf extract rather than
+    querying the Overpass API. The extract is clipped to the county or Bay Area
+    bounding box using osmium-tool, converted to OSM XML, and loaded by OSMnx.
 
     Args:
         county: County name (e.g., "San Francisco") or "Bay Area"
         output_dir: County-specific output directory
-        base_output_dir: Base directory for shared resources
+        base_output_dir: Base directory for shared resources (county shapefiles, etc.)
+        pbf_file: Path to the local .osm.pbf extract (from osm_geofabrik_extracts/).
 
     Returns:
         NetworkX MultiDiGraph containing the raw OSM road network
@@ -2303,14 +2503,13 @@ def step1_download_osm_network(
     osmnx.settings.cache_folder = output_dir / "osmnx_cache"
     osmnx.settings.log_file = True
     osmnx.settings.logs_folder = output_dir / "osmnx_logs"
-    osmnx.settings.useful_tags_way=OSM_WAY_TAGS.keys()
-        
-    county_no_spaces = county.replace(" ", "")
+    osmnx.settings.useful_tags_way = OSM_WAY_TAGS.keys()
+
     OSM_network_type = "all"  # Include all road types
 
     # Check for cached graph
     initial_graph_file = output_dir / "1_graph_OSM.pkl"
-    
+
     if use_cache_for_step("1") and initial_graph_file.exists():
         try:
             with open(initial_graph_file, 'rb') as f:
@@ -2320,23 +2519,37 @@ def step1_download_osm_network(
             return g
         except Exception as e:
             WranglerLogger.warning(f"Could not read cached graph: {e}")
-    
-    # Download new graph
+
+    # Log PBF source info
+    ts = _get_pbf_timestamp(pbf_file)
+    WranglerLogger.info(f"PBF source file : {pbf_file}")
+    WranglerLogger.info(f"PBF OSM timestamp: {ts}")
+
+    # Get bounding box for extraction
     if county == 'Bay Area':
-        WranglerLogger.info("Downloading network for Bay Area using bounding box...")
         bbox = models.get_county_bbox(models.MTC_COUNTIES, base_output_dir)
-        WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
-        g = osmnx.graph_from_bbox(bbox, network_type=OSM_network_type)
     else:
-        WranglerLogger.info(f"Downloading network for {county}...")
-        g = osmnx.graph_from_place(f'{county} County, California, USA', network_type=OSM_network_type)
-    
-    # Cache the downloaded graph
+        bbox = models.get_county_bbox([county], base_output_dir)
+    WranglerLogger.info(f"Bounding box: west={bbox[0]:.6f}, south={bbox[1]:.6f}, east={bbox[2]:.6f}, north={bbox[3]:.6f}")
+
+    # Extract to .osm XML (cached so repeated county runs skip osmium)
+    extracted_osm = output_dir / "osmnx_cache" / "1_source_extract.osm"
+    extracted_osm.parent.mkdir(parents=True, exist_ok=True)
+    if not extracted_osm.exists() or not use_cache_for_step("1"):
+        _extract_osm_from_pbf(pbf_file, extracted_osm, bbox=bbox)
+    else:
+        WranglerLogger.info(f"Using cached OSM extract: {extracted_osm}")
+
+    # Load graph from extracted OSM XML
+    WranglerLogger.info(f"Loading graph from {extracted_osm}...")
+    g = osmnx.graph_from_xml(extracted_osm, retain_all=False)
+
+    # Cache the loaded graph
     with open(initial_graph_file, "wb") as f:
         pickle.dump(g, f)
     WranglerLogger.info(f"Cached OSM graph to {initial_graph_file}")
-    WranglerLogger.info(f"Downloaded graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
-    
+    WranglerLogger.info(f"Graph has {g.number_of_edges():,} edges and {len(g.nodes()):,} nodes")
+
     return g
 
 
@@ -3436,7 +3649,8 @@ if __name__ == "__main__":
         # STEPS 1-2: Download OSM, standardize, simplify -> (links_gdf, nodes_gdf) for step 3
         if start <= 2:
             # STEP 1: Download OSM network data
-            g = step1_download_osm_network(args.county, output_dir, base_output_dir)
+            pbf_file = _find_pbf_file(base_output_dir)
+            g = step1_download_osm_network(args.county, output_dir, base_output_dir, pbf_file=pbf_file)
 
             # STEP 1a: standardize attributes (and write) for the ORIGINAL network.
             # Its result is discarded (we use the simplified step-2a output downstream),

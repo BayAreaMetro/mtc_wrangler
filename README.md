@@ -207,6 +207,8 @@ xyzservices               2025.11.0
 zstandard                 0.25.0
 ```
 
+```
+
 Don't forget to install network_wrangler in editable mode:
 ```powershell
 (venv_network_wrangler_310) PS E:\GitHub\tm2\mtc_wrangler\create_baseyear_network> uv pip show network_wrangler
@@ -218,3 +220,81 @@ Editable project location: E:\GitHub\tm2\network_wrangler
 Requires: fiona, geographiclib, geojson, geopandas, ijson, osmnx, pandas, pandera, projectcard, psutil, pyarrow, pydantic, pyogrio, pyyaml, typing-extensions
 Required-by:
 ```
+
+## Creating a Base Year Network from OSM (`create_mtc_network_from_OSM.py`)
+
+### OSM data: using Geofabrik PBF extracts
+
+The network creation script downloads road network data from OpenStreetMap.
+Rather than querying the live Overpass API (which has rate limits and size caps
+that are routinely hit for Bay Area-scale downloads), the script reads from a
+**local Geofabrik PBF extract**.
+
+**One-time setup:**
+
+1. Download the Northern California extract (~300 MB) from Geofabrik:
+   https://download.geofabrik.de/north-america/us/california/norcal.html
+
+2. Place the file in a subdirectory of your output directory:
+   ```
+   <output_dir>/osm_geofabrik_extracts/norcal-latest.osm.pbf
+   ```
+   The directory must contain **exactly one** `.osm.pbf` file; the script
+   errors with a clear message if zero or more than one are found.
+
+3. Run the script normally — no extra flags are needed. The script logs the
+   OSM data vintage timestamp (read from the PBF header) so you always know
+   what snapshot the network was built from.
+
+### Installing osmium-tool
+
+The script uses [osmium-tool](https://osmcode.org/osmium-tool/) (a C++ binary)
+to clip the PBF to the county bounding box before loading it with osmnx.
+It also optionally uses [pyosmium](https://osmcode.org/pyosmium/) (Python
+bindings) to read the PBF timestamp.
+
+**Important:** `osmium-tool` is **not a Python package** and cannot be installed
+with `pip` or `uv`. It must be installed separately.
+
+#### Option A — conda (may be slow first time)
+
+```powershell
+conda install -c conda-forge osmium-tool
+```
+
+If `conda update conda` is needed first, be prepared for a long solve. Consider
+switching to [miniforge](https://github.com/conda-forge/miniforge) for future
+installs, which uses the much faster `mamba` solver by default.
+
+After install, verify the binary is on your PATH:
+```powershell
+osmium --version
+```
+
+If it is not found (common when running inside a venv), locate the binary and
+add its folder to PATH:
+```powershell
+conda run where osmium   # find the path
+$env:PATH += ";C:\Users\<you>\anaconda3\Library\bin"   # adjust as needed
+```
+
+#### Option B — direct binary download (no conda required)
+
+1. Download the latest `osmium-tool-x.x.x-win64.zip` from:
+   https://github.com/osmcode/osmium-tool/releases
+2. Extract to e.g. `E:\tools\osmium-tool\`
+3. Add to PATH (per-session or permanently via System Properties):
+   ```powershell
+   $env:PATH += ";E:\tools\osmium-tool"
+   osmium --version
+   ```
+
+#### pyosmium Python bindings (optional, for timestamp reading)
+
+```powershell
+uv pip install osmium
+```
+
+This is optional — if pyosmium is not installed the script falls back to the
+`osmium fileinfo` CLI for the timestamp, and then to the file's modification
+time. The extraction step always uses the osmium-tool CLI binary.
