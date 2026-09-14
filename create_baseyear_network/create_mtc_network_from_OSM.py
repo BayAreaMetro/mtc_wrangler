@@ -78,6 +78,7 @@ import requests
 import statistics
 import subprocess
 import sys
+import time
 from typing import Any, Optional, Tuple, Union
 
 import networkx
@@ -2072,14 +2073,27 @@ def fetch_toll_gantry_nodes(
     """
     
     WranglerLogger.debug(f"Querying Overpass API with bbox: south={south:.6f}, west={west:.6f}, north={north:.6f}, east={east:.6f}")
-    
-    try:
-        response = requests.get(overpass_url, params={'data': overpass_query}, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.RequestException as e:
-        WranglerLogger.error(f"Failed to fetch toll gantry nodes from Overpass API: {e}")
-        return gpd.GeoDataFrame(columns=['osmid', 'lat', 'lon', 'geometry'], crs=LAT_LON_CRS)
+
+    # retry a few times since the public Overpass instance intermittently returns 504s under load
+    MAX_ATTEMPTS = 3
+    data = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(
+                overpass_url,
+                params={'data': overpass_query},
+                headers={'User-Agent': 'mtc_wrangler'}, # need to specify user or Overpass rejects with 406 client error
+                timeout=120,
+            )
+            response.raise_for_status()
+            data = response.json()
+            break # success, skip the except block
+        except requests.exceptions.RequestException as e:
+            WranglerLogger.warning(f"Attempt {attempt}/{MAX_ATTEMPTS} failed to fetch toll gantry nodes from Overpass API: {e}")
+            if attempt == MAX_ATTEMPTS:
+                WranglerLogger.error(f"Failed to fetch toll gantry nodes from Overpass API after {MAX_ATTEMPTS} attempts")
+                return gpd.GeoDataFrame(columns=['osmid', 'lat', 'lon', 'geometry'], crs=LAT_LON_CRS)
+            time.sleep(5 * attempt)
     
     # Convert to GeoDataFrame
     nodes = []
