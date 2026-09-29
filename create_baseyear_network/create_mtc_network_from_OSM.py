@@ -456,7 +456,13 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     - corridor         hallway inside a building (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dcorridor)
                        -> converted to footway
     - footway          pedestrian path (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dfootway)
+                       -> also absorbs 'platform' (transit passenger waiting areas)
     - busway           dedicated right-of-way for buses (https://wiki.openstreetmap.org/wiki/Tag:highway%3Dbusway)
+
+    Rare/long-tail OSM values are folded into the categories above rather than passed through as-is:
+    - platform, road, residential_link, services, escape -> see mappings above
+    - raceway, construction, proposed, planned -> dropped entirely (not part of the
+      current public road network: motorsport-only or not yet built)
 
     Args:
         links_gdf: Links GeoDataFrame from OSMnx with columns:
@@ -521,6 +527,12 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     # includes pedestrian => footway
     links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('pedestrian' in x)), 'highway'] = 'footway'
 
+    # convert platform (transit passenger waiting area) to footway
+    links_gdf.loc[links_gdf.highway == 'platform', 'highway'] = 'footway'
+
+    # includes platform => footway
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('platform' in x)), 'highway'] = 'footway'
+
     # convert bridleway to footway
     links_gdf.loc[links_gdf.highway == 'bridleway', 'highway'] = 'footway'
 
@@ -545,6 +557,9 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
             return name.endswith('Trail') or name.endswith('Fire Road')
         # For any other type (including NaN float), return False
         return False
+
+    # includes track => track (so list-valued highways with 'track' hit the trail/service logic below)
+    links_gdf.loc[links_gdf.highway.apply(lambda x: isinstance(x, list) and ('track' in x)), 'highway'] = 'track'
 
     track_mask = links_gdf['highway'] == 'track'
     if track_mask.any():
@@ -586,6 +601,30 @@ def standardize_highway_value(links_gdf: gpd.GeoDataFrame) -> None:
     links_gdf.loc[links_gdf.highway == 'busway', 'truck_access'] = False
     links_gdf.loc[links_gdf.highway == 'busway', 'bike_access'] = False
     links_gdf.loc[links_gdf.highway == 'busway', 'walk_access'] = False
+
+    ################ minor / non-standard highway values (rare, long-tail OSM tags) ################
+    def _highway_isin_or_list_has(values: list[str]):
+        return links_gdf.highway.isin(values) | links_gdf.highway.apply(
+            lambda x: isinstance(x, list) and any(v in x for v in values))
+
+    # 'road': generic/unknown-classification way -> unclassified
+    links_gdf.loc[_highway_isin_or_list_has(['road']), 'highway'] = 'unclassified'
+
+    # 'residential_link': non-standard tag, functionally a residential connector -> residential
+    links_gdf.loc[_highway_isin_or_list_has(['residential_link']), 'highway'] = 'residential'
+
+    # 'services' (rest area/service station driveway) and 'escape' (runaway truck ramp) -> service
+    links_gdf.loc[_highway_isin_or_list_has(['services', 'escape']), 'highway'] = 'service'
+
+    # 'raceway' (motorsport-only, not public road) and 'construction'/'proposed'/'planned'
+    # (don't exist yet) aren't part of the current public road network -- drop them
+    drop_highway_values = ['raceway', 'construction', 'proposed', 'planned']
+    drop_mask = _highway_isin_or_list_has(drop_highway_values)
+    if drop_mask.any():
+        WranglerLogger.info(
+            f"Dropping {drop_mask.sum():,} links with highway in {drop_highway_values} "
+            f"(not part of the current public road network)")
+        links_gdf.drop(index=links_gdf.loc[drop_mask].index, inplace=True)
 
     ################ auto ################
 
@@ -2453,20 +2492,21 @@ def _extract_osm_from_pbf(
 
 
 def _find_pbf_file(base_output_dir: pathlib.Path) -> pathlib.Path:
-    """Find the single .osm.pbf extract in base_output_dir / "osm_geofabrik_extracts".
+    """Find the .osm.pbf extract to use in base_output_dir / "osm_geofabrik_extracts".
 
-    Expects exactly one ``.osm.pbf`` file in that directory.
+    If more than one ``.osm.pbf`` file is present, the alphabetically-last one is
+    used. Geofabrik extracts are named like ``norcal-260826.osm.pbf`` (YYMMDD), so
+    sorting by filename also sorts them chronologically.
 
     Args:
         base_output_dir: Base output directory passed as ``output_dir`` on the CLI
                          (before the county subdirectory is appended).
 
     Returns:
-        Path to the single ``.osm.pbf`` file found.
+        Path to the ``.osm.pbf`` file to use.
 
     Raises:
         FileNotFoundError: If no ``.osm.pbf`` file is present.
-        ValueError: If more than one ``.osm.pbf`` file is present.
     """
     extracts_dir = base_output_dir / "osm_geofabrik_extracts"
     found = sorted(extracts_dir.glob("*.osm.pbf"))
@@ -2477,13 +2517,12 @@ def _find_pbf_file(base_output_dir: pathlib.Path) -> pathlib.Path:
             f"(e.g. norcal-latest.osm.pbf) and place it in that directory."
         )
     if len(found) > 1:
-        names = ", ".join(f.name for f in found)
-        raise ValueError(
-            f"Multiple .osm.pbf files found in {extracts_dir}: {names}\n"
-            f"Keep only the one you want to use."
+        WranglerLogger.warning(
+            f"Multiple .osm.pbf files found in {extracts_dir}: {[f.name for f in found]}\n"
+            f"Using the most recent (last alphabetically): {found[-1].name}"
         )
-    WranglerLogger.info(f"Using Geofabrik extract: {found[0].name}")
-    return found[0]
+    WranglerLogger.info(f"Using Geofabrik extract: {found[-1].name}")
+    return found[-1]
 
 
 # =============================================================================
