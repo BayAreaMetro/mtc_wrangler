@@ -3063,8 +3063,6 @@ def step4_add_centroids_and_connectors(
             "drive_access": False,
             "roadway": "centroid connector",
             "ft": models.MTCFacilityType.CONNECTOR,
-            "drive_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
-            "walk_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
         }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -3094,8 +3092,6 @@ def step4_add_centroids_and_connectors(
                 "drive_access": False,
                 "roadway": "centroid connector",
                 "ft": models.MTCFacilityType.CONNECTOR,
-                "drive_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
-                "walk_centroid_fit": FitForCentroidConnection.NA_IS_CONNECTOR,
             }
         )
         WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
