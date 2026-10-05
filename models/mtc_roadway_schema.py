@@ -122,36 +122,34 @@ class MTCFacilityType(IntEnum):
 
     These codes are used to assign volume delay functions (VDF) in tm2py.
 
-    Reference: [MTC Network Rebuild Requirements](https://docs.google.com/document/d/17OeXT8jxIst-vmGLl6eZVXx5b20cmct1p1WOpAuhi0M/edit?usp=sharing)
+    Reference: [TM1 Master Network Lookup Tables - Facility Type (FT)](https://github.com/BayAreaMetro/modeling-website/wiki/MasterNetworkLookupTables#facility-type-ft)
 
-    | Code | Facility Type       | Intention                                                      | Speed Limit      | Example                  |
-    |------|---------------------|----------------------------------------------------------------|------------------|--------------------------|
-    | 1    | Freeway             | Move vehicles across counties                                  | 50+ mph          | I-80                     |
-    | 2    | Expressway          | Connect freeways to other freeways or business districts       | 40-60 mph        | San Tomas Expressway     |
-    | 3    | Ramp                | Connect arterials to freeways or expressways                   | 20-45 mph        | Tassajara Road to I-580  |
-    | 4    | Divided Arterial    | Move vehicles across cities                                    | 35-50 mph        | El Camino Real           |
-    | 5    | Undivided Arterial  | Move vehicles across cities                                    | 35-45 mph        | Ashby Ave                |
-    | 6    | Collector           | Collect traffic from local roads and deliver to arterials      | 25-40 mph        | Fruitvale Road           |
-    | 7    | Local               | Connect roads to homes                                         | 20-35 mph        | Lance Drive              |
-    | 8    | Connector           | Connects centroids; access/egress links for managed lanes      | ??               |                          |
-    | 99   | Not Assigned        | Service Road                                                   | 20 mph           | Parking lot              |
-
-    **Key Characteristics:**
-
-    - **Controlled Access**: Freeway (always), Expressway (sometimes), others (no)
-    - **Turn Pockets/Lanes**: Freeway/Expressway/Ramp (always/N/A), Arterials (nearly always), Collectors (sometimes), Local/Dummy (never)
-    - **Physical Separation**: Freeway/Expressway (always), Ramp/Divided Arterial (usually/nearly always), others (rarely/never)
-    - **On-street Parking**: Never for Freeway/Expressway/Ramp, sometimes for Arterials, usually/always for Collector/Local/Dummy
-    - **Walkable**: Never for Freeway/Ramp, rarely for Expressway, nearly always to always for Arterials/Collectors/Local/Dummy
+    | Code | Facility Type                | Notes                                                          |
+    |------|-------------------------------|-----------------------------------------------------------------|
+    | 1    | Freeway-to-freeway connector  |                                                                   |
+    | 2    | Freeway                       |                                                                   |
+    | 3    | Expressway                    |                                                                   |
+    | 4    | Collector                     |                                                                   |
+    | 5    | Freeway ramp                  |                                                                   |
+    | 6    | Dummy link                    | Used for centroid connectors and managed-lane access/egress links |
+    | 7    | Major arterial                |                                                                   |
+    | 8    | ITS-managed Freeway            | Not relevant to pricing or tolling                               |
+    | 9    | Special facility              |                                                                   |
+    | 10   | Toll plaza                    |                                                                   |
+    | 11   | Local road                    | No TM1-equivalent; added for MTC use                             |
+    | 99   | Not Assigned                  | No TM1-equivalent                                                |
     """
-    FREEWAY = 1
-    EXPRESSWAY = 2
-    RAMP = 3
-    DIVIDED_ARTERIAL = 4
-    UNDIVIDED_ARTERIAL = 5
-    COLLECTOR = 6
-    LOCAL = 7
-    CONNECTOR = 8
+    FREEWAY_TO_FREEWAY_CONNECTOR = 1
+    FREEWAY = 2
+    EXPRESSWAY = 3
+    COLLECTOR = 4
+    RAMP = 5
+    DUMMY_LINK = 6
+    ARTERIAL = 7
+    MANAGED_FREEWAY = 8
+    SPECIAL_FACILITY = 9
+    TOLL_PLAZA = 10
+    LOCAL = 11
     NOT_ASSIGNED = 99
 
 class MTCTollType(str, Enum):

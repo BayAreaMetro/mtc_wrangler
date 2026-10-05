@@ -1028,7 +1028,7 @@ def add_facility_type(
 ):
     """Adds MTC facility type (ft) field to links based on OSM roadway classification.
 
-    Maps OSM highway types to MTC facility type codes as defined in models.MTCFacilityType enum.
+    Maps OSM highway types to MTC (TM1) facility type codes as defined in models.MTCFacilityType enum.
 
     Args:
         links_gdf: The links GeoDataFrame to add ft field to
@@ -1037,15 +1037,14 @@ def add_facility_type(
         Nothing; links_gdf is modified in place with 'ft' column added
 
     Notes:
-        - Freeway (1): motorway, motorway_link
-        - Expressway (2): trunk
-        - Ramp (3): trunk_link, motorway_link
-        - Divided Arterial (4): primary with divider/multiple lanes
-        - Undivided Arterial (5): primary, secondary
-        - Collector (6): tertiary, primary_link, secondary_link, tertiary_link
-        - Local (7): residential, unclassified, living_street
-        - Connector (8): centroid connectors (set elsewhere)
-        - Not Assigned (99): service, footway, cycleway, path, etc.
+        - Freeway (2): motorway
+        - Expressway (3): trunk
+        - Freeway ramp (5): motorway_link, trunk_link
+        - Major arterial (7): primary, secondary
+        - Collector (4): tertiary, primary_link, secondary_link, tertiary_link
+        - Local road (11): residential, service, unclassified, living_street (no TM1 equivalent)
+        - Not Assigned (99): footway, cycleway, path, etc.
+          (centroid connectors/ML access-egress links are set elsewhere as Dummy link (6))
     """
     WranglerLogger.debug(f"add_facility_type(): roadway value counts:\n{links_gdf['roadway'].value_counts()}")
 
@@ -1060,30 +1059,19 @@ def add_facility_type(
     expressway_mask = links_gdf['roadway'] == 'trunk'
     links_gdf.loc[expressway_mask, 'ft'] = models.MTCFacilityType.EXPRESSWAY
 
-    # Ramp: motorway_link and trunk_link
+    # Freeway ramp: motorway_link and trunk_link
     ramp_mask = links_gdf['roadway'].isin(['motorway_link', 'trunk_link'])
     links_gdf.loc[ramp_mask, 'ft'] = models.MTCFacilityType.RAMP
 
-    # Arterials: primary and secondary roads
-    # Divided arterial: oneway=True (one direction roadway, typically separated)
-    # Undivided arterial: oneway=False (bidirectional roadway)
-    primary_divided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == True)
-    links_gdf.loc[primary_divided_mask, 'ft'] = models.MTCFacilityType.DIVIDED_ARTERIAL
-
-    primary_undivided_mask = (links_gdf['roadway'] == 'primary') & (links_gdf['oneway'] == False)
-    links_gdf.loc[primary_undivided_mask, 'ft'] = models.MTCFacilityType.UNDIVIDED_ARTERIAL
-
-    secondary_divided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == True)
-    links_gdf.loc[secondary_divided_mask, 'ft'] = models.MTCFacilityType.DIVIDED_ARTERIAL
-
-    secondary_undivided_mask = (links_gdf['roadway'] == 'secondary') & (links_gdf['oneway'] == False)
-    links_gdf.loc[secondary_undivided_mask, 'ft'] = models.MTCFacilityType.UNDIVIDED_ARTERIAL
+    # Major arterial: primary and secondary roads (TM1 FT does not distinguish divided/undivided)
+    arterial_mask = links_gdf['roadway'].isin(['primary', 'secondary'])
+    links_gdf.loc[arterial_mask, 'ft'] = models.MTCFacilityType.ARTERIAL
 
     # Collector: tertiary roads, primary_link, secondary_link, tertiary_link
     collector_mask = links_gdf['roadway'].isin(['tertiary','primary_link','secondary_link','tertiary_link'])
     links_gdf.loc[collector_mask, 'ft'] = models.MTCFacilityType.COLLECTOR
 
-    # Local: residential, service, unclassified, living_street
+    # Local road: residential, service, unclassified, living_street (no TM1 equivalent)
     local_mask = links_gdf['roadway'].isin(['residential', 'service', 'unclassified', 'living_street'])
     links_gdf.loc[local_mask, 'ft'] = models.MTCFacilityType.LOCAL
 
@@ -3062,7 +3050,7 @@ def step4_add_centroids_and_connectors(
             # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
             "drive_access": False,
             "roadway": "centroid connector",
-            "ft": models.MTCFacilityType.CONNECTOR,
+            "ft": models.MTCFacilityType.DUMMY_LINK,
         }
     )
     WranglerLogger.debug(f"TAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -3091,7 +3079,7 @@ def step4_add_centroids_and_connectors(
                 # TODO: this is an odd choice, but right now it's interfering with transit conflation to roadway network
                 "drive_access": False,
                 "roadway": "centroid connector",
-                "ft": models.MTCFacilityType.CONNECTOR,
+                "ft": models.MTCFacilityType.DUMMY_LINK,
             }
         )
         WranglerLogger.debug(f"MAZs with 0 connectors:\n{summary_gdf.loc[summary_gdf.num_connectors == 0]}")
@@ -3631,6 +3619,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
+    print(f"args={args}")
 
     # Apply cache/fast-path controls (module-level, read by the step functions)
     _START_STEP = args.start_step

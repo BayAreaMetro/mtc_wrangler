@@ -115,7 +115,7 @@ def fix_missing_fields(model_roadway_net: ModelRoadwayNetwork):
     # facility type: missing values are connectors
     WranglerLogger.debug(f"model_roadway_net.links_df.ft:\n{model_roadway_net.links_df['ft'].value_counts(dropna=False)}")
     model_roadway_net.links_df.loc[ 
-        model_roadway_net.links_df['roadway'].isin(['ml_access_point','ml_egress_point']), 'ft'] = MTCFacilityType.CONNECTOR
+        model_roadway_net.links_df['roadway'].isin(['ml_access_point','ml_egress_point']), 'ft'] = MTCFacilityType.DUMMY_LINK
     model_roadway_net.links_df['ft'] = model_roadway_net.links_df['ft'].astype(int)
     WranglerLogger.debug(f"model_roadway_net.links_df.ft:\n{model_roadway_net.links_df['ft'].value_counts(dropna=False)}")
 
