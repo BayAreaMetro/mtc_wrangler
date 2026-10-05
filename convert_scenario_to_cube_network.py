@@ -56,8 +56,9 @@ from network_wrangler.scenario import load_scenario
 from network_wrangler.roadway.model_roadway import ModelRoadwayNetwork
 from network_wrangler.models.gtfs.types import RouteType
 
-from cube_wrangler.parameters import Parameters, TimePeriodsConfig
+import cube_wrangler
 from cube_wrangler.roadway import (
+    CUBE_MAX_CHAR_WIDTH,
     split_properties_by_time_period_and_category,
     convert_types,
     write_roadway_as_fixedwidth,
@@ -326,22 +327,29 @@ def fix_cube_fields(model_roadway_net: ModelRoadwayNetwork, node_id_map: dict):
     transit_node_ids = pd.concat([transit_links['A'], transit_links['B']]).unique()
     nodes_df['transit_node'] = nodes_df['N'].isin(transit_node_ids).astype(int)
 
+    # some merged/consolidated nodes carry osm_node_id as a list of all contributing OSM node
+    # ids (sometimes hundreds long); Cube's fixed-width NETWORK format can't hold that, so keep
+    # just the first id as a representative value
+    nodes_df['osm_node_id'] = nodes_df['osm_node_id'].apply(
+        lambda v: str(v[0]) if isinstance(v, (list, tuple)) else v
+    )
+
     # Cube wants projected coordinates (feet); geometry should already be reprojected by caller
     nodes_df['X'] = nodes_df['geometry'].x
     nodes_df['Y'] = nodes_df['geometry'].y
 
 
-def build_cube_parameters(output_dir: pathlib.Path, num_tazs: int) -> Parameters:
-    """Build a cube_wrangler Parameters instance for this run.
+def build_cube_parameters(output_dir: pathlib.Path, num_tazs: int) -> cube_wrangler.Parameters:
+    """Build a cube_wrangler.Parameters instance for this run.
 
     Args:
         output_dir: directory to write Cube network files into
-        num_tazs: number of TAZ centroids (-> Parameters.zones)
+        num_tazs: number of TAZ centroids (-> cube_wrangler.Parameters.zones)
 
     Returns:
-        Parameters instance
+        cube_wrangler.Parameters instance
     """
-    cube_params = Parameters(
+    cube_params = cube_wrangler.Parameters(
         scratch_location=output_dir,
         settings_location=output_dir / "cube_wrangler_settings",
         zones=num_tazs,
@@ -355,9 +363,11 @@ def build_cube_parameters(output_dir: pathlib.Path, num_tazs: int) -> Parameters
         ),
     )
     # work around cube_wrangler bugs: write_roadway_as_fixedwidth()/project.py read
-    # parameters.string_col and parameters.output_epsg, but Parameters never defines either
-    # (as of cube-wrangler 0.2.1)
-    cube_params.string_col = ['roadway', 'name', 'county']
+    # parameters.string_col and parameters.output_epsg, but cube_wrangler.Parameters never
+    # defines either (as of cube-wrangler 0.2.1). Only list actual character columns here -- 'county' is
+    # mapped to an int code in fix_cube_fields(), so it must NOT be in string_col or Cube's
+    # generated LTRIM(TRIM(county)) line fails with "String variable required".
+    cube_params.string_col = ['roadway', 'name']
     cube_params.output_epsg = models.mtc_network.LOCAL_CRS_FEET
 
     # work around cube_wrangler bug: rename_variables_for_dbf() (used by write_roadway_as_shp())
@@ -368,12 +378,46 @@ def build_cube_parameters(output_dir: pathlib.Path, num_tazs: int) -> Parameters
     return cube_params
 
 
-def write_cube_roadway_network(model_roadway_net: ModelRoadwayNetwork, cube_params: Parameters, output_dir: pathlib.Path):
+def log_variable_summary(df: pd.DataFrame, columns: list[str], label: str):
+    """Log a variable/dtype/width/example-value table for the columns about to be written to Cube.
+
+    `width` mirrors cube_wrangler.roadway.dataframe_to_fixed_width()'s own calculation (max
+    stringified length, floored at 1, capped at CUBE_MAX_CHAR_WIDTH) so it matches what will
+    actually show up in the corresponding links_header_width.txt / nodes_header_width.txt.
+    `geometry` isn't part of the fixed-width file (dataframe_to_fixed_width drops it), so it has
+    no width.
+
+    Args:
+        df: dataframe to summarize (e.g. model_roadway_net.links_df)
+        columns: columns to summarize, in output order (e.g. link_output_variables)
+        label: short description used in the log message, e.g. "link" or "node"
+    """
+    rows = []
+    for col in columns:
+        non_null = df[col].dropna()
+        example = str(non_null.iloc[0]) if len(non_null) else ""
+        if len(example) > 60:
+            example = example[:57] + "..."
+
+        if col == "geometry":
+            width = "n/a"
+        else:
+            raw_width = max(int(non_null.astype(str).str.len().max()), 1) if len(non_null) else 1
+            width = min(raw_width, CUBE_MAX_CHAR_WIDTH)
+            if raw_width > CUBE_MAX_CHAR_WIDTH:
+                width = f"{width} (truncated from {raw_width})"
+
+        rows.append({"variable": col, "dtype": str(df[col].dtype), "width": width, "example": example})
+    summary_df = pd.DataFrame(rows)
+    WranglerLogger.info(f"Cube {label} variables ({len(columns)}):\n{summary_df.to_string(index=False)}")
+
+
+def write_cube_roadway_network(model_roadway_net: ModelRoadwayNetwork, cube_params: cube_wrangler.Parameters, output_dir: pathlib.Path):
     """Write the Cube roadway network (fixed-width + build script, plus a QA shapefile).
 
     Args:
         model_roadway_net: network with Cube-ready columns (see fix_cube_fields)
-        cube_params: Parameters from build_cube_parameters()
+        cube_params: cube_wrangler.Parameters from build_cube_parameters()
         output_dir: directory to write into
     """
     # split scoped lanes/ML_lanes/price/access/trn_priority/ttime_assert properties into
@@ -410,6 +454,9 @@ def write_cube_roadway_network(model_roadway_net: ModelRoadwayNetwork, cube_para
         'bike_node', 'transit_node', 'X', 'Y', 'geometry',
     ]
     node_output_variables = [c for c in node_output_variables if c in model_roadway_net.nodes_df.columns]
+
+    log_variable_summary(model_roadway_net.links_df, link_output_variables, "link")
+    log_variable_summary(model_roadway_net.nodes_df, node_output_variables, "node")
 
     write_roadway_as_fixedwidth(
         roadway_net=model_roadway_net,
@@ -585,6 +632,7 @@ if __name__ == "__main__":
     fix_cube_fields(model_roadway_net, node_id_map)
 
     cube_params = build_cube_parameters(output_dir, num_tazs)
+    WranglerLogger.info(f"cube_params: {cube_params}")
     write_cube_roadway_network(model_roadway_net, cube_params, output_dir)
 
     transit_lin_file = output_dir / "transitLines.lin"
