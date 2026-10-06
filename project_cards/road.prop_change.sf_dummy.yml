@@ -1,0 +1,13 @@
+project: I-80 E bound Bay Bridge road diet (dummy project)
+tags:
+   - 'example'
+roadway_property_change:
+  facility:
+    links:
+      osm_link_id:
+        - '[50690291, 179235221, 661905446]'
+  property_changes:
+    lanes:  #change number of lanes 5 to 4
+      existing: 5
+      change: -1
+notes: Simple roadway project example to demo project card workflow

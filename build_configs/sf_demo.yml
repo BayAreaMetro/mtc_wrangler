@@ -1,0 +1,7 @@
+scenario: output/SanFrancisco/7_scenario/mtc_2023_scenario.yml
+project_cards:
+  - project_cards/road.prop_change.sf_dummy.yml
+  - project_cards/transit.prop_change.sf_dummy.yml
+out_dir: output/SanFrancisco/8_build_scenario
+out_name: mtc_2023_i80_demo
+roadway_file_format: geojson

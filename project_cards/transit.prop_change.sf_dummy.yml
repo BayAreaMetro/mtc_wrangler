@@ -1,0 +1,13 @@
+project: Route 25 Frequency Increase (dummy project)
+tags:
+   - 'example'
+transit_property_change:
+  service:
+    trip_properties:
+      route_id: [SF:25]
+    timespans: [['06:00', '10:00'], ['10:00', '15:00'], ['15:00', '19:00']]
+  property_changes:
+    headway_secs:
+      existing: 1200
+      change: -300
+notes: Simple transit project example to compliment the bay bridge lane reduction
