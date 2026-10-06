@@ -78,6 +78,7 @@ import pathlib
 import pickle
 import pprint
 import requests
+import shlex
 import statistics
 import subprocess
 import sys
@@ -3706,6 +3707,7 @@ if __name__ == "__main__":
     )
     WranglerLogger.info(f"Starting 7-step network creation workflow for {args.county}")
     WranglerLogger.info(f"Created by {__file__}")
+    WranglerLogger.info(f"Command: {sys.executable} {shlex.join(sys.argv)}")
     WranglerLogger.info(f"start_step={_START_STEP}, stop_step={_STOP_STEP}, force_steps={sorted(_FORCE_STEPS) if _FORCE_STEPS else 'none'}")
 
     # For now, doing drive as we'll add handle transit and walk/bike separately
