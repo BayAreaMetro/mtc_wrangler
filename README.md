@@ -277,6 +277,7 @@ add its folder to PATH:
 conda run where osmium   # find the path
 $env:PATH += ";C:\Users\<you>\anaconda3\Library\bin"   # adjust as needed
 ```
+LMZ: osmium is installed in the conda environment, `network_wrangler_jan2026`
 
 #### Option B — direct binary download (no conda required)
 

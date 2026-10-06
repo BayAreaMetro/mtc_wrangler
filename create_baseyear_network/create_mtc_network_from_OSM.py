@@ -65,7 +65,10 @@ Example:
     python create_mtc_network_from_OSM.py "Santa Clara" ../../511gtfs_2023-09 ../../output_from_OSM/SantaClara parquet --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
     python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --force-step 6
     python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --stop-step 6
-"""
+
+    python create_mtc_network_from_OSM.py "Bay Area" M:\\Data\\Transit\\511\\2023-09 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20230927
+    python create_mtc_network_from_OSM.py "San Francisco" M:\\Data\\Transit\\511\\2026-09-11-GTFSTransitData_RG 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20260909
+    """
 
 USAGE = __doc__
 import argparse
@@ -3220,7 +3223,8 @@ def step5_prepare_gtfs_transit_data(
         county: str,
         input_gtfs: pathlib.Path,
         output_dir: pathlib.Path,
-        base_output_dir: pathlib.Path
+        base_output_dir: pathlib.Path,
+        service_date: int = 20230927,
 ) -> GtfsModel:
     """
     Step 5: Prepare GTFS transit data for integration: filter to service date and relevant operators
@@ -3233,6 +3237,7 @@ def step5_prepare_gtfs_transit_data(
         input_gtfs: Path to input GTFS data
         output_dir: County-specific output directory
         base_output_dir: Base directory for shared resources (county shapefiles)
+        service_date: GTFS service date (YYYYMMDD) to filter the feed to
 
     Returns:
         Filtered GTFS model object
@@ -3249,16 +3254,57 @@ def step5_prepare_gtfs_transit_data(
             return cached
     
     # Load and filter GTFS data
-    WranglerLogger.info("Loading GTFS feed for September 27, 2023...")
-    
-    # Filter to specific service date
-    calendar_dates_df = pd.read_csv(input_gtfs / "calendar_dates.txt")
-    calendar_dates_df = calendar_dates_df.loc[
-        (calendar_dates_df.date == 20230927) & (calendar_dates_df.exception_type == 1)
-    ]
-    calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-    service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-    service_ids = service_ids_df['service_id'].tolist()
+    SERVICE_DATE = service_date
+    WranglerLogger.info(f"Loading GTFS feed for service date {SERVICE_DATE}...")
+
+    # Determine active service_ids for SERVICE_DATE using both calendar.txt (regular
+    # weekday-based service) and calendar_dates.txt (added/removed exceptions), per
+    # the GTFS spec. Some feeds only use calendar.txt, some only calendar_dates.txt,
+    # and some use both, so both must be consulted.
+    service_date_obj = datetime.datetime.strptime(str(SERVICE_DATE), "%Y%m%d").date()
+    weekday_col = service_date_obj.strftime("%A").lower()  # e.g. "wednesday"
+
+    service_ids_set = set()
+
+    calendar_path = input_gtfs / "calendar.txt"
+    if calendar_path.exists():
+        calendar_df = pd.read_csv(calendar_path, dtype=str)
+        calendar_df['start_date'] = calendar_df['start_date'].astype(int)
+        calendar_df['end_date'] = calendar_df['end_date'].astype(int)
+        calendar_df[weekday_col] = calendar_df[weekday_col].astype(int)
+        active_calendar_df = calendar_df.loc[
+            (calendar_df['start_date'] <= SERVICE_DATE)
+            & (calendar_df['end_date'] >= SERVICE_DATE)
+            & (calendar_df[weekday_col] == 1)
+        ]
+        service_ids_set.update(active_calendar_df['service_id'].astype(str).tolist())
+
+    calendar_dates_path = input_gtfs / "calendar_dates.txt"
+    if calendar_dates_path.exists():
+        calendar_dates_df = pd.read_csv(calendar_dates_path, dtype=str)
+        calendar_dates_df['date'] = calendar_dates_df['date'].astype(int)
+        calendar_dates_df['exception_type'] = calendar_dates_df['exception_type'].astype(int)
+        date_exceptions_df = calendar_dates_df.loc[calendar_dates_df['date'] == SERVICE_DATE]
+
+        added_service_ids = set(
+            date_exceptions_df.loc[date_exceptions_df['exception_type'] == 1, 'service_id']
+            .astype(str)
+            .tolist()
+        )
+        removed_service_ids = set(
+            date_exceptions_df.loc[date_exceptions_df['exception_type'] == 2, 'service_id']
+            .astype(str)
+            .tolist()
+        )
+        service_ids_set = (service_ids_set | added_service_ids) - removed_service_ids
+
+    service_ids = sorted(service_ids_set)
+    if len(service_ids) == 0:
+        msg = (
+            f"No active service_ids found for service date {SERVICE_DATE} in {input_gtfs}. "
+            "Check that calendar.txt / calendar_dates.txt cover this date."
+        )
+        raise ValueError(msg)
     
     # Load GTFS model
     gtfs_model = load_feed_from_path(input_gtfs, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
@@ -3617,6 +3663,13 @@ if __name__ == "__main__":
              "simplified step-2a output is used downstream), so it is skipped by "
              "default. Pass this only when you need those original-network diagnostics.",
     )
+    parser.add_argument(
+        "--service-date", type=int, default=20230927, metavar="YYYYMMDD",
+        help="GTFS service date (YYYYMMDD) used in step 5 to select active service_ids "
+             "from the input GTFS feed's calendar.txt/calendar_dates.txt. Default: "
+             "20230927 (the original MTC base-year date). Must be a date covered by "
+             "the input GTFS feed.",
+    )
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
     print(f"args={args}")
@@ -3728,7 +3781,7 @@ if __name__ == "__main__":
         # STEP 5: Prepare GTFS transit data (independent of the roadway network)
         # This also writes the GtfsModel as GTFS
         if start <= 5 <= stop:
-            gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir)
+            gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir, args.service_date)
 
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork.
         # Needs the step-4 roadway network; load it from cache if step 4 was skipped.
