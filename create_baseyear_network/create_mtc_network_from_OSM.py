@@ -3262,14 +3262,20 @@ def step5_prepare_gtfs_transit_data(
     # weekday-based service) and calendar_dates.txt (added/removed exceptions), per
     # the GTFS spec. Some feeds only use calendar.txt, some only calendar_dates.txt,
     # and some use both, so both must be consulted.
+    
+    # calendar.txt has one 0/1 column per weekday named monday..sunday; weekday_col picks
+    # the column matching SERVICE_DATE's day of week (e.g. a Wednesday -> 'wednesday').
     service_date_obj = datetime.datetime.strptime(str(SERVICE_DATE), "%Y%m%d").date()
     weekday_col = service_date_obj.strftime("%A").lower()  # e.g. "wednesday"
-
     service_ids_set = set()
 
+    # Step 1) Base weekly service: a service_id is active on SERVICE_DATE if the date falls
+    # within [start_date, end_date] AND that weekday's column is 1. This is the set of
+    # service_ids that run on this date "by default", before per-date exceptions below.
     calendar_path = input_gtfs / "calendar.txt"
     if calendar_path.exists():
         calendar_df = pd.read_csv(calendar_path, dtype=str)
+        WranglerLogger.debug(f"Read {len(calendar_df):,} rows from {calendar_path}")
         calendar_df['start_date'] = calendar_df['start_date'].astype(int)
         calendar_df['end_date'] = calendar_df['end_date'].astype(int)
         calendar_df[weekday_col] = calendar_df[weekday_col].astype(int)
@@ -3278,11 +3284,24 @@ def step5_prepare_gtfs_transit_data(
             & (calendar_df['end_date'] >= SERVICE_DATE)
             & (calendar_df[weekday_col] == 1)
         ]
+        WranglerLogger.debug(
+            f"{len(active_calendar_df):,} / {len(calendar_df):,} calendar.txt service_ids "
+            f"active on {SERVICE_DATE} ({weekday_col}=1, within start/end date range)"
+        )
         service_ids_set.update(active_calendar_df['service_id'].astype(str).tolist())
+    else:
+        WranglerLogger.debug(f"{calendar_path} not found; skipping base weekly calendar")
 
+    # Step 2) Per-date exceptions, layered on top of (or instead of) calendar.txt. Each row is
+    # scoped to one (service_id, date); exception_type==1 means that service_id runs on
+    # exactly this date even if calendar.txt doesn't cover it or says otherwise (e.g. a
+    # holiday schedule), and exception_type==2 means it does NOT run on this date even if
+    # calendar.txt would otherwise include it (e.g. a calendar.txt service suspended for
+    # one day). Only rows for SERVICE_DATE itself are relevant, hence the date filter.
     calendar_dates_path = input_gtfs / "calendar_dates.txt"
     if calendar_dates_path.exists():
         calendar_dates_df = pd.read_csv(calendar_dates_path, dtype=str)
+        WranglerLogger.debug(f"Read {len(calendar_dates_df):,} rows from {calendar_dates_path}")
         calendar_dates_df['date'] = calendar_dates_df['date'].astype(int)
         calendar_dates_df['exception_type'] = calendar_dates_df['exception_type'].astype(int)
         date_exceptions_df = calendar_dates_df.loc[calendar_dates_df['date'] == SERVICE_DATE]
@@ -3297,9 +3316,23 @@ def step5_prepare_gtfs_transit_data(
             .astype(str)
             .tolist()
         )
+        WranglerLogger.debug(
+            f"calendar_dates.txt exceptions for {SERVICE_DATE}: {len(added_service_ids):,} "
+            f"added (exception_type=1), {len(removed_service_ids):,} removed (exception_type=2)"
+        )
+        # Apply exceptions on top of the base calendar.txt set: union in anything
+        # explicitly added for this date, then subtract anything explicitly removed.
+        # (A well-formed feed won't have the same service_id both added and removed for
+        # the same date, so the order of these two ops doesn't matter in practice.)
         service_ids_set = (service_ids_set | added_service_ids) - removed_service_ids
+    else:
+        WranglerLogger.debug(f"{calendar_dates_path} not found; skipping date exceptions")
 
+    # Final result: every service_id active on SERVICE_DATE, from calendar.txt and/or
+    # calendar_dates.txt (a feed may define service_ids that exist only via exceptions,
+    # i.e. never appear in calendar.txt at all).
     service_ids = sorted(service_ids_set)
+    WranglerLogger.debug(f"Final active service_id count for {SERVICE_DATE}: {len(service_ids):,}")
     if len(service_ids) == 0:
         msg = (
             f"No active service_ids found for service date {SERVICE_DATE} in {input_gtfs}. "
