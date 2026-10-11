@@ -2,6 +2,7 @@
 
 Usage:
     python apply_projects.py sf_demo
+    python apply_projects.py sf_demo --diff "I-80 E bound Bay Bridge road diet (dummy project)"
 
 Looks up <name>.yml in the build_configs/ directory at the repo root.
 """
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import yaml
 from network_wrangler import load_scenario
+from network_wrangler.reporting import apply_project_with_diff
 from projectcard import read_cards
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +21,13 @@ BUILD_CONFIGS_DIR = REPO_ROOT / "build_configs"
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="Name of the build config (without .yml) in build_configs/.")
+    parser.add_argument(
+        "--diff",
+        metavar="PROJECT_NAME",
+        help="Name of a project (as it appears in the project card's 'project' field) to apply "
+        "individually and write a before/after QA/QC diff for, written to "
+        "<out_dir>/diffs/<project_name>/.",
+    )
     return parser.parse_args(argv)
 
 
@@ -41,6 +50,13 @@ def main(argv=None):
 
     # Add projects to the scenario
     scenario.add_project_cards(project_cards.values())
+
+    # Apply the named project individually first and write its before/after diff, so the
+    # queue computed below no longer includes it (avoiding re-applying it a second time).
+    if args.diff:
+        diff_name = args.diff.lower().replace(" ", "_")
+        diff_out_dir = _repo_path(config["out_dir"]) / "diffs" / diff_name
+        apply_project_with_diff(scenario, args.diff, diff_out_dir)
 
     # Check the queue, then apply
     scenario.queued_projects
