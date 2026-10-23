@@ -7,15 +7,11 @@ Usage:
 Looks up <name>.yml in the build_configs/ directory at the repo root.
 """
 import argparse
-from pathlib import Path
 
-import yaml
+from build_config import get_diffs_directory, load_build_config, resolve_repo_path
 from network_wrangler import load_scenario
 from network_wrangler.reporting import apply_project_with_diff
 from projectcard import read_cards
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BUILD_CONFIGS_DIR = REPO_ROOT / "build_configs"
 
 
 def parse_args(argv=None):
@@ -31,22 +27,15 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _repo_path(value: str) -> Path:
-    """Resolve a config path relative to REPO_ROOT if it isn't already absolute."""
-    path = Path(value)
-    return path if path.is_absolute() else REPO_ROOT / path
-
-
 def main(argv=None):
     args = parse_args(argv)
-    config_path = BUILD_CONFIGS_DIR / f"{args.name}.yml"
-    config = yaml.safe_load(config_path.read_text())
+    config = load_build_config(args.name)
 
     # Load the base scenario config
-    scenario = load_scenario(str(_repo_path(config["scenario"])))
+    scenario = load_scenario(str(resolve_repo_path(config["scenario"])))
 
     # Read the project card configs
-    project_cards = read_cards([str(_repo_path(p)) for p in config["project_cards"]])
+    project_cards = read_cards([str(resolve_repo_path(p)) for p in config["project_cards"]])
 
     # Add projects to the scenario
     scenario.add_project_cards(project_cards.values())
@@ -55,7 +44,7 @@ def main(argv=None):
     # queue computed below no longer includes it (avoiding re-applying it a second time).
     if args.diff:
         diff_name = args.diff.lower().replace(" ", "_")
-        diff_out_dir = _repo_path(config["out_dir"]) / "diffs" / diff_name
+        diff_out_dir = get_diffs_directory(config) / diff_name
         apply_project_with_diff(scenario, args.diff, diff_out_dir)
 
     # Check the queue, then apply
@@ -65,7 +54,7 @@ def main(argv=None):
 
     # Write the resulting build scenario to a new directory
     scenario.write(
-        str(_repo_path(config["out_dir"])),
+        str(resolve_repo_path(config["out_dir"])),
         name=config["out_name"],
         overwrite=True,
         roadway_file_format=config.get("roadway_file_format", "geojson"),
