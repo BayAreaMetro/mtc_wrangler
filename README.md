@@ -298,3 +298,28 @@ uv pip install osmium
 This is optional — if pyosmium is not installed the script falls back to the
 `osmium fileinfo` CLI for the timestamp, and then to the file's modification
 time. The extraction step always uses the osmium-tool CLI binary.
+
+## Applying Projects and Reviewing Diffs (`apply_projects.py`, `view_diffs.py`)
+
+`scripts\apply_projects.py` applies the project cards listed in a build config (`build_configs\<name>.yml`) to the base scenario and writes the resulting scenario to the config's `out_dir`. With `--diff`, it also writes a before/after diff for one project, which `scripts\view_diffs.py` opens in a browser.
+
+**1. Write a project's diff**, from the repo root with the uv environment active:
+
+```powershell
+python scripts\apply_projects.py sf_demo --diff "I-80 E bound Bay Bridge road diet (dummy project)"
+```
+
+The name must match the `project` field of the project card. The diff is written to `<out_dir>\diffs\<project name>\`, where the folder name is the project name in lowercase with spaces replaced by underscores. For `sf_demo` that is `output\SanFrancisco\8_build_scenario\diffs\i-80_e_bound_bay_bridge_road_diet_(dummy_project)\`.
+
+- `--diff` takes one project per run. To diff several projects, run the command once per project; each run also rebuilds and rewrites the full scenario in `out_dir`.
+- A project that changes the roadway network writes `roadway_diff.gpkg`. A project that changes the transit network writes `transit_diff_trips.csv`, `transit_diff_frequencies.csv` and `transit_diff.gpkg`.
+
+**2. View the diffs** for a build config:
+
+```powershell
+python scripts\view_diffs.py sf_demo
+```
+
+This opens the viewer on `<out_dir>\diffs`, in your browser (by default at `http://localhost:8501`). Stop it with `Ctrl+C` in the terminal. A **Project** dropdown in the sidebar lists every project diffed so far for that build config, most recently written first, and the page shows a Roadway and/or Transit tab for the selected project.
+
+The viewer itself is part of network_wrangler (`network_wrangler.reporting.viewer`); see the "Review the before/after effect of a single project" section of network_wrangler's `docs\how_to.md` for what the files and the viewer show. Its dependencies (`streamlit` and `streamlit-folium`) are in `environments\uv\requirements.lock`. If `view_diffs.py` reports that the installed network_wrangler does not include the diff viewer, install a network_wrangler checkout that does, in editable mode, as described above.
