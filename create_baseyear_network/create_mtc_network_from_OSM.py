@@ -135,6 +135,42 @@ NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
 
+# OSM highway values that are not drivable. Nodes whose incident edges are ALL of these
+# types get no consolidation buffer in step 2 (see step2_simplify_network_topology), so a
+# dense chain of footpath/stair nodes cannot link one road intersection's cluster to the
+# next. They can still be absorbed into a nearby road node's buffer.
+NON_DRIVE_HIGHWAY_TYPES = frozenset([
+    'footway', 'path', 'steps', 'pedestrian', 'cycleway', 'corridor', 'bridleway',
+    'elevator', 'platform', 'crossing', 'construction', 'proposed', 'planned', 'abandoned',
+])
+
+# OSM highway values that standardize_highway_value() turns into roadway=='service'.
+# Unnamed links of these types are deleted in step 2a, so like NON_DRIVE_HIGHWAY_TYPES
+# they must not position intersections in step 2. ('track' becomes 'service' unless its
+# name ends in Trail/Fire Road, which an unnamed track never does.)
+NAMELESS_DROPPED_HIGHWAY_TYPES = frozenset(['service', 'track', 'services', 'escape'])
+
+
+def _edge_positions_intersections(edge_data: dict) -> bool:
+    """Return True if an OSM edge should give its end nodes a consolidation buffer in step 2.
+
+    An edge qualifies only if it will survive step 2a as a road link: it is not purely
+    non-drivable (NON_DRIVE_HIGHWAY_TYPES) and it is not an unnamed service-type link,
+    which step 2a removes. Busways (service + bus=designated) are kept regardless of name.
+    """
+    highway = edge_data.get('highway')
+    highway_values = [str(h) for h in (highway if isinstance(highway, list) else [highway])]
+    if all(h in NON_DRIVE_HIGHWAY_TYPES for h in highway_values):
+        return False
+    name = edge_data.get('name')
+    names = name if isinstance(name, list) else [name]
+    has_name = any(isinstance(n, str) and n != '' for n in names)
+    is_busway = str(edge_data.get('bus')) == 'designated'
+    if (not has_name) and (not is_busway) and \
+            all(h in NON_DRIVE_HIGHWAY_TYPES or h in NAMELESS_DROPPED_HIGHWAY_TYPES for h in highway_values):
+        return False
+    return True
+
 COUNTY_NAME_TO_GTFS_AGENCIES = {
     models.MTCCounty.ALAMEDA.value: [
         'AC', # AC Transit
@@ -1714,18 +1750,18 @@ def stepa_standardize_attributes(
 
     standardize_highway_value(links_gdf)
     links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
-    links_gdf = handle_links_with_duplicate_A_B(links_gdf)
-    # calculate length (in feet) directly; don't trust the existing value
-    links_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
-    links_gdf['length'] = links_gdf.length
-    links_gdf['distance'] = links_gdf['length']/models.FEET_PER_MILE
-    links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
-    # additional simplifications
+    # Delete links with roadway=='service' and no name.
+    # This MUST run before handle_links_with_duplicate_A_B(). Dedupe keeps one link per
+    # (A,B) and breaks road-type ties by row order, so it can keep an unnamed service link
+    # over a parallel named service road (e.g. Music Concourse Drive in Golden Gate Park);
+    # removing nameless service links afterwards then deletes that direction entirely,
+    # turning a two-way road one-way. Removing them first means dedupe only chooses among
+    # links that will survive. It runs after standardize_lanes_value() so the per-roadway
+    # default lane counts are computed exactly as before.
     # TODO: Be more intelligent about this in the area of transit railway stops?
-    # Delete links with roadway=='service' and no name
-    nameless_service_links_gdf = links_gdf.loc[ 
-        (links_gdf['roadway']=='service') & 
+    nameless_service_links_gdf = links_gdf.loc[
+        (links_gdf['roadway']=='service') &
         (links_gdf['name'].isna() |
          (links_gdf['name']=='')) ]
     WranglerLogger.info(f"Removing {len(nameless_service_links_gdf):,} nameless service links")
@@ -1734,6 +1770,13 @@ def stepa_standardize_attributes(
         (links_gdf['roadway']!='service') |
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
+
+    links_gdf = handle_links_with_duplicate_A_B(links_gdf)
+    # calculate length (in feet) directly; don't trust the existing value
+    links_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
+    links_gdf['length'] = links_gdf.length
+    links_gdf['distance'] = links_gdf['length']/models.FEET_PER_MILE
+    links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # Add MTC facility type field based on OSM roadway classification
     add_facility_type(links_gdf)
@@ -2635,11 +2678,35 @@ def step2_simplify_network_topology(
     # Project to local CRS for accurate distance calculations
     g = osmnx.projection.project_graph(g, to_crs=models.LOCAL_CRS_FEET)
     
-    # Simplify by consolidating intersections
-    WranglerLogger.info(f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet...")
+    # Simplify by consolidating intersections.
+    #
+    # osmnx buffers every node by the tolerance and dissolves overlapping buffers, so
+    # clustering is transitive: any chain of nodes spaced < 2*tolerance apart collapses
+    # into one node regardless of how far the chain runs. Park footpaths, stairs and
+    # campus walkways have exactly that spacing, which pulled road intersections hundreds
+    # of feet off position (e.g. Lincoln Way & 10th Ave in San Francisco merged 55 OSM
+    # nodes and landed 228 ft inside Golden Gate Park).
+    #
+    # Fix: pass a per-node tolerance dict. Only nodes touching at least one drivable edge
+    # are buffered; nodes whose edges are all NON_DRIVE_HIGHWAY_TYPES are left out of the
+    # dict, which osmnx treats as "do not buffer". Those nodes still merge into a road
+    # cluster if they fall inside its buffer, but can no longer bridge two clusters.
+    # Unnamed service roads (driveways, parking aisles) are treated the same way, since
+    # step 2a deletes them; see _edge_positions_intersections().
+    node_tolerance = {}
+    for node_id in g.nodes():
+        for _u, _v, edge_data in list(g.in_edges(node_id, data=True)) + list(g.out_edges(node_id, data=True)):
+            if _edge_positions_intersections(edge_data):
+                node_tolerance[node_id] = NETWORK_SIMPLIFY_TOLERANCE
+                break
+    WranglerLogger.info(
+        f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet on "
+        f"{len(node_tolerance):,} road-touching nodes; "
+        f"{g.number_of_nodes() - len(node_tolerance):,} non-drivable or unnamed-service nodes left unbuffered"
+    )
     simplified_g = osmnx.simplification.consolidate_intersections(
         g,
-        tolerance=NETWORK_SIMPLIFY_TOLERANCE,  # feet
+        tolerance=node_tolerance,  # feet, per node
         rebuild_graph=True,
         dead_ends=True,  # keep dead-ends
         reconnect_edges=True,
