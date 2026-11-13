@@ -317,8 +317,14 @@ ROADWAY_HIERARCHY = [
 #     clean tabular form, and these caches depend only on osmnx/networkx -- NOT
 #     on network_wrangler -- so editing network_wrangler will not corrupt them.
 #   - Wrangler objects (RoadwayNetwork / GtfsModel / TransitNetwork) are NEVER
-#     pickled. They round-trip through the library's own read/write functions so
-#     the cache stays aligned with whatever version of the code is running.
+#     pickled, so the cache stays aligned with whatever version of the code is
+#     running. GtfsModel / TransitNetwork round-trip through the library's own
+#     read/write functions. For a RoadwayNetwork, only its node and link tables are
+#     pickled (plain GeoDataFrames, as in step 2a) and the network object is rebuilt
+#     from them with the library's constructors on load. Pickle is used for the
+#     tables because parquet and geojson cannot hold list-valued columns (e.g. node
+#     link_names): they come back as strings, which silently breaks stop name
+#     matching after a resume.
 #   - Every cache write also writes a "<name>.meta.json" sidecar stamping the
 #     network_wrangler version + git fingerprint. On load, a fingerprint mismatch
 #     logs a visible warning (so you know a cache may be stale after editing
@@ -2783,17 +2789,24 @@ def hack_rename_nodes(roadway_network):
 
     # Add more node rename hacks here as needed
 
+def _roadway_cache_path(output_dir: pathlib.Path, roadway_net_file: str) -> pathlib.Path:
+    """Path of the pickled node/link tables used to resume from a roadway network step."""
+    return output_dir / f"{roadway_net_file}_cache.pkl"
+
+
 def load_cached_mtc_roadway(
         output_dir: pathlib.Path,
         roadway_net_file: str,
 ) -> Optional["models.MTCRoadwayNetwork"]:
     """
-    Load a cached MTCRoadwayNetwork previously written with the given file prefix.
+    Load a cached MTCRoadwayNetwork previously written by ``write_roadway_cache``.
 
-    Reads the parquet (preferred) or geojson node/link files, rebuilds a base
-    RoadwayNetwork via the network_wrangler API, and wraps it as an
-    MTCRoadwayNetwork (validation skipped, since the data was already validated
-    when written).
+    Reads the pickled node and link tables, rebuilds a base RoadwayNetwork via the
+    network_wrangler API, and wraps it as an MTCRoadwayNetwork (validation skipped,
+    since the data was already validated when written).
+
+    The deliverable files (geojson, parquet, hyper) are deliberately not used as a
+    fallback: list-valued columns do not survive them (see the robustness notes above).
 
     Args:
         output_dir: Directory containing the cached files.
@@ -2802,24 +2815,17 @@ def load_cached_mtc_roadway(
     Returns:
         The loaded MTCRoadwayNetwork, or None if no cache is present or it fails to load.
     """
-    node_parquet = output_dir / f"{roadway_net_file}_node.parquet"
-    link_parquet = output_dir / f"{roadway_net_file}_link.parquet"
-    node_geojson = output_dir / f"{roadway_net_file}_node.geojson"
-    link_geojson = output_dir / f"{roadway_net_file}_link.geojson"
+    cache_path = _roadway_cache_path(output_dir, roadway_net_file)
     meta_path = _cache_meta_path(output_dir / roadway_net_file)
+    if not cache_path.exists():
+        WranglerLogger.info(
+            f"No resume cache {cache_path} for roadway network '{roadway_net_file}'; "
+            f"rerun the step that writes it."
+        )
+        return None
     try:
-        if node_parquet.exists():
-            cached_nodes_gdf = read_table(node_parquet)
-            cached_links_gdf = read_table(link_parquet)
-            src = node_parquet
-            src_link = link_parquet
-        elif node_geojson.exists():
-            cached_nodes_gdf = read_table(node_geojson)
-            cached_links_gdf = read_table(link_geojson)
-            src = node_geojson
-            src_link = link_geojson
-        else:
-            return None
+        with open(cache_path, "rb") as f:
+            (cached_links_gdf, cached_nodes_gdf) = pickle.load(f)
 
         shapes_gdf = cached_links_gdf.copy()
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
@@ -2832,12 +2838,12 @@ def load_cached_mtc_roadway(
         check_cache_meta(output_dir / roadway_net_file)
         WranglerLogger.info(
             f"Loaded cached roadway network '{roadway_net_file}' for resume: "
-            f"node={src}, link={src_link}, meta={meta_path} "
+            f"cache={cache_path}, meta={meta_path} "
             f"({len(roadway_network.links_df):,} links, {len(roadway_network.nodes_df):,} nodes)"
         )
         return roadway_network
     except Exception as e:
-        WranglerLogger.debug(f"Could not load cached roadway network '{roadway_net_file}': {e}")
+        WranglerLogger.warning(f"Could not load cached roadway network from {cache_path}: {e}")
         return None
 
 
@@ -2847,14 +2853,15 @@ def write_roadway_cache(
         roadway_net_file: str,
 ) -> bool:
     """
-    Write a reloadable parquet resume-cache of the roadway network.
+    Write a reloadable resume-cache of the roadway network.
 
     This is deliberately independent of the user-requested output formats and of the
-    MTC write-time validation: it dumps the node/link GeoDataFrames straight to the
-    parquet files that ``load_cached_mtc_roadway`` reads back. That way a later
-    ``--start-step`` can always resume, even when a deliverable format (e.g. geojson)
-    fails validation. The cache metadata sidecar is only stamped when the cache is
-    actually written, so a stray ``.meta.json`` never masquerades as a present cache.
+    MTC write-time validation: it pickles the node and link tables (plain GeoDataFrames,
+    not the network object) to the file that ``load_cached_mtc_roadway`` reads back.
+    That way a later ``--start-step`` can always resume, even when a deliverable format
+    (e.g. geojson) fails validation, and every column comes back exactly as it was,
+    including list-valued ones. The cache metadata sidecar is only stamped when the cache
+    is actually written, so a stray ``.meta.json`` never masquerades as a present cache.
 
     Args:
         roadway_network: the network to cache.
@@ -2862,64 +2869,27 @@ def write_roadway_cache(
         roadway_net_file: file prefix, e.g. "3_roadway_network".
 
     Returns:
-        True if the cache (both parquet files) was written successfully.
+        True if the cache was written successfully.
     """
-    node_path = output_dir / f"{roadway_net_file}_node.parquet"
-    link_path = output_dir / f"{roadway_net_file}_link.parquet"
+    cache_path = _roadway_cache_path(output_dir, roadway_net_file)
     meta_path = _cache_meta_path(output_dir / roadway_net_file)
-    def _coerce_object_values_for_parquet(df: pd.DataFrame | gpd.GeoDataFrame) -> tuple[pd.DataFrame | gpd.GeoDataFrame, list[str]]:
-        """Coerce list/dict object values to JSON strings for parquet compatibility."""
-        out = df.copy()
-        coerced_cols: list[str] = []
-        for col in out.columns:
-            # Keep scoped columns untouched so write_table can serialize
-            # their Pydantic models into dict/list structures.
-            if col == "geometry" or col.startswith("sc_") or not pd.api.types.is_object_dtype(out[col]):
-                continue
-
-            sample = out[col].dropna().head(50)
-            if sample.empty:
-                continue
-
-            if sample.apply(lambda v: isinstance(v, (list, tuple, dict, set))).any():
-                out[col] = out[col].apply(
-                    lambda v: json.dumps(v, default=str) if isinstance(v, (list, tuple, dict, set)) else v
-                )
-                coerced_cols.append(col)
-        return out, coerced_cols
-
     try:
-        nodes_gdf = roadway_network.nodes_df
-        links_gdf = roadway_network.links_df
-        if not isinstance(nodes_gdf, gpd.GeoDataFrame):
-            nodes_gdf = gpd.GeoDataFrame(nodes_gdf, geometry="geometry")
-        if not isinstance(links_gdf, gpd.GeoDataFrame):
-            links_gdf = gpd.GeoDataFrame(links_gdf, geometry="geometry")
-
-        nodes_for_cache, node_coerced_cols = _coerce_object_values_for_parquet(nodes_gdf)
-        links_for_cache, link_coerced_cols = _coerce_object_values_for_parquet(links_gdf)
-        if node_coerced_cols or link_coerced_cols:
-            WranglerLogger.info(
-                f"Parquet cache coercion for '{roadway_net_file}': "
-                f"node_cols={node_coerced_cols or 'none'}, link_cols={link_coerced_cols or 'none'}"
-            )
-
-        # Use wrangler's writer so scoped Pydantic values in sc_* columns are
-        # converted to parquet-safe dict/list representations before serialization.
-        write_table(nodes_for_cache, node_path, overwrite=True)
-        write_table(links_for_cache, link_path, overwrite=True)
+        # plain (Geo)DataFrames, so the pickle does not depend on network_wrangler classes
+        nodes_gdf = gpd.GeoDataFrame(roadway_network.nodes_df, geometry="geometry")
+        links_gdf = gpd.GeoDataFrame(roadway_network.links_df, geometry="geometry")
+        with open(cache_path, "wb") as f:
+            pickle.dump((links_gdf, nodes_gdf), f)
 
         write_cache_meta(output_dir / roadway_net_file)
         WranglerLogger.info(
             f"Cached roadway network '{roadway_net_file}' for resume: "
-            f"node={node_path}, link={link_path}, meta={meta_path} "
-            f"({len(links_for_cache):,} links, {len(nodes_for_cache):,} nodes)"
+            f"cache={cache_path}, meta={meta_path} "
+            f"({len(links_gdf):,} links, {len(nodes_gdf):,} nodes)"
         )
         return True
     except Exception as e:
         WranglerLogger.error(
-            f"Failed to write resume cache '{roadway_net_file}' to parquet "
-            f"(node={node_path}, link={link_path}): {e}. "
+            f"Failed to write resume cache '{roadway_net_file}' to {cache_path}: {e}. "
             f"A later --start-step will not be able to resume from this step."
         )
         return False
@@ -3038,7 +3008,7 @@ def step3_assign_county_node_link_numbering(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
-    # Always write a dedicated parquet resume-cache (independent of the deliverable
+    # Always write a dedicated pickle resume-cache (independent of the deliverable
     # formats above and of MTC write-time validation) so --start-step can resume.
     write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     WranglerLogger.info(f"Created roadway network with {len(roadway_network.links_df)} links and {len(roadway_network.nodes_df)} nodes")
@@ -3237,7 +3207,7 @@ def step4_add_centroids_and_connectors(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
-    # Always write a dedicated parquet resume-cache (independent of the deliverable
+    # Always write a dedicated pickle resume-cache (independent of the deliverable
     # formats above and of MTC write-time validation) so --start-step can resume.
     write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     return roadway_network
@@ -3625,7 +3595,8 @@ def step6_create_transit_network(
             WranglerLogger.info(f"Wrote roadway network with transit in {roadway_format} format")
         except Exception as e:
             WranglerLogger.warning(f"Error writing roadway network in {roadway_format}: {e}")
-    write_cache_meta(output_dir / roadway_net_file)
+    # resume cache for step 7 (also stamps the cache metadata)
+    write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     
     # Create transit network
     transit_network = load_transit(feed=feed)
