@@ -2874,7 +2874,9 @@ def write_roadway_cache(
     cache_path = _roadway_cache_path(output_dir, roadway_net_file)
     meta_path = _cache_meta_path(output_dir / roadway_net_file)
     try:
-        # plain (Geo)DataFrames, so the pickle does not depend on network_wrangler classes
+        # plain (Geo)DataFrames rather than the network object. The tables still hold a few
+        # enum values (e.g. tolltype is models.MTCTollType), so those enums must be
+        # importable, and unchanged in name, to load the cache.
         nodes_gdf = gpd.GeoDataFrame(roadway_network.nodes_df, geometry="geometry")
         links_gdf = gpd.GeoDataFrame(roadway_network.links_df, geometry="geometry")
         with open(cache_path, "wb") as f:
