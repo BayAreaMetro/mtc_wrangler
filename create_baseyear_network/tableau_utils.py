@@ -195,6 +195,9 @@ def write_geodataframe_as_tableau_hyper(in_gdf, filename, tablename):
             table_def.add_column(col, tableauhyperapi.SqlType.double())
             inserter_definition.append(tableauhyperapi.TableDefinition.Column(
                 name=col, type=tableauhyperapi.SqlType.double()))
+            # insert missing values as NULL; a float NaN would be stored as NaN, which Tableau
+            # shows as "nan" rather than Null
+            gdf[col] = gdf[col].astype(object).where(gdf[col].notna(), None)
         else:
             table_def.add_column(col, tableauhyperapi.SqlType.text())
             inserter_definition.append(tableauhyperapi.TableDefinition.Column(
