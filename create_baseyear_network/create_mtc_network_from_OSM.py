@@ -3617,6 +3617,18 @@ def step6_create_transit_network(
 
     # Construct links from transit network shape points
     shape_links_gdf = transit_network.feed.shapes.sort_values(by=["shape_id","shape_pt_sequence"]).reset_index(drop=True)
+    # Identify the stop-to-stop leg of every shape point: stop_sequence is only set on stop points,
+    # so fill it forward along the shape. trip_id + leg_stop_sequence then identifies a leg.
+    shape_links_gdf["leg_stop_sequence"] = pd.to_numeric(shape_links_gdf["stop_sequence"], errors="coerce")
+    shape_links_gdf["leg_stop_sequence"] = shape_links_gdf.groupby("shape_id")["leg_stop_sequence"].ffill()
+    # The routing QA columns are per leg and only set on the leg's first stop point. Copy them to
+    # every point of the leg so a whole leg can be colored on a map. As a result, summing them
+    # over links counts each leg once per link; for totals use the rows with stop_sequence set.
+    for leg_qa_col in ["leg_shape_distance", "leg_off_route_distance"]:
+        if leg_qa_col in shape_links_gdf.columns:
+            shape_links_gdf[leg_qa_col] = shape_links_gdf.groupby(
+                ["shape_id", "leg_stop_sequence"], dropna=False
+            )[leg_qa_col].transform("first")
     shape_links_gdf["next_shape_model_node_id"] = shape_links_gdf.groupby("shape_id")["shape_model_node_id"].shift(-1)
     shape_links_gdf["next_shape_pt_sequence"] = shape_links_gdf.groupby("shape_id")["shape_pt_sequence"].shift(-1)
     # Filter to only rows that have a next node (excludes last point of each shape)
