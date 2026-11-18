@@ -36,12 +36,30 @@ References:
   * network_wrangler\\notebook\\Create Network from OSM.ipynb
 
 Usage:
-    python create_mtc_network_from_OSM.py <county> <input_gtfs> <output_dir> <output_format> [--trace-shape-ids <shape_id1> <shape_id2> ...]
+    python create_mtc_network_from_OSM.py <county> <input_gtfs> <output_dir> <output_format> [<output_format> ...]
+        [--service-date YYYYMMDD] [--start-step N] [--stop-step N] [--force-step S [S ...]] [--run-1a]
+        [--trace-shape-ids <shape_id1> <shape_id2> ...]
 
     where <county> is one of:
     - 'Bay Area' (entire 9-county region)
     - Individual county names: 'San Francisco', 'San Mateo', 'Santa Clara',
       'Alameda', 'Contra Costa', 'Solano', 'Napa', 'Sonoma', 'Marin'
+
+    <input_gtfs> is the directory with the 511 regional GTFS feed files.
+
+    <output_dir> is the parent directory for all geographies. Files are written to
+    <output_dir>/<county without spaces>/, e.g. ../../output_from_OSM/SantaClara.
+
+    <output_format> is one or more of: parquet hyper geojson gpkg. Prefer 'geojson hyper':
+    parquet cannot write the list-valued OSM tag columns that simplification produces.
+
+Service date:
+    Step 5 keeps only the GTFS services active on --service-date, using calendar.txt and
+    calendar_dates.txt. The default, 20230927, only suits the September 2023 feed; for any
+    other feed pass a date that the feed covers, or step 5 stops with no active service_ids.
+    Pick a typical midweek day on which every agency has service. A regional feed can lack
+    calendars for dates before it was published: in the 2026-10-06 feed, Wed 2026-10-14 has
+    service for all 41 agencies while Wed 2026-09-23 has none for two of them.
 
 Caching / fast iteration:
     Every expensive step writes its result to <output_dir>/<county>/ and reloads it
@@ -61,10 +79,19 @@ Caching / fast iteration:
     be stale after editing network_wrangler (use --force-step to rebuild it).
 
 Example:
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet hyper
-    python create_mtc_network_from_OSM.py "Santa Clara" ../../511gtfs_2023-09 ../../output_from_OSM/SantaClara parquet --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --force-step 6
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --stop-step 6
+    The October 2026 feed is the currently recommended input because it includes the full
+    GTFS fare files (fare_products.txt, fare_leg_rules.txt, fare_transfer_rules.txt,
+    fare_media.txt, rider_categories.txt, areas.txt, stop_areas.txt). This script does not
+    use them yet, but it will; the September 2023 feed does not have them.
+
+    # full run, one county, 2026 feed
+    python create_mtc_network_from_OSM.py "Santa Clara" ../../2026-10-06-GTFSTransitData_RG ../../output_from_OSM geojson hyper --service-date 20261014
+    # rerun only step 6 (transit), recomputing it even though it is cached
+    python create_mtc_network_from_OSM.py "Santa Clara" ../../2026-10-06-GTFSTransitData_RG ../../output_from_OSM geojson hyper --service-date 20261014 --start-step 6 --stop-step 6 --force-step 6
+    # September 2023 feed (the default service date, 20230927, applies)
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM geojson hyper
+    # trace the routing of specific shapes (shape_ids from the feed in use) in the debug log
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM geojson hyper --start-step 6 --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
 
     python create_mtc_network_from_OSM.py "Bay Area" M:\\Data\\Transit\\511\\2023-09 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20230927
     python create_mtc_network_from_OSM.py "San Francisco" M:\\Data\\Transit\\511\\2026-09-11-GTFSTransitData_RG 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20260909
