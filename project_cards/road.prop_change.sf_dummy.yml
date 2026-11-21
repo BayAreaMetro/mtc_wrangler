@@ -1,13 +1,31 @@
-project: I-80 E bound Bay Bridge road diet (dummy project)
+project: I-80 W bound Bay Bridge AM peak bus lane (dummy project)
 tags:
    - 'example'
 roadway_property_change:
   facility:
     links:
       osm_link_id:
-        - '[50690291, 179235221, 661905446]'
+        - '[1343738800, 8921938]'
   property_changes:
-    lanes:  #change number of lanes 5 to 4
-      existing: 5
-      change: -1
-notes: Simple roadway project example to demo project card workflow
+    ML_lanes:  # a managed lane that only exists in the AM peak
+      set: 0
+      scoped:
+        - timespan: ['06:00', '10:00']  # MTC AM period, when westbound traffic is heaviest
+          set: 1
+    ML_bus_only:  # the managed lane is for buses only (numeric, as for bus_only in the base network)
+      set: 1
+    lanes:  # one general purpose lane becomes the managed lane in the AM peak
+      existing: 4
+      set: 4
+      scoped:
+        - timespan: ['06:00', '10:00']
+          set: 3
+notes: >-
+  Dedicates one lane of westbound I-80 on the Bay Bridge west of Treasure Isaland to buses 
+  during the AM peak (06:00-10:00), when westbound traffic is heaviest. Outside the AM peak 
+  the lane stays a general purpose lane. The lane is added as a bus-only managed lane (ML_lanes, ML_bus_only)
+  and one general purpose lane is removed for the same period (scoped lanes), so the AM peak 
+  reallocates a lane rather than adding capacity. The Cube network converter does not subtract 
+  managed lanes from general purpose lanes itself, so this card does; remove the lanes change 
+  if the converter is later updated to do so. Companion to the Route 25 AM peak frequency 
+  increase project.
