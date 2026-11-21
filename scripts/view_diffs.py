@@ -6,7 +6,8 @@ Usage:
 
 Looks up <name>.yml in the build_configs/ directory at the repo root, then opens the viewer on
 <out_dir>/diffs, where `apply_projects.py <name> --diff "<project name>"` writes each project's
-before/after diff.
+before/after diff. The build config's project cards are given to the viewer, which shows each
+project's card beside its diff.
 
 Requires the `viewer` dependencies (streamlit, streamlit-folium) and a network_wrangler that
 includes `network_wrangler.reporting.viewer`.
@@ -14,12 +15,13 @@ includes `network_wrangler.reporting.viewer`.
 import argparse
 from pathlib import Path
 
-from build_config import get_diffs_directory, load_build_config
+from build_config import get_diffs_directory, load_build_config, resolve_repo_path
 
 __all__ = [
     # Building blocks
     "parse_args",
     "find_diffs_directory",
+    "find_project_card_files",
     # Entry point
     "main",
 ]
@@ -64,6 +66,25 @@ def find_diffs_directory(build_config_name: str) -> Path:
     return diffs_directory
 
 
+def find_project_card_files(build_config_name: str) -> list[Path]:
+    """Locates the project card files listed in a build config.
+
+    Args:
+        build_config_name: name of the build config (without .yml) in build_configs/.
+
+    Returns:
+        Absolute paths to the build config's `project_cards`, in the order listed.
+
+    Raises:
+        ValueError: If the build config does not exist.
+
+    See Also:
+        find_diffs_directory: locates the diffs these cards produced.
+    """
+    build_config = load_build_config(build_config_name)
+    return [resolve_repo_path(card_file) for card_file in build_config["project_cards"]]
+
+
 def main(argv=None):
     """Opens the project diff viewer on a build config's diffs, until the viewer is stopped.
 
@@ -79,9 +100,11 @@ def main(argv=None):
 
     See Also:
         find_diffs_directory: locates the folder this function opens.
+        find_project_card_files: locates the cards shown beside each diff.
     """
     args = parse_args(argv)
     diffs_directory = find_diffs_directory(args.name)
+    project_card_files = find_project_card_files(args.name)
 
     try:
         from network_wrangler.reporting.viewer.__main__ import main as launch_viewer
@@ -94,7 +117,7 @@ def main(argv=None):
         )
         raise ImportError(msg) from error
 
-    launch_viewer([str(diffs_directory)])
+    launch_viewer([str(diffs_directory), "--project-cards", *map(str, project_card_files)])
 
 
 if __name__ == "__main__":
