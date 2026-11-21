@@ -36,12 +36,30 @@ References:
   * network_wrangler\\notebook\\Create Network from OSM.ipynb
 
 Usage:
-    python create_mtc_network_from_OSM.py <county> <input_gtfs> <output_dir> <output_format> [--trace-shape-ids <shape_id1> <shape_id2> ...]
+    python create_mtc_network_from_OSM.py <county> <input_gtfs> <output_dir> <output_format> [<output_format> ...]
+        [--service-date YYYYMMDD] [--start-step N] [--stop-step N] [--force-step S [S ...]] [--run-1a]
+        [--trace-shape-ids <shape_id1> <shape_id2> ...]
 
     where <county> is one of:
     - 'Bay Area' (entire 9-county region)
     - Individual county names: 'San Francisco', 'San Mateo', 'Santa Clara',
       'Alameda', 'Contra Costa', 'Solano', 'Napa', 'Sonoma', 'Marin'
+
+    <input_gtfs> is the directory with the 511 regional GTFS feed files.
+
+    <output_dir> is the parent directory for all geographies. Files are written to
+    <output_dir>/<county without spaces>/, e.g. ../../output_from_OSM/SantaClara.
+
+    <output_format> is one or more of: parquet hyper geojson gpkg. Prefer 'geojson hyper':
+    parquet cannot write the list-valued OSM tag columns that simplification produces.
+
+Service date:
+    Step 5 keeps only the GTFS services active on --service-date, using calendar.txt and
+    calendar_dates.txt. The default, 20230927, only suits the September 2023 feed; for any
+    other feed pass a date that the feed covers, or step 5 stops with no active service_ids.
+    Pick a typical midweek day on which every agency has service. A regional feed can lack
+    calendars for dates before it was published: in the 2026-10-06 feed, Wed 2026-10-14 has
+    service for all 41 agencies while Wed 2026-09-23 has none for two of them.
 
 Caching / fast iteration:
     Every expensive step writes its result to <output_dir>/<county>/ and reloads it
@@ -61,11 +79,23 @@ Caching / fast iteration:
     be stale after editing network_wrangler (use --force-step to rebuild it).
 
 Example:
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet hyper
-    python create_mtc_network_from_OSM.py "Santa Clara" ../../511gtfs_2023-09 ../../output_from_OSM/SantaClara parquet --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --force-step 6
-    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM/SanFrancisco parquet --start-step 6 --stop-step 6
-"""
+    The October 2026 feed is the currently recommended input because it includes the full
+    GTFS fare files (fare_products.txt, fare_leg_rules.txt, fare_transfer_rules.txt,
+    fare_media.txt, rider_categories.txt, areas.txt, stop_areas.txt). This script does not
+    use them yet, but it will; the September 2023 feed does not have them.
+
+    # full run, one county, 2026 feed
+    python create_mtc_network_from_OSM.py "Santa Clara" ../../2026-10-06-GTFSTransitData_RG ../../output_from_OSM geojson hyper --service-date 20261014
+    # rerun only step 6 (transit), recomputing it even though it is cached
+    python create_mtc_network_from_OSM.py "Santa Clara" ../../2026-10-06-GTFSTransitData_RG ../../output_from_OSM geojson hyper --service-date 20261014 --start-step 6 --stop-step 6 --force-step 6
+    # September 2023 feed (the default service date, 20230927, applies)
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM geojson hyper
+    # trace the routing of specific shapes (shape_ids from the feed in use) in the debug log
+    python create_mtc_network_from_OSM.py "San Francisco" ../../511gtfs_2023-09 ../../output_from_OSM geojson hyper --start-step 6 --trace-shape-ids "SF:366:20230930" "SF:2808:20230930"
+
+    python create_mtc_network_from_OSM.py "Bay Area" M:\\Data\\Transit\\511\\2023-09 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20230927
+    python create_mtc_network_from_OSM.py "San Francisco" M:\\Data\\Transit\\511\\2026-09-11-GTFSTransitData_RG 'M:\\Development\\Travel Model Two\\Supply\\Network Creation 2025\\from_OSM' hyper geojson --service-date 20260909
+    """
 
 USAGE = __doc__
 import argparse
@@ -75,6 +105,7 @@ import pathlib
 import pickle
 import pprint
 import requests
+import shlex
 import statistics
 import subprocess
 import sys
@@ -130,6 +161,42 @@ warnings.filterwarnings('ignore',
 NOW = f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 NETWORK_SIMPLIFY_TOLERANCE = 30 # feet
+
+# OSM highway values that are not drivable. Nodes whose incident edges are ALL of these
+# types get no consolidation buffer in step 2 (see step2_simplify_network_topology), so a
+# dense chain of footpath/stair nodes cannot link one road intersection's cluster to the
+# next. They can still be absorbed into a nearby road node's buffer.
+NON_DRIVE_HIGHWAY_TYPES = frozenset([
+    'footway', 'path', 'steps', 'pedestrian', 'cycleway', 'corridor', 'bridleway',
+    'elevator', 'platform', 'crossing', 'construction', 'proposed', 'planned', 'abandoned',
+])
+
+# OSM highway values that standardize_highway_value() turns into roadway=='service'.
+# Unnamed links of these types are deleted in step 2a, so like NON_DRIVE_HIGHWAY_TYPES
+# they must not position intersections in step 2. ('track' becomes 'service' unless its
+# name ends in Trail/Fire Road, which an unnamed track never does.)
+NAMELESS_DROPPED_HIGHWAY_TYPES = frozenset(['service', 'track', 'services', 'escape'])
+
+
+def _edge_positions_intersections(edge_data: dict) -> bool:
+    """Return True if an OSM edge should give its end nodes a consolidation buffer in step 2.
+
+    An edge qualifies only if it will survive step 2a as a road link: it is not purely
+    non-drivable (NON_DRIVE_HIGHWAY_TYPES) and it is not an unnamed service-type link,
+    which step 2a removes. Busways (service + bus=designated) are kept regardless of name.
+    """
+    highway = edge_data.get('highway')
+    highway_values = [str(h) for h in (highway if isinstance(highway, list) else [highway])]
+    if all(h in NON_DRIVE_HIGHWAY_TYPES for h in highway_values):
+        return False
+    name = edge_data.get('name')
+    names = name if isinstance(name, list) else [name]
+    has_name = any(isinstance(n, str) and n != '' for n in names)
+    is_busway = str(edge_data.get('bus')) == 'designated'
+    if (not has_name) and (not is_busway) and \
+            all(h in NON_DRIVE_HIGHWAY_TYPES or h in NAMELESS_DROPPED_HIGHWAY_TYPES for h in highway_values):
+        return False
+    return True
 
 COUNTY_NAME_TO_GTFS_AGENCIES = {
     models.MTCCounty.ALAMEDA.value: [
@@ -277,8 +344,14 @@ ROADWAY_HIERARCHY = [
 #     clean tabular form, and these caches depend only on osmnx/networkx -- NOT
 #     on network_wrangler -- so editing network_wrangler will not corrupt them.
 #   - Wrangler objects (RoadwayNetwork / GtfsModel / TransitNetwork) are NEVER
-#     pickled. They round-trip through the library's own read/write functions so
-#     the cache stays aligned with whatever version of the code is running.
+#     pickled, so the cache stays aligned with whatever version of the code is
+#     running. GtfsModel / TransitNetwork round-trip through the library's own
+#     read/write functions. For a RoadwayNetwork, only its node and link tables are
+#     pickled (plain GeoDataFrames, as in step 2a) and the network object is rebuilt
+#     from them with the library's constructors on load. Pickle is used for the
+#     tables because parquet and geojson cannot hold list-valued columns (e.g. node
+#     link_names): they come back as strings, which silently breaks stop name
+#     matching after a resume.
 #   - Every cache write also writes a "<name>.meta.json" sidecar stamping the
 #     network_wrangler version + git fingerprint. On load, a fingerprint mismatch
 #     logs a visible warning (so you know a cache may be stale after editing
@@ -1710,18 +1783,18 @@ def stepa_standardize_attributes(
 
     standardize_highway_value(links_gdf)
     links_gdf = standardize_lanes_value(links_gdf, trace_tuple=(1002230,1011140))
-    links_gdf = handle_links_with_duplicate_A_B(links_gdf)
-    # calculate length (in feet) directly; don't trust the existing value
-    links_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
-    links_gdf['length'] = links_gdf.length
-    links_gdf['distance'] = links_gdf['length']/models.FEET_PER_MILE
-    links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
-    # additional simplifications
+    # Delete links with roadway=='service' and no name.
+    # This MUST run before handle_links_with_duplicate_A_B(). Dedupe keeps one link per
+    # (A,B) and breaks road-type ties by row order, so it can keep an unnamed service link
+    # over a parallel named service road (e.g. Music Concourse Drive in Golden Gate Park);
+    # removing nameless service links afterwards then deletes that direction entirely,
+    # turning a two-way road one-way. Removing them first means dedupe only chooses among
+    # links that will survive. It runs after standardize_lanes_value() so the per-roadway
+    # default lane counts are computed exactly as before.
     # TODO: Be more intelligent about this in the area of transit railway stops?
-    # Delete links with roadway=='service' and no name
-    nameless_service_links_gdf = links_gdf.loc[ 
-        (links_gdf['roadway']=='service') & 
+    nameless_service_links_gdf = links_gdf.loc[
+        (links_gdf['roadway']=='service') &
         (links_gdf['name'].isna() |
          (links_gdf['name']=='')) ]
     WranglerLogger.info(f"Removing {len(nameless_service_links_gdf):,} nameless service links")
@@ -1730,6 +1803,13 @@ def stepa_standardize_attributes(
         (links_gdf['roadway']!='service') |
         (links_gdf['name'].notna() &
          (links_gdf['name']!=''))]
+
+    links_gdf = handle_links_with_duplicate_A_B(links_gdf)
+    # calculate length (in feet) directly; don't trust the existing value
+    links_gdf.to_crs(models.LOCAL_CRS_FEET, inplace=True)
+    links_gdf['length'] = links_gdf.length
+    links_gdf['distance'] = links_gdf['length']/models.FEET_PER_MILE
+    links_gdf.to_crs(LAT_LON_CRS, inplace=True)
 
     # Add MTC facility type field based on OSM roadway classification
     add_facility_type(links_gdf)
@@ -2631,11 +2711,35 @@ def step2_simplify_network_topology(
     # Project to local CRS for accurate distance calculations
     g = osmnx.projection.project_graph(g, to_crs=models.LOCAL_CRS_FEET)
     
-    # Simplify by consolidating intersections
-    WranglerLogger.info(f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet...")
+    # Simplify by consolidating intersections.
+    #
+    # osmnx buffers every node by the tolerance and dissolves overlapping buffers, so
+    # clustering is transitive: any chain of nodes spaced < 2*tolerance apart collapses
+    # into one node regardless of how far the chain runs. Park footpaths, stairs and
+    # campus walkways have exactly that spacing, which pulled road intersections hundreds
+    # of feet off position (e.g. Lincoln Way & 10th Ave in San Francisco merged 55 OSM
+    # nodes and landed 228 ft inside Golden Gate Park).
+    #
+    # Fix: pass a per-node tolerance dict. Only nodes touching at least one drivable edge
+    # are buffered; nodes whose edges are all NON_DRIVE_HIGHWAY_TYPES are left out of the
+    # dict, which osmnx treats as "do not buffer". Those nodes still merge into a road
+    # cluster if they fall inside its buffer, but can no longer bridge two clusters.
+    # Unnamed service roads (driveways, parking aisles) are treated the same way, since
+    # step 2a deletes them; see _edge_positions_intersections().
+    node_tolerance = {}
+    for node_id in g.nodes():
+        for _u, _v, edge_data in list(g.in_edges(node_id, data=True)) + list(g.out_edges(node_id, data=True)):
+            if _edge_positions_intersections(edge_data):
+                node_tolerance[node_id] = NETWORK_SIMPLIFY_TOLERANCE
+                break
+    WranglerLogger.info(
+        f"Simplifying with tolerance={NETWORK_SIMPLIFY_TOLERANCE} feet on "
+        f"{len(node_tolerance):,} road-touching nodes; "
+        f"{g.number_of_nodes() - len(node_tolerance):,} non-drivable or unnamed-service nodes left unbuffered"
+    )
     simplified_g = osmnx.simplification.consolidate_intersections(
         g,
-        tolerance=NETWORK_SIMPLIFY_TOLERANCE,  # feet
+        tolerance=node_tolerance,  # feet, per node
         rebuild_graph=True,
         dead_ends=True,  # keep dead-ends
         reconnect_edges=True,
@@ -2712,17 +2816,24 @@ def hack_rename_nodes(roadway_network):
 
     # Add more node rename hacks here as needed
 
+def _roadway_cache_path(output_dir: pathlib.Path, roadway_net_file: str) -> pathlib.Path:
+    """Path of the pickled node/link tables used to resume from a roadway network step."""
+    return output_dir / f"{roadway_net_file}_cache.pkl"
+
+
 def load_cached_mtc_roadway(
         output_dir: pathlib.Path,
         roadway_net_file: str,
 ) -> Optional["models.MTCRoadwayNetwork"]:
     """
-    Load a cached MTCRoadwayNetwork previously written with the given file prefix.
+    Load a cached MTCRoadwayNetwork previously written by ``write_roadway_cache``.
 
-    Reads the parquet (preferred) or geojson node/link files, rebuilds a base
-    RoadwayNetwork via the network_wrangler API, and wraps it as an
-    MTCRoadwayNetwork (validation skipped, since the data was already validated
-    when written).
+    Reads the pickled node and link tables, rebuilds a base RoadwayNetwork via the
+    network_wrangler API, and wraps it as an MTCRoadwayNetwork (validation skipped,
+    since the data was already validated when written).
+
+    The deliverable files (geojson, parquet, hyper) are deliberately not used as a
+    fallback: list-valued columns do not survive them (see the robustness notes above).
 
     Args:
         output_dir: Directory containing the cached files.
@@ -2731,24 +2842,17 @@ def load_cached_mtc_roadway(
     Returns:
         The loaded MTCRoadwayNetwork, or None if no cache is present or it fails to load.
     """
-    node_parquet = output_dir / f"{roadway_net_file}_node.parquet"
-    link_parquet = output_dir / f"{roadway_net_file}_link.parquet"
-    node_geojson = output_dir / f"{roadway_net_file}_node.geojson"
-    link_geojson = output_dir / f"{roadway_net_file}_link.geojson"
+    cache_path = _roadway_cache_path(output_dir, roadway_net_file)
     meta_path = _cache_meta_path(output_dir / roadway_net_file)
+    if not cache_path.exists():
+        WranglerLogger.info(
+            f"No resume cache {cache_path} for roadway network '{roadway_net_file}'; "
+            f"rerun the step that writes it."
+        )
+        return None
     try:
-        if node_parquet.exists():
-            cached_nodes_gdf = read_table(node_parquet)
-            cached_links_gdf = read_table(link_parquet)
-            src = node_parquet
-            src_link = link_parquet
-        elif node_geojson.exists():
-            cached_nodes_gdf = read_table(node_geojson)
-            cached_links_gdf = read_table(link_geojson)
-            src = node_geojson
-            src_link = link_geojson
-        else:
-            return None
+        with open(cache_path, "rb") as f:
+            (cached_links_gdf, cached_nodes_gdf) = pickle.load(f)
 
         shapes_gdf = cached_links_gdf.copy()
         base_network = load_roadway_from_dataframes(cached_links_gdf, cached_nodes_gdf, shapes_gdf)
@@ -2761,12 +2865,12 @@ def load_cached_mtc_roadway(
         check_cache_meta(output_dir / roadway_net_file)
         WranglerLogger.info(
             f"Loaded cached roadway network '{roadway_net_file}' for resume: "
-            f"node={src}, link={src_link}, meta={meta_path} "
+            f"cache={cache_path}, meta={meta_path} "
             f"({len(roadway_network.links_df):,} links, {len(roadway_network.nodes_df):,} nodes)"
         )
         return roadway_network
     except Exception as e:
-        WranglerLogger.debug(f"Could not load cached roadway network '{roadway_net_file}': {e}")
+        WranglerLogger.warning(f"Could not load cached roadway network from {cache_path}: {e}")
         return None
 
 
@@ -2776,14 +2880,15 @@ def write_roadway_cache(
         roadway_net_file: str,
 ) -> bool:
     """
-    Write a reloadable parquet resume-cache of the roadway network.
+    Write a reloadable resume-cache of the roadway network.
 
     This is deliberately independent of the user-requested output formats and of the
-    MTC write-time validation: it dumps the node/link GeoDataFrames straight to the
-    parquet files that ``load_cached_mtc_roadway`` reads back. That way a later
-    ``--start-step`` can always resume, even when a deliverable format (e.g. geojson)
-    fails validation. The cache metadata sidecar is only stamped when the cache is
-    actually written, so a stray ``.meta.json`` never masquerades as a present cache.
+    MTC write-time validation: it pickles the node and link tables (plain GeoDataFrames,
+    not the network object) to the file that ``load_cached_mtc_roadway`` reads back.
+    That way a later ``--start-step`` can always resume, even when a deliverable format
+    (e.g. geojson) fails validation, and every column comes back exactly as it was,
+    including list-valued ones. The cache metadata sidecar is only stamped when the cache
+    is actually written, so a stray ``.meta.json`` never masquerades as a present cache.
 
     Args:
         roadway_network: the network to cache.
@@ -2791,64 +2896,29 @@ def write_roadway_cache(
         roadway_net_file: file prefix, e.g. "3_roadway_network".
 
     Returns:
-        True if the cache (both parquet files) was written successfully.
+        True if the cache was written successfully.
     """
-    node_path = output_dir / f"{roadway_net_file}_node.parquet"
-    link_path = output_dir / f"{roadway_net_file}_link.parquet"
+    cache_path = _roadway_cache_path(output_dir, roadway_net_file)
     meta_path = _cache_meta_path(output_dir / roadway_net_file)
-    def _coerce_object_values_for_parquet(df: pd.DataFrame | gpd.GeoDataFrame) -> tuple[pd.DataFrame | gpd.GeoDataFrame, list[str]]:
-        """Coerce list/dict object values to JSON strings for parquet compatibility."""
-        out = df.copy()
-        coerced_cols: list[str] = []
-        for col in out.columns:
-            # Keep scoped columns untouched so write_table can serialize
-            # their Pydantic models into dict/list structures.
-            if col == "geometry" or col.startswith("sc_") or not pd.api.types.is_object_dtype(out[col]):
-                continue
-
-            sample = out[col].dropna().head(50)
-            if sample.empty:
-                continue
-
-            if sample.apply(lambda v: isinstance(v, (list, tuple, dict, set))).any():
-                out[col] = out[col].apply(
-                    lambda v: json.dumps(v, default=str) if isinstance(v, (list, tuple, dict, set)) else v
-                )
-                coerced_cols.append(col)
-        return out, coerced_cols
-
     try:
-        nodes_gdf = roadway_network.nodes_df
-        links_gdf = roadway_network.links_df
-        if not isinstance(nodes_gdf, gpd.GeoDataFrame):
-            nodes_gdf = gpd.GeoDataFrame(nodes_gdf, geometry="geometry")
-        if not isinstance(links_gdf, gpd.GeoDataFrame):
-            links_gdf = gpd.GeoDataFrame(links_gdf, geometry="geometry")
-
-        nodes_for_cache, node_coerced_cols = _coerce_object_values_for_parquet(nodes_gdf)
-        links_for_cache, link_coerced_cols = _coerce_object_values_for_parquet(links_gdf)
-        if node_coerced_cols or link_coerced_cols:
-            WranglerLogger.info(
-                f"Parquet cache coercion for '{roadway_net_file}': "
-                f"node_cols={node_coerced_cols or 'none'}, link_cols={link_coerced_cols or 'none'}"
-            )
-
-        # Use wrangler's writer so scoped Pydantic values in sc_* columns are
-        # converted to parquet-safe dict/list representations before serialization.
-        write_table(nodes_for_cache, node_path, overwrite=True)
-        write_table(links_for_cache, link_path, overwrite=True)
+        # plain (Geo)DataFrames rather than the network object. The tables still hold a few
+        # enum values (e.g. tolltype is models.MTCTollType), so those enums must be
+        # importable, and unchanged in name, to load the cache.
+        nodes_gdf = gpd.GeoDataFrame(roadway_network.nodes_df, geometry="geometry")
+        links_gdf = gpd.GeoDataFrame(roadway_network.links_df, geometry="geometry")
+        with open(cache_path, "wb") as f:
+            pickle.dump((links_gdf, nodes_gdf), f)
 
         write_cache_meta(output_dir / roadway_net_file)
         WranglerLogger.info(
             f"Cached roadway network '{roadway_net_file}' for resume: "
-            f"node={node_path}, link={link_path}, meta={meta_path} "
-            f"({len(links_for_cache):,} links, {len(nodes_for_cache):,} nodes)"
+            f"cache={cache_path}, meta={meta_path} "
+            f"({len(links_gdf):,} links, {len(nodes_gdf):,} nodes)"
         )
         return True
     except Exception as e:
         WranglerLogger.error(
-            f"Failed to write resume cache '{roadway_net_file}' to parquet "
-            f"(node={node_path}, link={link_path}): {e}. "
+            f"Failed to write resume cache '{roadway_net_file}' to {cache_path}: {e}. "
             f"A later --start-step will not be able to resume from this step."
         )
         return False
@@ -2967,7 +3037,7 @@ def step3_assign_county_node_link_numbering(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
-    # Always write a dedicated parquet resume-cache (independent of the deliverable
+    # Always write a dedicated pickle resume-cache (independent of the deliverable
     # formats above and of MTC write-time validation) so --start-step can resume.
     write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     WranglerLogger.info(f"Created roadway network with {len(roadway_network.links_df)} links and {len(roadway_network.nodes_df)} nodes")
@@ -3166,7 +3236,7 @@ def step4_add_centroids_and_connectors(
         except Exception as e:
             WranglerLogger.error(f"Error writing roadway network in {roadway_format}: {e}")
 
-    # Always write a dedicated parquet resume-cache (independent of the deliverable
+    # Always write a dedicated pickle resume-cache (independent of the deliverable
     # formats above and of MTC write-time validation) so --start-step can resume.
     write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     return roadway_network
@@ -3220,7 +3290,8 @@ def step5_prepare_gtfs_transit_data(
         county: str,
         input_gtfs: pathlib.Path,
         output_dir: pathlib.Path,
-        base_output_dir: pathlib.Path
+        base_output_dir: pathlib.Path,
+        service_date: int = 20230927,
 ) -> GtfsModel:
     """
     Step 5: Prepare GTFS transit data for integration: filter to service date and relevant operators
@@ -3233,6 +3304,7 @@ def step5_prepare_gtfs_transit_data(
         input_gtfs: Path to input GTFS data
         output_dir: County-specific output directory
         base_output_dir: Base directory for shared resources (county shapefiles)
+        service_date: GTFS service date (YYYYMMDD) to filter the feed to
 
     Returns:
         Filtered GTFS model object
@@ -3249,16 +3321,90 @@ def step5_prepare_gtfs_transit_data(
             return cached
     
     # Load and filter GTFS data
-    WranglerLogger.info("Loading GTFS feed for September 27, 2023...")
+    SERVICE_DATE = service_date
+    WranglerLogger.info(f"Loading GTFS feed for service date {SERVICE_DATE}...")
+
+    # Determine active service_ids for SERVICE_DATE using both calendar.txt (regular
+    # weekday-based service) and calendar_dates.txt (added/removed exceptions), per
+    # the GTFS spec. Some feeds only use calendar.txt, some only calendar_dates.txt,
+    # and some use both, so both must be consulted.
     
-    # Filter to specific service date
-    calendar_dates_df = pd.read_csv(input_gtfs / "calendar_dates.txt")
-    calendar_dates_df = calendar_dates_df.loc[
-        (calendar_dates_df.date == 20230927) & (calendar_dates_df.exception_type == 1)
-    ]
-    calendar_dates_df['service_id'] = calendar_dates_df['service_id'].astype(str)
-    service_ids_df = calendar_dates_df[['service_id']].drop_duplicates().reset_index(drop=True)
-    service_ids = service_ids_df['service_id'].tolist()
+    # calendar.txt has one 0/1 column per weekday named monday..sunday; weekday_col picks
+    # the column matching SERVICE_DATE's day of week (e.g. a Wednesday -> 'wednesday').
+    service_date_obj = datetime.datetime.strptime(str(SERVICE_DATE), "%Y%m%d").date()
+    weekday_col = service_date_obj.strftime("%A").lower()  # e.g. "wednesday"
+    service_ids_set = set()
+
+    # Step 1) Base weekly service: a service_id is active on SERVICE_DATE if the date falls
+    # within [start_date, end_date] AND that weekday's column is 1. This is the set of
+    # service_ids that run on this date "by default", before per-date exceptions below.
+    calendar_path = input_gtfs / "calendar.txt"
+    if calendar_path.exists():
+        calendar_df = pd.read_csv(calendar_path, dtype=str)
+        WranglerLogger.debug(f"Read {len(calendar_df):,} rows from {calendar_path}")
+        calendar_df['start_date'] = calendar_df['start_date'].astype(int)
+        calendar_df['end_date'] = calendar_df['end_date'].astype(int)
+        calendar_df[weekday_col] = calendar_df[weekday_col].astype(int)
+        active_calendar_df = calendar_df.loc[
+            (calendar_df['start_date'] <= SERVICE_DATE)
+            & (calendar_df['end_date'] >= SERVICE_DATE)
+            & (calendar_df[weekday_col] == 1)
+        ]
+        WranglerLogger.debug(
+            f"{len(active_calendar_df):,} / {len(calendar_df):,} calendar.txt service_ids "
+            f"active on {SERVICE_DATE} ({weekday_col}=1, within start/end date range)"
+        )
+        service_ids_set.update(active_calendar_df['service_id'].astype(str).tolist())
+    else:
+        WranglerLogger.debug(f"{calendar_path} not found; skipping base weekly calendar")
+
+    # Step 2) Per-date exceptions, layered on top of (or instead of) calendar.txt. Each row is
+    # scoped to one (service_id, date); exception_type==1 means that service_id runs on
+    # exactly this date even if calendar.txt doesn't cover it or says otherwise (e.g. a
+    # holiday schedule), and exception_type==2 means it does NOT run on this date even if
+    # calendar.txt would otherwise include it (e.g. a calendar.txt service suspended for
+    # one day). Only rows for SERVICE_DATE itself are relevant, hence the date filter.
+    calendar_dates_path = input_gtfs / "calendar_dates.txt"
+    if calendar_dates_path.exists():
+        calendar_dates_df = pd.read_csv(calendar_dates_path, dtype=str)
+        WranglerLogger.debug(f"Read {len(calendar_dates_df):,} rows from {calendar_dates_path}")
+        calendar_dates_df['date'] = calendar_dates_df['date'].astype(int)
+        calendar_dates_df['exception_type'] = calendar_dates_df['exception_type'].astype(int)
+        date_exceptions_df = calendar_dates_df.loc[calendar_dates_df['date'] == SERVICE_DATE]
+
+        added_service_ids = set(
+            date_exceptions_df.loc[date_exceptions_df['exception_type'] == 1, 'service_id']
+            .astype(str)
+            .tolist()
+        )
+        removed_service_ids = set(
+            date_exceptions_df.loc[date_exceptions_df['exception_type'] == 2, 'service_id']
+            .astype(str)
+            .tolist()
+        )
+        WranglerLogger.debug(
+            f"calendar_dates.txt exceptions for {SERVICE_DATE}: {len(added_service_ids):,} "
+            f"added (exception_type=1), {len(removed_service_ids):,} removed (exception_type=2)"
+        )
+        # Apply exceptions on top of the base calendar.txt set: union in anything
+        # explicitly added for this date, then subtract anything explicitly removed.
+        # (A well-formed feed won't have the same service_id both added and removed for
+        # the same date, so the order of these two ops doesn't matter in practice.)
+        service_ids_set = (service_ids_set | added_service_ids) - removed_service_ids
+    else:
+        WranglerLogger.debug(f"{calendar_dates_path} not found; skipping date exceptions")
+
+    # Final result: every service_id active on SERVICE_DATE, from calendar.txt and/or
+    # calendar_dates.txt (a feed may define service_ids that exist only via exceptions,
+    # i.e. never appear in calendar.txt at all).
+    service_ids = sorted(service_ids_set)
+    WranglerLogger.debug(f"Final active service_id count for {SERVICE_DATE}: {len(service_ids):,}")
+    if len(service_ids) == 0:
+        msg = (
+            f"No active service_ids found for service date {SERVICE_DATE} in {input_gtfs}. "
+            "Check that calendar.txt / calendar_dates.txt cover this date."
+        )
+        raise ValueError(msg)
     
     # Load GTFS model
     gtfs_model = load_feed_from_path(input_gtfs, wrangler_flavored=False, service_ids_filter=service_ids, low_memory=False)
@@ -3478,7 +3624,8 @@ def step6_create_transit_network(
             WranglerLogger.info(f"Wrote roadway network with transit in {roadway_format} format")
         except Exception as e:
             WranglerLogger.warning(f"Error writing roadway network in {roadway_format}: {e}")
-    write_cache_meta(output_dir / roadway_net_file)
+    # resume cache for step 7 (also stamps the cache metadata)
+    write_roadway_cache(roadway_network, output_dir, roadway_net_file)
     
     # Create transit network
     transit_network = load_transit(feed=feed)
@@ -3497,6 +3644,18 @@ def step6_create_transit_network(
 
     # Construct links from transit network shape points
     shape_links_gdf = transit_network.feed.shapes.sort_values(by=["shape_id","shape_pt_sequence"]).reset_index(drop=True)
+    # Identify the stop-to-stop leg of every shape point: stop_sequence is only set on stop points,
+    # so fill it forward along the shape. trip_id + leg_stop_sequence then identifies a leg.
+    shape_links_gdf["leg_stop_sequence"] = pd.to_numeric(shape_links_gdf["stop_sequence"], errors="coerce")
+    shape_links_gdf["leg_stop_sequence"] = shape_links_gdf.groupby("shape_id")["leg_stop_sequence"].ffill()
+    # The routing QA columns are per leg and only set on the leg's first stop point. Copy them to
+    # every point of the leg so a whole leg can be colored on a map. As a result, summing them
+    # over links counts each leg once per link; for totals use the rows with stop_sequence set.
+    for leg_qa_col in ["leg_shape_distance", "leg_off_route_distance"]:
+        if leg_qa_col in shape_links_gdf.columns:
+            shape_links_gdf[leg_qa_col] = shape_links_gdf.groupby(
+                ["shape_id", "leg_stop_sequence"], dropna=False
+            )[leg_qa_col].transform("first")
     shape_links_gdf["next_shape_model_node_id"] = shape_links_gdf.groupby("shape_id")["shape_model_node_id"].shift(-1)
     shape_links_gdf["next_shape_pt_sequence"] = shape_links_gdf.groupby("shape_id")["shape_pt_sequence"].shift(-1)
     # Filter to only rows that have a next node (excludes last point of each shape)
@@ -3617,6 +3776,13 @@ if __name__ == "__main__":
              "simplified step-2a output is used downstream), so it is skipped by "
              "default. Pass this only when you need those original-network diagnostics.",
     )
+    parser.add_argument(
+        "--service-date", type=int, default=20230927, metavar="YYYYMMDD",
+        help="GTFS service date (YYYYMMDD) used in step 5 to select active service_ids "
+             "from the input GTFS feed's calendar.txt/calendar_dates.txt. Default: "
+             "20230927 (the original MTC base-year date). Must be a date covered by "
+             "the input GTFS feed.",
+    )
     args = parser.parse_args()
     args.county_no_spaces = args.county.replace(" ","") # remove spaces
     print(f"args={args}")
@@ -3653,6 +3819,7 @@ if __name__ == "__main__":
     )
     WranglerLogger.info(f"Starting 7-step network creation workflow for {args.county}")
     WranglerLogger.info(f"Created by {__file__}")
+    WranglerLogger.info(f"Command: {sys.executable} {shlex.join(sys.argv)}")
     WranglerLogger.info(f"start_step={_START_STEP}, stop_step={_STOP_STEP}, force_steps={sorted(_FORCE_STEPS) if _FORCE_STEPS else 'none'}")
 
     # For now, doing drive as we'll add handle transit and walk/bike separately
@@ -3728,7 +3895,7 @@ if __name__ == "__main__":
         # STEP 5: Prepare GTFS transit data (independent of the roadway network)
         # This also writes the GtfsModel as GTFS
         if start <= 5 <= stop:
-            gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir)
+            gtfs_model = step5_prepare_gtfs_transit_data(args.county, args.input_gtfs, output_dir, base_output_dir, args.service_date)
 
         # STEP 6: Create TransitNetwork by integrating GtfsModel with RoadwayNetwork.
         # Needs the step-4 roadway network; load it from cache if step 4 was skipped.
