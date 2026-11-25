@@ -3651,7 +3651,12 @@ def step6_create_transit_network(
     # The routing QA columns are per leg and only set on the leg's first stop point. Copy them to
     # every point of the leg so a whole leg can be colored on a map. As a result, summing them
     # over links counts each leg once per link; for totals use the rows with stop_sequence set.
-    for leg_qa_col in ["leg_shape_distance", "leg_off_route_distance"]:
+    for leg_qa_col in [
+        "leg_shape_distance",
+        "leg_off_route_distance",
+        "leg_routing_method",
+        "leg_corridor_width",
+    ]:
         if leg_qa_col in shape_links_gdf.columns:
             shape_links_gdf[leg_qa_col] = shape_links_gdf.groupby(
                 ["shape_id", "leg_stop_sequence"], dropna=False
